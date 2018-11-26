@@ -30,7 +30,6 @@ import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.*;
-import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.QueryState;
@@ -41,7 +40,7 @@ import org.apache.cassandra.utils.SemanticVersion;
 
 public class QueryProcessor
 {
-    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.0.1");
+    public static final SemanticVersion CQL_VERSION = new SemanticVersion("3.1.0");
 
     private static final Logger logger = LoggerFactory.getLogger(QueryProcessor.class);
 
@@ -85,10 +84,10 @@ public class QueryProcessor
     {
         for (ByteBuffer name : columns)
         {
-            if (name.remaining() > IColumn.MAX_NAME_LENGTH)
+            if (name.remaining() > Column.MAX_NAME_LENGTH)
                 throw new InvalidRequestException(String.format("column name is too long (%s > %s)",
                                                                 name.remaining(),
-                                                                IColumn.MAX_NAME_LENGTH));
+                                                                Column.MAX_NAME_LENGTH));
             if (name.remaining() == 0)
                 throw new InvalidRequestException("zero-length column name");
         }
@@ -114,8 +113,7 @@ public class QueryProcessor
     {
         try
         {
-            AbstractType<?> comparator = metadata.getComparatorFor(null);
-            ColumnSlice.validate(range.slices, comparator, range.reversed);
+            ColumnSlice.validate(range.slices, metadata.comparator, range.reversed);
         }
         catch (IllegalArgumentException e)
         {
@@ -181,7 +179,7 @@ public class QueryProcessor
         }
         catch (RequestValidationException e)
         {
-            throw new AssertionError(e);
+            throw new RuntimeException("Error validating " + query, e);
         }
     }
 

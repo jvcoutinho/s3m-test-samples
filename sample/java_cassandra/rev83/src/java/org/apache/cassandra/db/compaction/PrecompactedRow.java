@@ -121,7 +121,7 @@ public class PrecompactedRow extends AbstractCompactedRow
             else
             {
                 // addAll is ok even if cf is an ArrayBackedSortedColumns
-                cf.addAllWithSizeDelta(thisCF, HeapAllocator.instance, Functions.<IColumn>identity(), indexer);
+                cf.addAllWithSizeDelta(thisCF, HeapAllocator.instance, Functions.<Column>identity(), indexer);
             }
         }
         return cf;
@@ -131,7 +131,7 @@ public class PrecompactedRow extends AbstractCompactedRow
     {
         assert compactedCf != null;
         DataOutputBuffer buffer = new DataOutputBuffer();
-        ColumnIndex.Builder builder = new ColumnIndex.Builder(compactedCf, key.key, compactedCf.getColumnCount(), buffer);
+        ColumnIndex.Builder builder = new ColumnIndex.Builder(compactedCf, key.key, buffer);
         columnIndex = builder.build(compactedCf);
 
         TypeSizes typeSizes = TypeSizes.NATIVE;

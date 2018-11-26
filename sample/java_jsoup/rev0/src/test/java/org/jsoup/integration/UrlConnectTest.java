@@ -13,8 +13,8 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.hamcrest.core.Is.is;
+import static org.junit.Assert.*;
 
 /**
  Tests the URL connection. Not enabled by default, so tests don't require network connection.
@@ -270,6 +270,27 @@ public class UrlConnectTest {
         assertEquals(actualDocText, unlimitedRes.parse().text().length());
     }
 
+    /**
+     * Verify that security disabling feature works properly.
+     *
+     * 1. try to hit url with invalid certificate and evaluate that exception is thrown
+     * 2. disable security checks and call the same url to verify that content is consumed correctly
+     *
+     * @throws Exception
+     */
+    @Test
+    public void testUnsafe() throws Exception {
+        String url = "https://certs.cac.washington.edu/CAtest/";
+
+        try {
+            Jsoup.connect(url).execute();
+        } catch (IOException e) {
+//          that's expected exception
+        }
+        Connection.Response  defaultRes = Jsoup.connect(url).setSecure(false).execute();
+        assertThat(defaultRes.statusCode(),is(200));
+    }
+
     @Test
     public void shouldWorkForCharsetInExtraAttribute() throws IOException {
         Connection.Response res = Jsoup.connect("https://www.creditmutuel.com/groupe/fr/").execute();
@@ -308,5 +329,4 @@ public class UrlConnectTest {
         Document doc = res.parse(); // would throw an error if charset unsupported
         assertEquals("ISO-8859-1", res.charset());
     }
-
 }

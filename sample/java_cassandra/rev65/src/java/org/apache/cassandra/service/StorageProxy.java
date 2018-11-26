@@ -17,7 +17,6 @@
  */
 package org.apache.cassandra.service;
 
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
@@ -31,6 +30,7 @@ import javax.management.ObjectName;
 
 import com.google.common.base.Function;
 import com.google.common.collect.*;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,13 +39,12 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.config.ReadRepairDecision;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.filter.IDiskAtomFilter;
-import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.filter.NamesQueryFilter;
 import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.dht.AbstractBounds;
@@ -55,23 +54,23 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.Gossiper;
-import org.apache.cassandra.io.util.FastByteArrayOutputStream;
+import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.metrics.ClientRequestMetrics;
 import org.apache.cassandra.metrics.ReadRepairMetrics;
 import org.apache.cassandra.net.*;
+import org.apache.cassandra.service.paxos.*;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.triggers.TriggerExecutor;
+import org.apache.cassandra.utils.*;
 
 public class StorageProxy implements StorageProxyMBean
 {
     public static final String MBEAN_NAME = "org.apache.cassandra.db:type=StorageProxy";
     private static final Logger logger = LoggerFactory.getLogger(StorageProxy.class);
-    private static final boolean OPTIMIZE_LOCAL_REQUESTS = true; // set to false to test messagingservice path on single node
+    static final boolean OPTIMIZE_LOCAL_REQUESTS = true; // set to false to test messagingservice path on single node
 
     public static final String UNREACHABLE = "UNREACHABLE";
 
@@ -81,6 +80,8 @@ public class StorageProxy implements StorageProxyMBean
 
     public static final StorageProxy instance = new StorageProxy();
 
+    private static volatile boolean hintedHandoffEnabled = DatabaseDescriptor.hintedHandoffEnabled();
+    private static volatile int maxHintWindow = DatabaseDescriptor.getMaxHintWindow();
     private static volatile int maxHintsInProgress = 1024 * FBUtilities.getAvailableProcessors();
     private static final AtomicInteger totalHintsInProgress = new AtomicInteger();
     private static final Map<InetAddress, AtomicInteger> hintsInProgress = new MapMaker().concurrencyLevel(1).makeComputingMap(new Function<InetAddress, AtomicInteger>()
@@ -116,7 +117,7 @@ public class StorageProxy implements StorageProxyMBean
                               AbstractWriteResponseHandler responseHandler,
                               String localDataCenter,
                               ConsistencyLevel consistency_level)
-            throws IOException, OverloadedException
+            throws OverloadedException
             {
                 assert mutation instanceof RowMutation;
                 sendToHintedEndpoints((RowMutation) mutation, targets, responseHandler, localDataCenter, consistency_level);
@@ -136,7 +137,6 @@ public class StorageProxy implements StorageProxyMBean
                               AbstractWriteResponseHandler responseHandler,
                               String localDataCenter,
                               ConsistencyLevel consistency_level)
-            throws IOException
             {
                 Runnable runnable = counterWriteTask(mutation, targets, responseHandler, localDataCenter, consistency_level);
                 runnable.run();
@@ -150,12 +150,263 @@ public class StorageProxy implements StorageProxyMBean
                               AbstractWriteResponseHandler responseHandler,
                               String localDataCenter,
                               ConsistencyLevel consistency_level)
-            throws IOException
             {
                 Runnable runnable = counterWriteTask(mutation, targets, responseHandler, localDataCenter, consistency_level);
                 StageManager.getStage(Stage.MUTATION).execute(runnable);
             }
         };
+    }
+
+    /**
+     * Apply @param updates if and only if the current values in the row for @param key
+     * match the ones given by @param old.  The algorithm is "raw" Paxos: that is, Paxos
+     * minus leader election -- any node in the cluster may propose changes for any row,
+     * which (that is, the row) is the unit of values being proposed, not single columns.
+     *
+     * The Paxos cohort is only the replicas for the given key, not the entire cluster.
+     * So we expect performance to be reasonable, but CAS is still intended to be used
+     * "when you really need it," not for all your updates.
+     *
+     * There are three phases to Paxos:
+     *  1. Prepare: the coordinator generates a ballot (timeUUID in our case) and asks replicas to (a) promise
+     *     not to accept updates from older ballots and (b) tell us about the most recent update it has already
+     *     accepted.
+     *  2. Accept: if a majority of replicas reply, the coordinator asks replicas to accept the value of the
+     *     highest proposal ballot it heard about, or a new value if no in-progress proposals were reported.
+     *  3. Commit (Learn): if a majority of replicas acknowledge the accept request, we can commit the new
+     *     value.
+     *
+     *  Commit procedure is not covered in "Paxos Made Simple," and only briefly mentioned in "Paxos Made Live,"
+     *  so here is our approach:
+     *   3a. The coordinator sends a commit message to all replicas with the ballot and value.
+     *   3b. Because of 1-2, this will be the highest-seen commit ballot.  The replicas will note that,
+     *       and send it with subsequent promise replies.  This allows us to discard acceptance records
+     *       for successfully committed replicas, without allowing incomplete proposals to commit erroneously
+     *       later on.
+     *
+     *  Note that since we are performing a CAS rather than a simple update, we perform a read (of committed
+     *  values) between the prepare and accept phases.  This gives us a slightly longer window for another
+     *  coordinator to come along and trump our own promise with a newer one but is otherwise safe.
+     *
+     * @return true if the operation succeeds in updating the row
+     */
+    public static boolean cas(String table, String cfName, ByteBuffer key, ColumnFamily expected, ColumnFamily updates, ConsistencyLevel consistencyLevel)
+    throws UnavailableException, IsBootstrappingException, ReadTimeoutException, WriteTimeoutException, InvalidRequestException
+    {
+        consistencyLevel.validateForCas(table);
+
+        CFMetaData metadata = Schema.instance.getCFMetaData(table, cfName);
+
+        long start = System.nanoTime();
+        long timeout = TimeUnit.MILLISECONDS.toNanos(DatabaseDescriptor.getCasContentionTimeout());
+        while (System.nanoTime() - start < timeout)
+        {
+            // for simplicity, we'll do a single liveness check at the start of each attempt
+            Pair<List<InetAddress>, Integer> p = getPaxosParticipants(table, key);
+            List<InetAddress> liveEndpoints = p.left;
+            int requiredParticipants = p.right;
+
+            UUID ballot = beginAndRepairPaxos(key, metadata, liveEndpoints, requiredParticipants);
+            if (ballot == null)
+                continue;
+
+            // read the current value and compare with expected
+            Tracing.trace("Reading existing values for CAS precondition");
+            ReadCommand readCommand = expected == null
+                                    ? new SliceFromReadCommand(table, key, cfName, new SliceQueryFilter(ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1))
+                                    : new SliceByNamesReadCommand(table, key, cfName, new NamesQueryFilter(ImmutableSortedSet.copyOf(expected.getColumnNames())));
+            List<Row> rows = read(Arrays.asList(readCommand), ConsistencyLevel.QUORUM);
+            ColumnFamily current = rows.get(0).cf;
+            if (!casApplies(expected, current))
+            {
+                Tracing.trace("CAS precondition {} does not match current values {}", expected, current);
+                return false;
+            }
+
+            // finish the paxos round w/ the desired updates
+            // TODO turn null updates into delete?
+            Commit proposal = Commit.newProposal(key, ballot, updates);
+            Tracing.trace("CAS precondition is met; proposing client-requested updates for {}", ballot);
+            if (proposePaxos(proposal, liveEndpoints, requiredParticipants))
+            {
+                if (consistencyLevel == ConsistencyLevel.SERIAL)
+                    sendCommit(proposal, liveEndpoints);
+                else
+                    commitPaxos(proposal, consistencyLevel);
+                Tracing.trace("CAS successful");
+                return true;
+            }
+
+            Tracing.trace("Paxos proposal not accepted (pre-empted by a higher ballot)");
+            Uninterruptibles.sleepUninterruptibly(FBUtilities.threadLocalRandom().nextInt(100), TimeUnit.MILLISECONDS);
+            // continue to retry
+        }
+
+        throw new WriteTimeoutException(WriteType.CAS, ConsistencyLevel.SERIAL, -1, -1);
+    }
+
+    private static boolean hasLiveColumns(ColumnFamily cf)
+    {
+        return cf != null && !cf.hasOnlyTombstones();
+    }
+
+    private static boolean casApplies(ColumnFamily expected, ColumnFamily current)
+    {
+        if (!hasLiveColumns(expected))
+            return !hasLiveColumns(current);
+        else if (!hasLiveColumns(current))
+            return false;
+
+        // current has been built from expected, so we know that it can't have columns
+        // that excepted don't have. So we just check that for each columns in expected:
+        //   - if it is a tombstone, whether current has no column or a tombstone;
+        //   - otherwise, that current has a live column with the same value.
+        for (Column e : expected)
+        {
+            Column c = current.getColumn(e.name());
+            if (e.isLive())
+            {
+                if (!(c != null && c.isLive() && c.value().equals(e.value())))
+                    return false;
+            }
+            else
+            {
+                if (c != null && c.isLive())
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private static Pair<List<InetAddress>, Integer> getPaxosParticipants(String table, ByteBuffer key) throws UnavailableException
+    {
+        Token tk = StorageService.getPartitioner().getToken(key);
+        List<InetAddress> naturalEndpoints = StorageService.instance.getNaturalEndpoints(table, tk);
+        Collection<InetAddress> pendingEndpoints = StorageService.instance.getTokenMetadata().pendingEndpointsFor(tk, table);
+        int requiredParticipants = pendingEndpoints.size() + 1 + naturalEndpoints.size() / 2; // See CASSANDRA-833
+        List<InetAddress> liveEndpoints = ImmutableList.copyOf(Iterables.filter(Iterables.concat(naturalEndpoints, pendingEndpoints), IAsyncCallback.isAlive));
+        if (liveEndpoints.size() < requiredParticipants)
+            throw new UnavailableException(ConsistencyLevel.SERIAL, requiredParticipants, liveEndpoints.size());
+        return Pair.create(liveEndpoints, requiredParticipants);
+    }
+
+    /**
+     * begin a Paxos session by sending a prepare request and completing any in-progress requests seen in the replies
+     *
+     * @return the Paxos ballot promised by the replicas if no in-progress requests were seen and a quorum of
+     * nodes have seen the mostRecentCommit.  Otherwise, return null.
+     */
+    private static UUID beginAndRepairPaxos(ByteBuffer key, CFMetaData metadata, List<InetAddress> liveEndpoints, int requiredParticipants)
+    throws WriteTimeoutException
+    {
+        UUID ballot = UUIDGen.getTimeUUID();
+
+        // prepare
+        Tracing.trace("Preparing {}", ballot);
+        Commit toPrepare = Commit.newPrepare(key, metadata, ballot);
+        PrepareCallback summary = preparePaxos(toPrepare, liveEndpoints, requiredParticipants);
+        if (!summary.promised)
+        {
+            Tracing.trace("Some replicas have already promised a higher ballot than ours; aborting");
+            // sleep a random amount to give the other proposer a chance to finish
+            Uninterruptibles.sleepUninterruptibly(FBUtilities.threadLocalRandom().nextInt(100), TimeUnit.MILLISECONDS);
+            return null;
+        }
+
+        Commit inProgress = summary.inProgressCommit;
+        Commit mostRecent = summary.mostRecentCommit;
+
+        // If we have an in-progress ballot greater than the MRC we know, then it's an in-progress round that
+        // needs to be completed, so do it.
+        if (!inProgress.update.isEmpty() && inProgress.isAfter(mostRecent))
+        {
+            Tracing.trace("Finishing incomplete paxos round {}", inProgress);
+            if (proposePaxos(inProgress, liveEndpoints, requiredParticipants))
+            {
+                try
+                {
+                    commitPaxos(inProgress, ConsistencyLevel.QUORUM);
+                }
+                catch (WriteTimeoutException e)
+                {
+                    // let caller retry or turn it into a cas timeout, since it's someone elses' write we're applying
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        // To be able to propose our value on a new round, we need a quorum of replica to have learn the previous one. Why is explained at:
+        // https://issues.apache.org/jira/browse/CASSANDRA-5062?focusedCommentId=13619810&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-13619810)
+        // Since we waited for quorum nodes, if some of them haven't seen the last commit (which may just be a timing issue, but may also
+        // mean we lost messages), we pro-actively "repair" those nodes, and retry.
+        Iterable<InetAddress> missingMRC = summary.replicasMissingMostRecentCommit();
+        if (Iterables.size(missingMRC) > 0)
+        {
+            Tracing.trace("Repairing replicas that missed the most recent commit");
+            sendCommit(mostRecent, missingMRC);
+            // TODO: provided commits don't invalid the prepare we just did above (which they don't), we could just wait
+            // for all the missingMRC to acknowledge this commit and then move on with proposing our value. But that means
+            // adding the ability to have commitPaxos block, which is exactly CASSANDRA-5442 will do. So once we have that
+            // latter ticket, we can pass CL.ALL to the commit above and remove the 'continue'.
+            return null;
+        }
+
+        return ballot;
+    }
+
+    /**
+     * Unlike commitPaxos, this does not wait for replies
+     */
+    private static void sendCommit(Commit commit, Iterable<InetAddress> replicas)
+    {
+        MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_COMMIT, commit, Commit.serializer);
+        for (InetAddress target : replicas)
+            MessagingService.instance().sendOneWay(message, target);
+    }
+
+    private static PrepareCallback preparePaxos(Commit toPrepare, List<InetAddress> endpoints, int requiredParticipants)
+    throws WriteTimeoutException
+    {
+        PrepareCallback callback = new PrepareCallback(toPrepare.key, toPrepare.update.metadata(), requiredParticipants);
+        MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_PREPARE, toPrepare, Commit.serializer);
+        for (InetAddress target : endpoints)
+            MessagingService.instance().sendRR(message, target, callback);
+        callback.await();
+        return callback;
+    }
+
+    private static boolean proposePaxos(Commit proposal, List<InetAddress> endpoints, int requiredParticipants)
+    throws WriteTimeoutException
+    {
+        ProposeCallback callback = new ProposeCallback(requiredParticipants);
+        MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_PROPOSE, proposal, Commit.serializer);
+        for (InetAddress target : endpoints)
+            MessagingService.instance().sendRR(message, target, callback);
+        callback.await();
+
+        return callback.getSuccessful() >= requiredParticipants;
+    }
+
+    private static void commitPaxos(Commit proposal, ConsistencyLevel consistencyLevel) throws WriteTimeoutException
+    {
+        Table table = Table.open(proposal.update.metadata().ksName);
+
+        Token tk = StorageService.getPartitioner().getToken(proposal.key);
+        List<InetAddress> naturalEndpoints = StorageService.instance.getNaturalEndpoints(table.getName(), tk);
+        Collection<InetAddress> pendingEndpoints = StorageService.instance.getTokenMetadata().pendingEndpointsFor(tk, table.getName());
+
+        AbstractReplicationStrategy rs = table.getReplicationStrategy();
+        AbstractWriteResponseHandler responseHandler = rs.getWriteResponseHandler(naturalEndpoints, pendingEndpoints, consistencyLevel, null, WriteType.SIMPLE);
+
+        MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_COMMIT, proposal, Commit.serializer);
+        for (InetAddress destination : Iterables.concat(naturalEndpoints, pendingEndpoints))
+        {
+            if (FailureDetector.instance.isAlive(destination))
+                MessagingService.instance().sendRR(message, destination, responseHandler);
+        }
+
+        responseHandler.get();
     }
 
     /**
@@ -176,12 +427,10 @@ public class StorageProxy implements StorageProxyMBean
         long startTime = System.nanoTime();
         List<AbstractWriteResponseHandler> responseHandlers = new ArrayList<AbstractWriteResponseHandler>(mutations.size());
 
-        IMutation mostRecentMutation = null;
         try
         {
             for (IMutation mutation : mutations)
             {
-                mostRecentMutation = mutation;
                 if (mutation instanceof CounterMutation)
                 {
                     responseHandlers.add(mutateCounter((CounterMutation)mutation, localDataCenter));
@@ -227,14 +476,26 @@ public class StorageProxy implements StorageProxyMBean
             Tracing.trace("Overloaded");
             throw e;
         }
-        catch (IOException e)
-        {
-            assert mostRecentMutation != null;
-            throw new RuntimeException("error writing key " + ByteBufferUtil.bytesToHex(mostRecentMutation.key()), e);
-        }
         finally
         {
             writeMetrics.addNano(System.nanoTime() - startTime);
+        }
+    }
+
+    public static void mutateWithTriggers(Collection<? extends IMutation> mutations, ConsistencyLevel consistencyLevel, boolean mutateAtomically) throws WriteTimeoutException, UnavailableException,
+            OverloadedException, InvalidRequestException
+    {
+        Collection<RowMutation> tmutations = TriggerExecutor.instance.execute(mutations);
+        if (mutateAtomically || tmutations != null)
+        {
+            Collection<RowMutation> allMutations = (Collection<RowMutation>) mutations;
+            if (tmutations != null)
+                allMutations.addAll(tmutations);
+            StorageProxy.mutateAtomically(allMutations, consistencyLevel);
+        }
+        else
+        {
+            StorageProxy.mutate(mutations, consistencyLevel);
         }
     }
 
@@ -314,14 +575,15 @@ public class StorageProxy implements StorageProxyMBean
 
     private static void asyncRemoveFromBatchlog(Collection<InetAddress> endpoints, UUID uuid)
     {
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, UUIDType.instance.decompose(uuid));
-        rm.delete(new QueryPath(SystemTable.BATCHLOG_CF), FBUtilities.timestampMicros());
+        ColumnFamily cf = EmptyColumns.factory.create(Schema.instance.getCFMetaData(Table.SYSTEM_KS, SystemTable.BATCHLOG_CF));
+        cf.delete(new DeletionInfo(FBUtilities.timestampMicros(), (int) (System.currentTimeMillis() / 1000)));
         AbstractWriteResponseHandler handler = new WriteResponseHandler(endpoints,
                                                                         Collections.<InetAddress>emptyList(),
                                                                         ConsistencyLevel.ANY,
                                                                         Table.open(Table.SYSTEM_KS),
                                                                         null,
                                                                         WriteType.SIMPLE);
+        RowMutation rm = new RowMutation(Table.SYSTEM_KS, UUIDType.instance.decompose(uuid), cf);
         updateBatchlog(rm, endpoints, handler);
     }
 
@@ -334,7 +596,9 @@ public class StorageProxy implements StorageProxyMBean
         }
         else
         {
-            sendMessagesToOneDC(rm.createMessage(), endpoints, true, handler);
+            MessageOut<RowMutation> message = rm.createMessage();
+            for (InetAddress target : endpoints)
+                MessagingService.instance().sendRR(message, target, handler);
         }
     }
 
@@ -375,7 +639,7 @@ public class StorageProxy implements StorageProxyMBean
                                                             WritePerformer performer,
                                                             Runnable callback,
                                                             WriteType writeType)
-    throws UnavailableException, OverloadedException, IOException
+    throws UnavailableException, OverloadedException
     {
         String table = mutation.getTable();
         AbstractReplicationStrategy rs = Table.open(table).getReplicationStrategy();
@@ -480,8 +744,10 @@ public class StorageProxy implements StorageProxyMBean
                                              ConsistencyLevel consistency_level)
     throws OverloadedException
     {
-        // Multimap that holds onto all the messages and addresses meant for a specific datacenter
-        Map<String, Multimap<MessageOut, InetAddress>> dcMessages = new HashMap<String, Multimap<MessageOut, InetAddress>>();
+        // extra-datacenter replicas, grouped by dc
+        Map<String, Collection<InetAddress>> dcGroups = null;
+        // only need to create a Message for non-local writes
+        MessageOut<RowMutation> message = null;
 
         for (InetAddress destination : targets)
         {
@@ -505,14 +771,27 @@ public class StorageProxy implements StorageProxyMBean
                 else
                 {
                     // belongs on a different server
+                    if (message == null)
+                        message = rm.createMessage();
                     String dc = DatabaseDescriptor.getEndpointSnitch().getDatacenter(destination);
-                    Multimap<MessageOut, InetAddress> messages = dcMessages.get(dc);
-                    if (messages == null)
+                    // direct writes to local DC or old Cassandra versions
+                    // (1.1 knows how to forward old-style String message IDs; updated to int in 2.0)
+                    if (localDataCenter.equals(dc) || MessagingService.instance().getVersion(destination) < MessagingService.VERSION_20)
                     {
-                        messages = HashMultimap.create();
-                        dcMessages.put(dc, messages);
+                        MessagingService.instance().sendRR(message, destination, responseHandler);
                     }
-                    messages.put(rm.createMessage(), destination);
+                    else
+                    {
+                        Collection<InetAddress> messages = (dcGroups != null) ? dcGroups.get(dc) : null;
+                        if (messages == null)
+                        {
+                            messages = new ArrayList<InetAddress>(3); // most DCs will have <= 3 replicas
+                            if (dcGroups == null)
+                                dcGroups = new HashMap<String, Collection<InetAddress>>();
+                            dcGroups.put(dc, messages);
+                        }
+                        messages.add(destination);
+                    }
                 }
             }
             else
@@ -525,7 +804,20 @@ public class StorageProxy implements StorageProxyMBean
             }
         }
 
-        sendMessages(localDataCenter, dcMessages, responseHandler);
+        if (dcGroups != null)
+        {
+            // for each datacenter, send the message to one node to relay the write to other replicas
+            if (message == null)
+                message = rm.createMessage();
+
+            for (Collection<InetAddress> dcTargets : dcGroups.values())
+            {
+                // clean out any forwards from previous loop iterations
+                message = message.withHeaderRemoved(RowMutation.FORWARD_TO);
+
+                sendMessagesToNonlocalDC(message, dcTargets, responseHandler);
+            }
+        }
     }
 
     public static Future<Void> submitHint(final RowMutation mutation,
@@ -538,9 +830,9 @@ public class StorageProxy implements StorageProxyMBean
 
         HintRunnable runnable = new HintRunnable(target)
         {
-            public void runMayThrow() throws IOException
+            public void runMayThrow()
             {
-                int ttl = mutation.calculateHintTTL();
+                int ttl = HintedHandOffManager.calculateHintTTL(mutation);
                 if (ttl > 0)
                 {
                     logger.debug("Adding hint for {}", target);
@@ -566,93 +858,50 @@ public class StorageProxy implements StorageProxyMBean
         return (Future<Void>) StageManager.getStage(Stage.MUTATION).submit(runnable);
     }
 
-    public static void writeHintForMutation(RowMutation mutation, int ttl, InetAddress target) throws IOException
+    public static void writeHintForMutation(RowMutation mutation, int ttl, InetAddress target)
     {
         assert ttl > 0;
         UUID hostId = StorageService.instance.getTokenMetadata().getHostId(target);
-        if ((hostId == null) && (MessagingService.instance().getVersion(target) < MessagingService.VERSION_12))
-        {
-            logger.warn("Unable to store hint for host with missing ID, {} (old node?)", target.toString());
-            return;
-        }
         assert hostId != null : "Missing host ID for " + target.getHostAddress();
-        mutation.toHint(ttl, hostId).apply();
+        HintedHandOffManager.hintFor(mutation, ttl, hostId).apply();
         totalHints.incrementAndGet();
     }
 
-    /**
-     * for each datacenter, send a message to one node to relay the write to other replicas
-     */
-    private static void sendMessages(String localDataCenter, Map<String, Multimap<MessageOut, InetAddress>> dcMessages, AbstractWriteResponseHandler handler)
-    {
-        for (Map.Entry<String, Multimap<MessageOut, InetAddress>> entry: dcMessages.entrySet())
-        {
-            boolean isLocalDC = entry.getKey().equals(localDataCenter);
-            for (Map.Entry<MessageOut, Collection<InetAddress>> messages: entry.getValue().asMap().entrySet())
-            {
-                MessageOut message = messages.getKey();
-                Collection<InetAddress> targets = messages.getValue();
-                // a single message object is used for unhinted writes, so clean out any forwards
-                // from previous loop iterations
-                message = message.withHeaderRemoved(RowMutation.FORWARD_TO);
-                sendMessagesToOneDC(message, targets, isLocalDC, handler);
-            }
-        }
-    }
-
-    private static void sendMessagesToOneDC(MessageOut message, Collection<InetAddress> targets, boolean localDC, AbstractWriteResponseHandler handler)
-    {
-        try
-        {
-            sendMessagesToOneDCInternal(message, targets, localDC, handler);
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private static void sendMessagesToOneDCInternal(MessageOut message, Collection<InetAddress> targets, boolean localDC, AbstractWriteResponseHandler handler) throws IOException
+    private static void sendMessagesToNonlocalDC(MessageOut message, Collection<InetAddress> targets, AbstractWriteResponseHandler handler)
     {
         Iterator<InetAddress> iter = targets.iterator();
         InetAddress target = iter.next();
 
-        // direct writes to local DC or old Cassandra versions
-        if (localDC || MessagingService.instance().getVersion(target) < MessagingService.VERSION_11)
+        // Add the other destinations of the same message as a FORWARD_HEADER entry
+        DataOutputBuffer out = new DataOutputBuffer();
+        try
         {
-            // yes, the loop and non-loop code here are the same; this is clunky but we want to avoid
-            // creating a second iterator since we already have a perfectly good one
-            MessagingService.instance().sendRR(message, target, handler);
+            out.writeInt(targets.size() - 1);
             while (iter.hasNext())
             {
-                target = iter.next();
-                MessagingService.instance().sendRR(message, target, handler);
+                InetAddress destination = iter.next();
+                CompactEndpointSerializationHelper.serialize(destination, out);
+                int id = MessagingService.instance().addCallback(handler, message, destination, message.getTimeout());
+                out.writeInt(id);
+                logger.trace("Adding FWD message to {}@{}", id, destination);
             }
-            return;
+            message = message.withParameter(RowMutation.FORWARD_TO, out.getData());
+            // send the combined message + forward headers
+            int id = MessagingService.instance().sendRR(message, target, handler);
+            logger.trace("Sending message to {}@{}", id, target);
         }
-
-        // Add all the other destinations of the same message as a FORWARD_HEADER entry
-        FastByteArrayOutputStream bos = new FastByteArrayOutputStream();
-        DataOutputStream dos = new DataOutputStream(bos);
-        dos.writeInt(targets.size() - 1);
-        while (iter.hasNext())
+        catch (IOException e)
         {
-            InetAddress destination = iter.next();
-            CompactEndpointSerializationHelper.serialize(destination, dos);
-            String id = MessagingService.instance().addCallback(handler, message, destination, message.getTimeout());
-            dos.writeUTF(id);
+            // DataOutputBuffer is in-memory, doesn't throw IOException
+            throw new AssertionError(e);
         }
-        message = message.withParameter(RowMutation.FORWARD_TO, bos.toByteArray());
-        // send the combined message + forward headers
-        Tracing.trace("Enqueuing message to {}", target);
-        MessagingService.instance().sendRR(message, target, handler);
     }
 
     private static void insertLocal(final RowMutation rm, final AbstractWriteResponseHandler responseHandler)
     {
         Runnable runnable = new DroppableRunnable(MessagingService.Verb.MUTATION)
         {
-            public void runMayThrow() throws IOException
+            public void runMayThrow()
             {
                 rm.apply();
                 responseHandler.response(null);
@@ -675,7 +924,7 @@ public class StorageProxy implements StorageProxyMBean
      * quicker response and because the WriteResponseHandlers don't make it easy to send back an error. We also always gather
      * the write latencies at the coordinator node to make gathering point similar to the case of standard writes.
      */
-    public static AbstractWriteResponseHandler mutateCounter(CounterMutation cm, String localDataCenter) throws UnavailableException, OverloadedException, IOException
+    public static AbstractWriteResponseHandler mutateCounter(CounterMutation cm, String localDataCenter) throws UnavailableException, OverloadedException
     {
         InetAddress endpoint = findSuitableEndpoint(cm.getTable(), cm.key(), localDataCenter, cm.consistency());
 
@@ -743,7 +992,7 @@ public class StorageProxy implements StorageProxyMBean
     // Must be called on a replica of the mutation. This replica becomes the
     // leader of this mutation.
     public static AbstractWriteResponseHandler applyCounterMutationOnLeader(CounterMutation cm, String localDataCenter, Runnable callback)
-    throws UnavailableException, IOException, OverloadedException
+    throws UnavailableException, OverloadedException
     {
         return performWrite(cm, cm.consistency(), localDataCenter, counterWritePerformer, callback, WriteType.COUNTER);
     }
@@ -751,7 +1000,7 @@ public class StorageProxy implements StorageProxyMBean
     // Same as applyCounterMutationOnLeader but must with the difference that it use the MUTATION stage to execute the write (while
     // applyCounterMutationOnLeader assumes it is on the MUTATION stage already)
     public static AbstractWriteResponseHandler applyCounterMutationOnCoordinator(CounterMutation cm, String localDataCenter)
-    throws UnavailableException, IOException, OverloadedException
+    throws UnavailableException, OverloadedException
     {
         return performWrite(cm, cm.consistency(), localDataCenter, counterWriteOnCoordinatorPerformer, null, WriteType.COUNTER);
     }
@@ -764,7 +1013,7 @@ public class StorageProxy implements StorageProxyMBean
     {
         return new LocalMutationRunnable()
         {
-            public void runMayThrow() throws IOException
+            public void runMayThrow()
             {
                 assert mutation instanceof CounterMutation;
                 final CounterMutation cm = (CounterMutation) mutation;
@@ -805,7 +1054,7 @@ public class StorageProxy implements StorageProxyMBean
      * a specific set of column names from a given column family.
      */
     public static List<Row> read(List<ReadCommand> commands, ConsistencyLevel consistency_level)
-    throws UnavailableException, IsBootstrappingException, ReadTimeoutException
+    throws UnavailableException, IsBootstrappingException, ReadTimeoutException, InvalidRequestException, WriteTimeoutException
     {
         if (StorageService.instance.isBootstrapMode() && !systemTableQuery(commands))
         {
@@ -813,11 +1062,41 @@ public class StorageProxy implements StorageProxyMBean
             ClientRequestMetrics.readUnavailables.inc();
             throw new IsBootstrappingException();
         }
+
         long startTime = System.nanoTime();
         List<Row> rows = null;
         try
         {
-            rows = fetchRows(commands, consistency_level);
+            if (consistency_level == ConsistencyLevel.SERIAL)
+            {
+                // make sure any in-progress paxos writes are done (i.e., committed to a majority of replicas), before performing a quorum read
+                if (commands.size() > 1)
+                    throw new InvalidRequestException("SERIAL consistency may only be requested for one row at a time");
+
+                ReadCommand command = commands.get(0);
+                CFMetaData metadata = Schema.instance.getCFMetaData(command.table, command.cfName);
+
+                long start = System.nanoTime();
+                long timeout = TimeUnit.MILLISECONDS.toNanos(DatabaseDescriptor.getCasContentionTimeout());
+                while (true)
+                {
+                    Pair<List<InetAddress>, Integer> p = getPaxosParticipants(command.table, command.key);
+                    List<InetAddress> liveEndpoints = p.left;
+                    int requiredParticipants = p.right;
+
+                    if (beginAndRepairPaxos(command.key, metadata, liveEndpoints, requiredParticipants) != null)
+                        break;
+
+                    if (System.nanoTime() - start >= timeout)
+                        throw new WriteTimeoutException(WriteType.CAS, ConsistencyLevel.SERIAL, -1, -1);
+                }
+
+                rows = fetchRows(commands, ConsistencyLevel.QUORUM);
+            }
+            else
+            {
+                rows = fetchRows(commands, consistency_level);
+            }
         }
         catch (UnavailableException e)
         {
@@ -858,7 +1137,7 @@ public class StorageProxy implements StorageProxyMBean
         do
         {
             List<ReadCommand> commands = commandsToRetry.isEmpty() ? initialCommands : commandsToRetry;
-            ReadCallback<ReadResponse, Row>[] readCallbacks = new ReadCallback[commands.size()];
+            AbstractReadExecutor[] readExecutors = new AbstractReadExecutor[commands.size()];
 
             if (!commandsToRetry.isEmpty())
                 logger.debug("Retrying {} commands", commandsToRetry.size());
@@ -867,107 +1146,53 @@ public class StorageProxy implements StorageProxyMBean
             for (int i = 0; i < commands.size(); i++)
             {
                 ReadCommand command = commands.get(i);
-                Table table = Table.open(command.getKeyspace());
                 assert !command.isDigestQuery();
 
-                List<InetAddress> endpoints = getLiveSortedEndpoints(table, command.key);
-                CFMetaData cfm = Schema.instance.getCFMetaData(command.getKeyspace(), command.getColumnFamilyName());
-
-                ReadRepairDecision rrDecision = cfm.newReadRepairDecision();
-                endpoints = consistency_level.filterForQuery(table, endpoints, rrDecision);
-                
-                if (rrDecision != ReadRepairDecision.NONE) {
-                    ReadRepairMetrics.attempted.mark();
-                }
-
-                RowDigestResolver resolver = new RowDigestResolver(command.table, command.key);
-                ReadCallback<ReadResponse, Row> handler = new ReadCallback(resolver, consistency_level, command, endpoints);
-                handler.assureSufficientLiveNodes();
-                assert !endpoints.isEmpty();
-                readCallbacks[i] = handler;
-
-                // The data-request message is sent to dataPoint, the node that will actually get the data for us
-                InetAddress dataPoint = endpoints.get(0);
-                if (dataPoint.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
-                {
-                    StageManager.getStage(Stage.READ).execute(new LocalReadRunnable(command, handler));
-                }
-                else
-                {
-                    Tracing.trace("Enqueuing data request to {}", dataPoint);
-                    MessagingService.instance().sendRR(command.createMessage(), dataPoint, handler);
-                }
-
-                if (endpoints.size() == 1)
-                    continue;
-
-                // send the other endpoints a digest request
-                ReadCommand digestCommand = command.copy();
-                digestCommand.setDigestQuery(true);
-                MessageOut message = null;
-                for (InetAddress digestPoint : endpoints.subList(1, endpoints.size()))
-                {
-                    if (digestPoint.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
-                    {
-                        StageManager.getStage(Stage.READ).execute(new LocalReadRunnable(digestCommand, handler));
-                    }
-                    else
-                    {
-                        Tracing.trace("Enqueuing digest request to {}", dataPoint);
-                        // (We lazy-construct the digest Message object since it may not be necessary if we
-                        // are doing a local digest read, or no digest reads at all.)
-                        if (message == null)
-                            message = digestCommand.createMessage();
-                        MessagingService.instance().sendRR(message, digestPoint, handler);
-                    }
-                }
+                AbstractReadExecutor exec = AbstractReadExecutor.getReadExecutor(command, consistency_level);
+                exec.executeAsync();
+                readExecutors[i] = exec;
             }
+
+            for (AbstractReadExecutor exec: readExecutors)
+                exec.speculate();
 
             // read results and make a second pass for any digest mismatches
             List<ReadCommand> repairCommands = null;
             List<ReadCallback<ReadResponse, Row>> repairResponseHandlers = null;
-            for (int i = 0; i < commands.size(); i++)
+            for (AbstractReadExecutor exec: readExecutors)
             {
-                ReadCallback<ReadResponse, Row> handler = readCallbacks[i];
-                ReadCommand command = commands.get(i);
                 try
                 {
-                    Row row = handler.get();
+                    Row row = exec.get();
                     if (row != null)
                     {
-                        command.maybeTrim(row);
+                        exec.command.maybeTrim(row);
                         rows.add(row);
                     }
-                }
-                catch (ReadTimeoutException ex)
-                {
                     if (logger.isDebugEnabled())
-                        logger.debug("Read timeout: {}", ex.toString());
-                    throw ex;
+                        logger.debug("Read: {} ms.", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - exec.handler.start));
                 }
                 catch (DigestMismatchException ex)
                 {
-                    logger.debug("Digest mismatch: {}", ex.toString());
+                    logger.trace("Digest mismatch: {}", ex);
                     
                     ReadRepairMetrics.repairedBlocking.mark();
-                    
+
                     // Do a full data read to resolve the correct response (and repair node that need be)
-                    RowDataResolver resolver = new RowDataResolver(command.table, command.key, command.filter());
-                    ReadCallback<ReadResponse, Row> repairHandler = handler.withNewResolver(resolver);
+                    RowDataResolver resolver = new RowDataResolver(exec.command.table, exec.command.key, exec.command.filter());
+                    ReadCallback<ReadResponse, Row> repairHandler = exec.handler.withNewResolver(resolver);
 
                     if (repairCommands == null)
                     {
                         repairCommands = new ArrayList<ReadCommand>();
                         repairResponseHandlers = new ArrayList<ReadCallback<ReadResponse, Row>>();
                     }
-                    repairCommands.add(command);
+                    repairCommands.add(exec.command);
                     repairResponseHandlers.add(repairHandler);
 
-                    for (InetAddress endpoint : handler.endpoints)
-                    {
-                        MessageOut<ReadCommand> message = command.createMessage();
+                    MessageOut<ReadCommand> message = exec.command.createMessage();
+                    for (InetAddress endpoint : exec.handler.endpoints)
                         MessagingService.instance().sendRR(message, endpoint, repairHandler);
-                    }
                 }
             }
 
@@ -1032,7 +1257,7 @@ public class StorageProxy implements StorageProxyMBean
     {
         private final ReadCommand command;
         private final ReadCallback<ReadResponse, Row> handler;
-        private final long start = System.currentTimeMillis();
+        private final long start = System.nanoTime();
 
         LocalReadRunnable(ReadCommand command, ReadCallback<ReadResponse, Row> handler)
         {
@@ -1046,7 +1271,7 @@ public class StorageProxy implements StorageProxyMBean
             Table table = Table.open(command.table);
             Row r = command.getRow(table);
             ReadResponse result = ReadVerbHandler.getResponse(command, r);
-            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), System.currentTimeMillis() - start);
+            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
             handler.response(result);
         }
     }
@@ -1055,7 +1280,7 @@ public class StorageProxy implements StorageProxyMBean
     {
         private final RangeSliceCommand command;
         private final ReadCallback<RangeSliceReply, Iterable<Row>> handler;
-        private final long start = System.currentTimeMillis();
+        private final long start = System.nanoTime();
 
         LocalRangeSliceRunnable(RangeSliceCommand command, ReadCallback<RangeSliceReply, Iterable<Row>> handler)
         {
@@ -1064,15 +1289,15 @@ public class StorageProxy implements StorageProxyMBean
             this.handler = handler;
         }
 
-        protected void runMayThrow() throws ExecutionException, InterruptedException
+        protected void runMayThrow()
         {
             RangeSliceReply result = new RangeSliceReply(RangeSliceVerbHandler.executeLocally(command));
-            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), System.currentTimeMillis() - start);
+            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
             handler.response(result);
         }
     }
 
-    private static List<InetAddress> getLiveSortedEndpoints(Table table, ByteBuffer key)
+    public static List<InetAddress> getLiveSortedEndpoints(Table table, ByteBuffer key)
     {
         return getLiveSortedEndpoints(table, StorageService.instance.getPartitioner().decorateKey(key));
     }
@@ -1169,7 +1394,6 @@ public class StorageProxy implements StorageProxyMBean
 
                 RangeSliceCommand nodeCmd = new RangeSliceCommand(command.keyspace,
                                                                   command.column_family,
-                                                                  command.super_column,
                                                                   commandPredicate,
                                                                   range,
                                                                   command.row_filter,
@@ -1532,7 +1756,7 @@ public class StorageProxy implements StorageProxyMBean
 
     public interface WritePerformer
     {
-        public void apply(IMutation mutation, Iterable<InetAddress> targets, AbstractWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws IOException, OverloadedException;
+        public void apply(IMutation mutation, Iterable<InetAddress> targets, AbstractWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws OverloadedException;
     }
 
     /**
@@ -1540,7 +1764,7 @@ public class StorageProxy implements StorageProxyMBean
      */
     private static abstract class DroppableRunnable implements Runnable
     {
-        private final long constructionTime = System.currentTimeMillis();
+        private final long constructionTime = System.nanoTime();
         private final MessagingService.Verb verb;
 
         public DroppableRunnable(MessagingService.Verb verb)
@@ -1550,7 +1774,7 @@ public class StorageProxy implements StorageProxyMBean
 
         public final void run()
         {
-            if (System.currentTimeMillis() > constructionTime + DatabaseDescriptor.getTimeout(verb))
+            if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - constructionTime) > DatabaseDescriptor.getTimeout(verb))
             {
                 MessagingService.instance().incrementDroppedMessages(verb);
                 return;
@@ -1575,11 +1799,11 @@ public class StorageProxy implements StorageProxyMBean
      */
     private static abstract class LocalMutationRunnable implements Runnable
     {
-        private final long constructionTime = System.currentTimeMillis();
+        private final long constructionTime = System.nanoTime();
 
         public final void run()
         {
-            if (System.currentTimeMillis() > constructionTime + DatabaseDescriptor.getTimeout(MessagingService.Verb.MUTATION))
+            if (TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - constructionTime) > DatabaseDescriptor.getTimeout(MessagingService.Verb.MUTATION))
             {
                 MessagingService.instance().incrementDroppedMessages(MessagingService.Verb.MUTATION);
                 HintRunnable runnable = new HintRunnable(FBUtilities.getBroadcastAddress())
@@ -1674,11 +1898,16 @@ public class StorageProxy implements StorageProxyMBean
     public Long getWriteRpcTimeout() { return DatabaseDescriptor.getWriteRpcTimeout(); }
     public void setWriteRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setWriteRpcTimeout(timeoutInMillis); }
 
+    public Long getCasContentionTimeout() { return DatabaseDescriptor.getCasContentionTimeout(); }
+    public void setCasContentionTimeout(Long timeoutInMillis) { DatabaseDescriptor.setCasContentionTimeout(timeoutInMillis); }
+
     public Long getRangeRpcTimeout() { return DatabaseDescriptor.getRangeRpcTimeout(); }
     public void setRangeRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setRangeRpcTimeout(timeoutInMillis); }
 
     public Long getTruncateRpcTimeout() { return DatabaseDescriptor.getTruncateRpcTimeout(); }
     public void setTruncateRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setTruncateRpcTimeout(timeoutInMillis); }
+    public void reloadTriggerClass() { TriggerExecutor.instance.reloadClasses(); }
+
     
     public long getReadRepairAttempted() {
         return ReadRepairMetrics.attempted.count();

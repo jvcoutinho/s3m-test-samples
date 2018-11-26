@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,53 +15,42 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db;
 
-import java.io.*;
-import java.util.concurrent.TimeoutException;
+import java.io.IOException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.util.FastByteArrayInputStream;
-import org.apache.cassandra.net.*;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.exceptions.RequestExecutionException;
+import org.apache.cassandra.net.IVerbHandler;
+import org.apache.cassandra.net.MessageIn;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageProxy;
-import org.apache.cassandra.thrift.UnavailableException;
+import org.apache.cassandra.utils.FBUtilities;
 
-public class CounterMutationVerbHandler implements IVerbHandler
+public class CounterMutationVerbHandler implements IVerbHandler<CounterMutation>
 {
-    private static Logger logger = LoggerFactory.getLogger(CounterMutationVerbHandler.class);
+    private static final Logger logger = LoggerFactory.getLogger(CounterMutationVerbHandler.class);
 
-    public void doVerb(Message message, String id)
+    public void doVerb(MessageIn<CounterMutation> message, String id)
     {
-        byte[] bytes = message.getMessageBody();
-        FastByteArrayInputStream buffer = new FastByteArrayInputStream(bytes);
-
         try
         {
-            DataInputStream is = new DataInputStream(buffer);
-            CounterMutation cm = CounterMutation.serializer().deserialize(is, message.getVersion());
+            CounterMutation cm = message.payload;
             if (logger.isDebugEnabled())
               logger.debug("Applying forwarded " + cm);
 
             String localDataCenter = DatabaseDescriptor.getEndpointSnitch().getDatacenter(FBUtilities.getBroadcastAddress());
             StorageProxy.applyCounterMutationOnLeader(cm, localDataCenter).get();
-            WriteResponse response = new WriteResponse(cm.getTable(), cm.key(), true);
-            Message responseMessage = WriteResponse.makeWriteResponseMessage(message, response);
-            MessagingService.instance().sendReply(responseMessage, id, message.getFrom());
+            WriteResponse response = new WriteResponse();
+            MessagingService.instance().sendReply(response.createMessage(), id, message.from);
         }
-        catch (UnavailableException e)
+        catch (RequestExecutionException e)
         {
-            // We check for UnavailableException in the coordinator not. It is
-            // hence reasonable to let the coordinator timeout in the very
-            // unlikely case we arrive here
-        }
-        catch (TimeoutException e)
-        {
-            // The coordinator node will have timeout itself so we let that goes
+            // The coordinator will timeout on itself, so let that go
+            logger.debug("counter error", e);
         }
         catch (IOException e)
         {

@@ -29,7 +29,7 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 /** for sorting columns representing row keys in the row ordering as determined by a partitioner.
  * Not intended for user-defined CFs, and will in fact error out if used with such. */
-public class LocalByPartionerType<T extends Token> extends AbstractType
+public class LocalByPartionerType<T extends Token> extends AbstractType<ByteBuffer>
 {
     private final IPartitioner<T> partitioner;
 
@@ -38,9 +38,19 @@ public class LocalByPartionerType<T extends Token> extends AbstractType
         this.partitioner = partitioner;
     }
 
+    public ByteBuffer compose(ByteBuffer bytes)
+    {
+        throw new UnsupportedOperationException("You can't do this with a local partitioner.");
+    }
+
     public String getString(ByteBuffer bytes)
     {
         return ByteBufferUtil.bytesToHex(bytes);
+    }
+
+    public String toString(ByteBuffer bb)
+    {
+        return getString(bb);
     }
 
     public ByteBuffer fromString(String source)
@@ -56,5 +66,10 @@ public class LocalByPartionerType<T extends Token> extends AbstractType
     public void validate(ByteBuffer bytes) throws MarshalException
     {
         throw new IllegalStateException("You shouldn't be validating this.");
+    }
+
+    public Class<ByteBuffer> getType()
+    {
+        return ByteBuffer.class;
     }
 }

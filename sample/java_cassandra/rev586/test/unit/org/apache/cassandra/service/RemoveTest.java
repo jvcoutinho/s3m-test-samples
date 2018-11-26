@@ -72,7 +72,7 @@ public class RemoveTest extends CleanupHelper
         Util.createInitialRing(ss, partitioner, endpointTokens, keyTokens, hosts, 6);
 
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
-        Gossiper.instance.start(FBUtilities.getLocalAddress(), 1);
+        Gossiper.instance.start(1);
         for (int i = 0; i < 6; i++)
         {
             Gossiper.instance.initializeNodeUnsafe(hosts.get(i), 1);
@@ -144,7 +144,7 @@ public class RemoveTest extends CleanupHelper
 
         for (InetAddress host : hosts)
         {
-            Message msg = new Message(host, StorageService.Verb.REPLICATION_FINISHED, new byte[0]);
+            Message msg = new Message(host, StorageService.Verb.REPLICATION_FINISHED, new byte[0], MessagingService.version_);
             MessagingService.instance().sendRR(msg, FBUtilities.getLocalAddress());
         }
 
@@ -194,8 +194,7 @@ public class RemoveTest extends CleanupHelper
 
     class ReplicationSink implements IMessageSink
     {
-
-        public Message handleMessage(Message msg, InetAddress to)
+        public Message handleMessage(Message msg, String id, InetAddress to)
         {
             if (!msg.getVerb().equals(StorageService.Verb.STREAM_REQUEST))
                 return msg;
@@ -210,15 +209,15 @@ public class RemoveTest extends CleanupHelper
     {
         public int callCount = 0;
 
-        public Message handleMessage(Message msg, InetAddress to)
+        public Message handleMessage(Message msg, String id, InetAddress to)
         {
             if (msg.getVerb().equals(StorageService.Verb.REPLICATION_FINISHED))
             {
                 callCount++;
                 assertEquals(Stage.MISC, msg.getMessageType());
                 // simulate a response from remote server
-                Message response = msg.getReply(FBUtilities.getLocalAddress(), new byte[]{ });
-                MessagingService.instance().sendOneWay(response, FBUtilities.getLocalAddress());
+                Message response = msg.getReply(FBUtilities.getLocalAddress(), new byte[]{ }, msg.getVersion());
+                MessagingService.instance().sendReply(response, id, FBUtilities.getLocalAddress());
                 return null;
             }
             else

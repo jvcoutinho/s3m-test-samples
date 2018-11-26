@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.db;
 
-import java.io.File;
 import java.io.IOError;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -40,13 +39,11 @@ import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.io.sstable.SSTableDeletingTask;
 import org.apache.cassandra.io.sstable.SSTableReader;
-import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.io.util.MmappedSegmentedFile;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.NodeId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,8 +58,6 @@ public class Table
 {
     public static final String SYSTEM_TABLE = "system";
 
-    public static final String SNAPSHOT_SUBDIR_NAME = "snapshots";
-
     private static final Logger logger = LoggerFactory.getLogger(Table.class);
 
     /**
@@ -75,9 +70,9 @@ public class Table
 
     // It is possible to call Table.open without a running daemon, so it makes sense to ensure
     // proper directories here as well as in CassandraDaemon.
-    static 
+    static
     {
-        if (!StorageService.instance.isClientMode()) 
+        if (!StorageService.instance.isClientMode())
         {
             try
             {
@@ -119,9 +114,9 @@ public class Table
                     tableInstance = new Table(table);
                     schema.storeTableInstance(tableInstance);
 
-                    //table has to be constructed and in the cache before cacheRow can be called
+                    // table has to be constructed and in the cache before cacheRow can be called
                     for (ColumnFamilyStore cfs : tableInstance.getColumnFamilyStores())
-                        cfs.initCaches();
+                        cfs.initRowCache();
                 }
             }
         }
@@ -146,7 +141,7 @@ public class Table
             return t;
         }
     }
-    
+
     public Collection<ColumnFamilyStore> getColumnFamilyStores()
     {
         return Collections.unmodifiableCollection(columnFamilyStores.values());
@@ -200,7 +195,7 @@ public class Table
 
     /**
      * Take a snapshot of the entire set of column families with a given timestamp
-     * 
+     *
      * @param snapshotName the tag associated with the name of the snapshot.  This value may not be null
      */
     public void snapshot(String snapshotName)
@@ -212,7 +207,7 @@ public class Table
 
     /**
      * @param clientSuppliedName may be null.
-     * @return
+     * @return the name of the snapshot
      */
     public static String getTimestampedSnapshotName(String clientSuppliedName)
     {
@@ -224,46 +219,37 @@ public class Table
         return snapshotName;
     }
 
-    /**?
-     * Clear snapshots for this table. If no tag is given we will clear all
-     * snapshots
+    /**
+     * Check whether snapshots already exists for a given name.
      *
      * @param snapshotName the user supplied snapshot name
      * @return true if the snapshot exists
      */
     public boolean snapshotExists(String snapshotName)
     {
-        for (String dataDirPath : DatabaseDescriptor.getAllDataFileLocations())
+        assert snapshotName != null;
+        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
         {
-            String snapshotPath = dataDirPath + File.separator + name + File.separator + SNAPSHOT_SUBDIR_NAME + File.separator + snapshotName;
-            File snapshot = new File(snapshotPath);
-            if (snapshot.exists())
-            {
+            if (cfStore.snapshotExists(snapshotName))
                 return true;
-            }
         }
         return false;
     }
 
     /**
      * Clear all the snapshots for a given table.
+     *
+     * @param snapshotName the user supplied snapshot name. It empty or null,
+     * all the snapshots will be cleaned
      */
-    public void clearSnapshot(String tag) throws IOException
+    public void clearSnapshot(String snapshotName) throws IOException
     {
-        for (String dataDirPath : DatabaseDescriptor.getAllDataFileLocations())
+        for (ColumnFamilyStore cfStore : columnFamilyStores.values())
         {
-            // If tag is empty we will delete the entire snapshot directory
-            String snapshotPath = dataDirPath + File.separator + name + File.separator + SNAPSHOT_SUBDIR_NAME + File.separator + tag;
-            File snapshotDir = new File(snapshotPath);
-            if (snapshotDir.exists())
-            {
-                if (logger.isDebugEnabled())
-                    logger.debug("Removing snapshot directory " + snapshotPath);
-                FileUtils.deleteRecursive(snapshotDir);
-            }
+            cfStore.clearSnapshot(snapshotName);
         }
     }
-    
+
     /**
      * @return A list of open SSTableReaders
      */
@@ -292,25 +278,6 @@ public class Table
         indexLocks = new Object[DatabaseDescriptor.getConcurrentWriters() * 128];
         for (int i = 0; i < indexLocks.length; i++)
             indexLocks[i] = new Object();
-        // create data directories.
-        for (String dataDir : DatabaseDescriptor.getAllDataFileLocations())
-        {
-            try
-            {
-                String keyspaceDir = dataDir + File.separator + table;
-                if (!StorageService.instance.isClientMode())
-                    FileUtils.createDirectory(keyspaceDir);
-    
-                // remove the deprecated streaming directory.
-                File streamingDir = new File(keyspaceDir, "stream");
-                if (streamingDir.exists())
-                    FileUtils.deleteRecursive(streamingDir);
-            }
-            catch (IOException ex)
-            {
-                throw new IOError(ex);
-            }
-        }
 
         for (CFMetaData cfm : new ArrayList<CFMetaData>(Schema.instance.getTableDefinition(table).cfMetaData().values()))
         {
@@ -324,7 +291,7 @@ public class Table
     {
         if (replicationStrategy != null)
             StorageService.instance.getTokenMetadata().unregister(replicationStrategy);
-            
+
         replicationStrategy = AbstractReplicationStrategy.createReplicationStrategy(ksm.name,
                                                                                     ksm.strategyClass,
                                                                                     StorageService.instance.getTokenMetadata(),
@@ -339,10 +306,10 @@ public class Table
         ColumnFamilyStore cfs = columnFamilyStores.remove(cfId);
         if (cfs == null)
             return;
-        
+
         unloadCf(cfs);
     }
-    
+
     // disassociate a cfs from this table instance.
     private void unloadCf(ColumnFamilyStore cfs) throws IOException
     {
@@ -360,13 +327,31 @@ public class Table
         }
         cfs.invalidate();
     }
-    
+
     /** adds a cf to internal structures, ends up creating disk files). */
     public void initCf(Integer cfId, String cfName)
     {
-        assert !columnFamilyStores.containsKey(cfId) : String.format("tried to init %s as %s, but already used by %s",
-                                                                     cfName, cfId, columnFamilyStores.get(cfId));
-        columnFamilyStores.put(cfId, ColumnFamilyStore.createColumnFamilyStore(this, cfName));
+        if (columnFamilyStores.containsKey(cfId))
+        {
+            // this is the case when you reset local schema
+            // just reload metadata
+            ColumnFamilyStore cfs = columnFamilyStores.get(cfId);
+            assert cfs.getColumnFamilyName().equals(cfName);
+
+            try
+            {
+                cfs.metadata.reload();
+                cfs.reload();
+            }
+            catch (IOException e)
+            {
+                throw FBUtilities.unchecked(e);
+            }
+        }
+        else
+        {
+            columnFamilyStores.put(cfId, ColumnFamilyStore.createColumnFamilyStore(this, cfName));
+        }
     }
 
     public Row getRow(QueryFilter filter) throws IOException
@@ -376,12 +361,17 @@ public class Table
         return new Row(filter.key, columnFamily);
     }
 
+    public void apply(RowMutation mutation, boolean writeCommitLog) throws IOException
+    {
+        apply(mutation, writeCommitLog, true);
+    }
+
     /**
      * This method adds the row to the Commit Log associated with this table.
      * Once this happens the data associated with the individual column families
      * is also written to the column family store's memtable.
     */
-    public void apply(RowMutation mutation, boolean writeCommitLog) throws IOException
+    public void apply(RowMutation mutation, boolean writeCommitLog, boolean updateIndexes) throws IOException
     {
         if (logger.isDebugEnabled())
             logger.debug("applying mutation of row {}", ByteBufferUtil.bytesToHex(mutation.key()));
@@ -392,7 +382,7 @@ public class Table
         {
             if (writeCommitLog)
                 CommitLog.instance.add(mutation);
-        
+
             DecoratedKey<?> key = StorageService.getPartitioner().decorateKey(mutation.key());
             for (ColumnFamily cf : mutation.getColumnFamilies())
             {
@@ -404,21 +394,24 @@ public class Table
                 }
 
                 SortedSet<ByteBuffer> mutatedIndexedColumns = null;
-                for (ByteBuffer column : cfs.indexManager.getIndexedColumns())
+                if (updateIndexes)
                 {
-                    if (cf.getColumnNames().contains(column) || cf.isMarkedForDelete())
+                    for (ByteBuffer column : cfs.indexManager.getIndexedColumns())
                     {
-                        if (mutatedIndexedColumns == null)
-                            mutatedIndexedColumns = new TreeSet<ByteBuffer>();
-                        mutatedIndexedColumns.add(column);
-                        if (logger.isDebugEnabled())
+                        if (cf.getColumnNames().contains(column) || cf.isMarkedForDelete())
                         {
-                            // can't actually use validator to print value here, because we overload value
-                            // for deletion timestamp as well (which may not be a well-formed value for the column type)
-                            ByteBuffer value = cf.getColumn(column) == null ? null : cf.getColumn(column).value(); // may be null on row-level deletion
-                            logger.debug(String.format("mutating indexed column %s value %s",
-                                                       cf.getComparator().getString(column),
-                                                       value == null ? "null" : ByteBufferUtil.bytesToHex(value)));
+                            if (mutatedIndexedColumns == null)
+                                mutatedIndexedColumns = new TreeSet<ByteBuffer>();
+                            mutatedIndexedColumns.add(column);
+                            if (logger.isDebugEnabled())
+                            {
+                                // can't actually use validator to print value here, because we overload value
+                                // for deletion timestamp as well (which may not be a well-formed value for the column type)
+                                ByteBuffer value = cf.getColumn(column) == null ? null : cf.getColumn(column).value(); // may be null on row-level deletion
+                                logger.debug(String.format("mutating indexed column %s value %s",
+                                                           cf.getComparator().getString(column),
+                                                           value == null ? "null" : ByteBufferUtil.bytesToHex(value)));
+                            }
                         }
                     }
                 }
@@ -453,7 +446,6 @@ public class Table
         {
             switchLock.readLock().unlock();
         }
-
     }
 
     private static void ignoreObsoleteMutations(ColumnFamily cf, SortedSet<ByteBuffer> mutatedIndexedColumns, ColumnFamily oldIndexedColumns)
@@ -509,6 +501,11 @@ public class Table
         return replicationStrategy;
     }
 
+    /**
+     * @param key row to index
+     * @param cfs ColumnFamily to index row in
+     * @param indexedColumns columns to index, in comparator order
+     */
     public static void indexRow(DecoratedKey<?> key, ColumnFamilyStore cfs, SortedSet<ByteBuffer> indexedColumns)
     {
         if (logger.isDebugEnabled())
@@ -552,41 +549,6 @@ public class Table
                 futures.add(future);
         }
         return futures;
-    }
-
-    public String getDataFileLocation(long expectedSize)
-    {
-        String path = DatabaseDescriptor.getDataFileLocationForTable(name, expectedSize);
-        // Requesting GC has a chance to free space only if we're using mmap and a non SUN jvm
-        if (path == null
-         && (DatabaseDescriptor.getDiskAccessMode() == Config.DiskAccessMode.mmap || DatabaseDescriptor.getIndexAccessMode() == Config.DiskAccessMode.mmap)
-         && !MmappedSegmentedFile.isCleanerAvailable())
-        {
-            StorageService.instance.requestGC();
-            // retry after GCing has forced unmap of compacted SSTables so they can be deleted
-            // Note: GCInspector will do this already, but only sun JVM supports GCInspector so far
-            SSTableDeletingTask.rescheduleFailedTasks();
-            try
-            {
-                Thread.sleep(10000);
-            }
-            catch (InterruptedException e)
-            {
-                throw new AssertionError(e);
-            }
-            path = DatabaseDescriptor.getDataFileLocationForTable(name, expectedSize);
-        }
-        return path;
-    }
-
-    public static String getSnapshotPath(String dataDirPath, String tableName, String snapshotName)
-    {
-        return getSnapshotPath(dataDirPath + File.separator + tableName, snapshotName);
-    }
-
-    public static String getSnapshotPath(String tableDirectory, String snapshotName)
-    {
-        return tableDirectory + File.separator + SNAPSHOT_SUBDIR_NAME + File.separator + snapshotName;
     }
 
     public static Iterable<Table> all()

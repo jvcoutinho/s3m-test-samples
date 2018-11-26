@@ -21,9 +21,13 @@ import org.gradle.internal.reflect.Instantiator;
 import org.gradle.language.base.BinaryContainer;
 import org.gradle.model.ModelRule;
 import org.gradle.nativebinaries.*;
-import org.gradle.nativebinaries.internal.DefaultExecutableBinary;
-import org.gradle.nativebinaries.internal.DefaultSharedLibraryBinary;
-import org.gradle.nativebinaries.internal.DefaultStaticLibraryBinary;
+import org.gradle.nativebinaries.internal.NativeComponentInternal;
+import org.gradle.nativebinaries.internal.ToolChainRegistryInternal;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
 
 public class CreateNativeBinaries extends ModelRule {
     private final Instantiator instantiator;
@@ -34,29 +38,50 @@ public class CreateNativeBinaries extends ModelRule {
         this.project = project;
     }
 
-    public void create(BinaryContainer binaries, ToolChainRegistry toolChains) {
-        PlatformContainer targetPlatforms = project.getExtensions().getByType(PlatformContainer.class);
-        BuildTypeContainer buildTypes = project.getExtensions().getByType(BuildTypeContainer.class);
-        ExecutableContainer executables = project.getExtensions().getByType(ExecutableContainer.class);
-        LibraryContainer libraries = project.getExtensions().getByType(LibraryContainer.class);
+    public void create(BinaryContainer binaries, ToolChainRegistryInternal toolChains, PlatformContainer platforms,
+                       BuildTypeContainer buildTypes, FlavorContainer flavors) {
+        // TODO:DAZ Work out the right way to make these containers available to binaries.all
+        project.getExtensions().add("platforms", platforms);
+        project.getExtensions().add("buildTypes", buildTypes);
+        project.getExtensions().add("flavors", flavors);
 
-        NativeBinaryFactory factory = new NativeBinaryFactory(instantiator, project, toolChains, targetPlatforms, buildTypes);
-        for (ToolChain toolChain : toolChains) {
-            for (Platform targetPlatform : targetPlatforms) {
-                for (BuildType buildType : buildTypes) {
-                    for (Library library : libraries) {
-                        for (Flavor flavor : library.getFlavors()) {
-                            binaries.add(factory.createNativeBinary(DefaultSharedLibraryBinary.class, library, toolChain, targetPlatform, buildType, flavor));
-                            binaries.add(factory.createNativeBinary(DefaultStaticLibraryBinary.class, library, toolChain, targetPlatform, buildType, flavor));
-                        }
-                    }
-                    for (Executable executable : executables) {
-                        for (Flavor flavor : executable.getFlavors()) {
-                            binaries.add(factory.createNativeBinary(DefaultExecutableBinary.class, executable, toolChain, targetPlatform, buildType, flavor));
-                        }
+        NativeBinaryFactory factory = new NativeBinaryFactory(instantiator, project, platforms, buildTypes, flavors);
+        for (NativeComponentInternal component : allComponents()) {
+            for (Platform platform : getPlatforms(component, platforms)) {
+                ToolChain toolChain = toolChains.getForPlatform(platform);
+                for (BuildType buildType : getBuildTypes(component, buildTypes)) {
+                    for (Flavor flavor : getFlavors(component, flavors)) {
+                        binaries.addAll(factory.createNativeBinaries(component, toolChain, platform, buildType, flavor));
                     }
                 }
             }
         }
+    }
+
+    private Collection<NativeComponentInternal> allComponents() {
+        ExecutableContainer executables = project.getExtensions().getByType(ExecutableContainer.class);
+        LibraryContainer libraries = project.getExtensions().getByType(LibraryContainer.class);
+
+        List<NativeComponentInternal> components = new ArrayList<NativeComponentInternal>();
+        for (Library library : libraries) {
+            components.add((NativeComponentInternal) library);
+        }
+        for (Executable executable : executables) {
+            components.add((NativeComponentInternal) executable);
+        }
+        return components;
+    }
+
+    private Set<Platform> getPlatforms(final NativeComponentInternal component, PlatformContainer platforms) {
+        return component.choosePlatforms(platforms);
+    }
+
+    private Set<BuildType> getBuildTypes(final NativeComponentInternal component, BuildTypeContainer buildTypes) {
+        return component.chooseBuildTypes(buildTypes);
+    }
+
+    // TODO:DAZ Maybe add NativeBinaryInternal.selectFlavors(FlavorContainer) >> Set<Flavor>
+    private Set<Flavor> getFlavors(final NativeComponentInternal component, FlavorContainer flavors) {
+        return component.chooseFlavors(flavors);
     }
 }

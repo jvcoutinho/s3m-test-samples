@@ -18,6 +18,8 @@
 */
 package org.apache.cassandra.service;
 
+import java.net.InetSocketAddress;
+
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
@@ -40,6 +42,7 @@ public class CassandraServerTest extends SchemaLoader
     {
         Schema.instance.clear(); // Schema are now written on disk and will be reloaded
         new EmbeddedCassandraService().start();
+        ThriftSessionManager.instance.setCurrentSocket(new InetSocketAddress(9160));
 
         DecoratedKey key = Util.dk("testkey");
         for (int i = 0; i < 3050; i++)

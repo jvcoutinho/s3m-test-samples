@@ -46,10 +46,10 @@ import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.RingPosition;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.Gossiper;
@@ -259,8 +259,9 @@ public class StorageProxy implements StorageProxyMBean
     private static Collection<InetAddress> getWriteEndpoints(String table, ByteBuffer key)
     {
         StorageService ss = StorageService.instance;
-        List<InetAddress> naturalEndpoints = ss.getNaturalEndpoints(table, key);
-        return ss.getTokenMetadata().getWriteEndpoints(StorageService.getPartitioner().getToken(key), table, naturalEndpoints);
+        Token tk = StorageService.getPartitioner().getToken(key);
+        List<InetAddress> naturalEndpoints = ss.getNaturalEndpoints(table, tk);
+        return ss.getTokenMetadata().getWriteEndpoints(tk, table, naturalEndpoints);
     }
 
     /**
@@ -389,6 +390,8 @@ public class StorageProxy implements StorageProxyMBean
     {
         for (Map.Entry<String, Multimap<Message, InetAddress>> entry: dcMessages.entrySet())
         {
+            String dataCenter = entry.getKey();
+
             // send the messages corresponding to this datacenter
             for (Map.Entry<Message, Collection<InetAddress>> messages: entry.getValue().asMap().entrySet())
             {
@@ -396,11 +399,41 @@ public class StorageProxy implements StorageProxyMBean
                 // a single message object is used for unhinted writes, so clean out any forwards
                 // from previous loop iterations
                 message = message.withHeaderRemoved(RowMutation.FORWARD_HEADER);
+                Iterator<InetAddress> iter = messages.getValue().iterator();
+                InetAddress target = iter.next();
 
-                // direct writes to everything -- optimized nonlocal DC writes are
-                // postponed to 1.1; see CASSANDRA-3577
-                for (InetAddress destination : messages.getValue())
-                    MessagingService.instance().sendRR(message, destination, handler);
+                // direct writes to local DC or old Cassadra versions
+                if (dataCenter.equals(localDataCenter) || Gossiper.instance.getVersion(target) < MessagingService.VERSION_11)
+                {
+                    // yes, the loop and non-loop code here are the same; this is clunky but we want to avoid
+                    // creating a second iterator since we already have a perfectly good one
+                    MessagingService.instance().sendRR(message, target, handler);
+                    while (iter.hasNext())
+                    {
+                        target = iter.next();
+                        MessagingService.instance().sendRR(message, target, handler);
+                    }
+                    continue;
+                }
+
+                // Add all the other destinations of the same message as a FORWARD_HEADER entry
+                FastByteArrayOutputStream bos = new FastByteArrayOutputStream();
+                DataOutputStream dos = new DataOutputStream(bos);
+                dos.writeInt(messages.getValue().size() - 1);
+                while (iter.hasNext())
+                {
+                    InetAddress destination = iter.next();
+                    CompactEndpointSerializationHelper.serialize(destination, dos);
+                    String id = MessagingService.instance().addCallback(handler, message, destination);
+                    dos.writeUTF(id);
+                    if (logger.isDebugEnabled())
+                        logger.debug("Adding FWD message to: " + destination + " with ID " + id);
+                }
+                message = message.withHeaderAdded(RowMutation.FORWARD_HEADER, bos.toByteArray());
+                // send the combined message + forward headers
+                String id = MessagingService.instance().sendRR(message, target, handler);
+                if (logger.isDebugEnabled())
+                    logger.debug("Sending message to: " + target + " with ID " + id);
             }
         }
     }
@@ -778,10 +811,6 @@ public class StorageProxy implements StorageProxyMBean
         return new ReadCallback(resolver, consistencyLevel, command, endpoints);
     }
 
-    /*
-    * This function executes the read protocol locally.  Consistency checks are performed in the background.
-    */
-
     public static List<Row> getRangeSlice(RangeSliceCommand command, ConsistencyLevel consistency_level)
     throws IOException, UnavailableException, TimeoutException
     {
@@ -792,36 +821,55 @@ public class StorageProxy implements StorageProxyMBean
         // now scan until we have enough results
         try
         {
-            rows = new ArrayList<Row>(command.max_keys);
-            List<AbstractBounds> ranges = getRestrictedRanges(command.range);
-            for (AbstractBounds range : ranges)
+            int columnsCount = 0;
+            rows = new ArrayList<Row>();
+            List<AbstractBounds<RowPosition>> ranges = getRestrictedRanges(command.range);
+            for (AbstractBounds<RowPosition> range : ranges)
             {
-                List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(command.keyspace, range.right);
+                RangeSliceCommand nodeCmd = new RangeSliceCommand(command.keyspace,
+                                                                  command.column_family,
+                                                                  command.super_column,
+                                                                  command.predicate,
+                                                                  range,
+                                                                  command.row_filter,
+                                                                  command.maxResults,
+                                                                  command.maxIsColumns);
+
+                List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(nodeCmd.keyspace, range.right);
                 DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), liveEndpoints);
 
                 if (consistency_level == ConsistencyLevel.ONE && !liveEndpoints.isEmpty() && liveEndpoints.get(0).equals(FBUtilities.getBroadcastAddress()))
                 {
                     if (logger.isDebugEnabled())
                         logger.debug("local range slice");
-                    ColumnFamilyStore cfs = Table.open(command.keyspace).getColumnFamilyStore(command.column_family);
-                    rows.addAll(cfs.getRangeSlice(command.super_column,
-                                                range,
-                                                command.max_keys,
-                                                QueryFilter.getFilter(command.predicate, cfs.getComparator())));
+
+                    try
+                    {
+                        rows.addAll(RangeSliceVerbHandler.executeLocally(nodeCmd));
+                        for (Row row : rows)
+                            columnsCount += row.getLiveColumnCount();
+                    }
+                    catch (ExecutionException e)
+                    {
+                        throw new RuntimeException(e.getCause());
+                    }
+                    catch (InterruptedException e)
+                    {
+                        throw new AssertionError(e);
+                    }
                 }
                 else
                 {
-                    RangeSliceCommand c2 = new RangeSliceCommand(command.keyspace, command.column_family, command.super_column, command.predicate, range, command.max_keys);
-
                     // collect replies and resolve according to consistency level
-                    RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(command.keyspace, liveEndpoints);
-                    ReadCallback<Iterable<Row>> handler = getReadCallback(resolver, command, consistency_level, liveEndpoints);
+                    RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(nodeCmd.keyspace);
+                    ReadCallback<Iterable<Row>> handler = getReadCallback(resolver, nodeCmd, consistency_level, liveEndpoints);
                     handler.assureSufficientLiveNodes();
+                    resolver.setSources(handler.endpoints);
                     for (InetAddress endpoint : handler.endpoints)
                     {
-                        MessagingService.instance().sendRR(c2, endpoint, handler);
+                        MessagingService.instance().sendRR(nodeCmd, endpoint, handler);
                         if (logger.isDebugEnabled())
-                            logger.debug("reading " + c2 + " from " + endpoint);
+                            logger.debug("reading " + nodeCmd + " from " + endpoint);
                     }
 
                     try
@@ -829,6 +877,7 @@ public class StorageProxy implements StorageProxyMBean
                         for (Row row : handler.get())
                         {
                             rows.add(row);
+                            columnsCount += row.getLiveColumnCount();
                             logger.debug("range slices read {}", row.key);
                         }
                         FBUtilities.waitOnFutures(resolver.repairResults, DatabaseDescriptor.getRpcTimeout());
@@ -846,7 +895,8 @@ public class StorageProxy implements StorageProxyMBean
                 }
 
                 // if we're done, great, otherwise, move to the next range
-                if (rows.size() >= command.max_keys)
+                int count = nodeCmd.maxIsColumns ? columnsCount : rows.size();
+                if (count >= nodeCmd.maxResults)
                     break;
             }
         }
@@ -854,7 +904,16 @@ public class StorageProxy implements StorageProxyMBean
         {
             rangeStats.addNano(System.nanoTime() - startTime);
         }
-        return rows.size() > command.max_keys ? rows.subList(0, command.max_keys) : rows;
+        return trim(command, rows);
+    }
+
+    private static List<Row> trim(RangeSliceCommand command, List<Row> rows)
+    {
+        // When maxIsColumns, we let the caller trim the result.
+        if (command.maxIsColumns)
+            return rows;
+        else
+            return rows.size() > command.maxResults ? rows.subList(0, command.maxResults) : rows;
     }
 
     /**
@@ -944,10 +1003,10 @@ public class StorageProxy implements StorageProxyMBean
      * Compute all ranges we're going to query, in sorted order. Nodes can be replica destinations for many ranges,
      * so we need to restrict each scan to the specific range we want, or else we'd get duplicate results.
      */
-    static List<AbstractBounds> getRestrictedRanges(final AbstractBounds queryRange)
+    static <T extends RingPosition> List<AbstractBounds<T>> getRestrictedRanges(final AbstractBounds<T> queryRange)
     {
         // special case for bounds containing exactly 1 (non-minimum) token
-        if (queryRange instanceof Bounds && queryRange.left.equals(queryRange.right) && !queryRange.left.equals(StorageService.getPartitioner().getMinimumToken()))
+        if (queryRange instanceof Bounds && queryRange.left.equals(queryRange.right) && !queryRange.left.isMinimum(StorageService.getPartitioner()))
         {
             if (logger.isDebugEnabled())
                 logger.debug("restricted single token match for query {}", queryRange);
@@ -956,23 +1015,35 @@ public class StorageProxy implements StorageProxyMBean
 
         TokenMetadata tokenMetadata = StorageService.instance.getTokenMetadata();
 
-        List<AbstractBounds> ranges = new ArrayList<AbstractBounds>();
+        List<AbstractBounds<T>> ranges = new ArrayList<AbstractBounds<T>>();
         // divide the queryRange into pieces delimited by the ring and minimum tokens
-        Iterator<Token> ringIter = TokenMetadata.ringIterator(tokenMetadata.sortedTokens(), queryRange.left, true);
-        AbstractBounds remainder = queryRange;
+        Iterator<Token> ringIter = TokenMetadata.ringIterator(tokenMetadata.sortedTokens(), queryRange.left.getToken(), true);
+        AbstractBounds<T> remainder = queryRange;
         while (ringIter.hasNext())
         {
-            Token token = ringIter.next();
-            if (remainder == null || !(remainder.left.equals(token) || remainder.contains(token)))
+            /*
+             * remainder can be a range/bounds of token _or_ keys and we want to split it with a token:
+             *   - if remainder is tokens, then we'll just split using the provided token.
+             *   - if remainder is keys, we want to split using token.upperBoundKey. For instance, if remainder
+             *     is [DK(10, 'foo'), DK(20, 'bar')], and we have 3 nodes with tokens 0, 15, 30. We want to
+             *     split remainder to A=[DK(10, 'foo'), 15] and B=(15, DK(20, 'bar')]. But since we can't mix
+             *     tokens and keys at the same time in a range, we uses 15.upperBoundKey() to have A include all
+             *     keys having 15 as token and B include none of those (since that is what our node owns).
+             * asSplitValue() abstracts that choice.
+             */
+            Token upperBoundToken = ringIter.next();
+            T upperBound = (T)upperBoundToken.upperBound(queryRange.left.getClass());
+            if (!remainder.left.equals(upperBound) && !remainder.contains(upperBound))
                 // no more splits
                 break;
-            Pair<AbstractBounds,AbstractBounds> splits = remainder.split(token);
-            if (splits.left != null)
-                ranges.add(splits.left);
+            Pair<AbstractBounds<T>,AbstractBounds<T>> splits = remainder.split(upperBound);
+            if (splits == null)
+                continue;
+
+            ranges.add(splits.left);
             remainder = splits.right;
         }
-        if (remainder != null)
-            ranges.add(remainder);
+        ranges.add(remainder);
         if (logger.isDebugEnabled())
             logger.debug("restricted ranges for query {} are {}", queryRange, ranges);
 
@@ -1052,69 +1123,6 @@ public class StorageProxy implements StorageProxyMBean
     public long[] getRecentWriteLatencyHistogramMicros()
     {
         return writeStats.getRecentLatencyHistogramMicros();
-    }
-
-    public static List<Row> scan(final String keyspace, String column_family, IndexClause index_clause, SlicePredicate column_predicate, ConsistencyLevel consistency_level)
-    throws IOException, TimeoutException, UnavailableException
-    {
-        IPartitioner p = StorageService.getPartitioner();
-
-        Token leftToken = index_clause.start_key == null ? p.getMinimumToken() : p.getToken(index_clause.start_key);
-        List<AbstractBounds> ranges = getRestrictedRanges(new Bounds(leftToken, p.getMinimumToken()));
-        logger.debug("scan ranges are {}", StringUtils.join(ranges, ","));
-
-        // now scan until we have enough results
-        List<Row> rows = new ArrayList<Row>(index_clause.count);
-        for (AbstractBounds range : ranges)
-        {
-            List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(keyspace, range.right);
-            DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), liveEndpoints);
-
-            // collect replies and resolve according to consistency level
-            RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(keyspace, liveEndpoints);
-            IReadCommand iCommand = new IReadCommand()
-            {
-                public String getKeyspace()
-                {
-                    return keyspace;
-                }
-            };
-            ReadCallback<Iterable<Row>> handler = getReadCallback(resolver, iCommand, consistency_level, liveEndpoints);
-            handler.assureSufficientLiveNodes();
-
-            IndexScanCommand command = new IndexScanCommand(keyspace, column_family, index_clause, column_predicate, range);
-            MessageProducer producer = new CachingMessageProducer(command);
-            for (InetAddress endpoint : handler.endpoints)
-            {
-                MessagingService.instance().sendRR(producer, endpoint, handler);
-                if (logger.isDebugEnabled())
-                    logger.debug("reading {} from {}", command, endpoint);
-            }
-
-            try
-            {
-                for (Row row : handler.get())
-                {
-                    rows.add(row);
-                    logger.debug("read {}", row);
-                }
-                FBUtilities.waitOnFutures(resolver.repairResults, DatabaseDescriptor.getRpcTimeout());
-            }
-            catch (TimeoutException ex)
-            {
-                if (logger.isDebugEnabled())
-                    logger.debug("Index scan timeout: {}", ex.toString());
-                throw ex;
-            }
-            catch (DigestMismatchException e)
-            {
-                throw new AssertionError(e);
-            }
-            if (rows.size() >= index_clause.count)
-                return rows.subList(0, index_clause.count);
-        }
-
-        return rows;
     }
 
     public boolean getHintedHandoffEnabled()

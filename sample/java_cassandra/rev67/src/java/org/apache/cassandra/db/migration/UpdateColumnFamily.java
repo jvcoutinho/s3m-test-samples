@@ -38,13 +38,13 @@ public class UpdateColumnFamily extends Migration
     protected UpdateColumnFamily() { }
     
     /** assumes validation has already happened. That is, replacing oldCfm with newCfm is neither illegal or totally whackass. */
-    public UpdateColumnFamily(org.apache.cassandra.avro.CfDef cf_def) throws ConfigurationException, IOException
+    public UpdateColumnFamily(org.apache.cassandra.db.migration.avro.CfDef cf_def) throws ConfigurationException, IOException
     {
         super(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress()), DatabaseDescriptor.getDefsVersion());
         
         KSMetaData ksm = DatabaseDescriptor.getTableDefinition(cf_def.keyspace.toString());
         if (ksm == null)
-            throw new ConfigurationException("Keyspace does not already exist.");
+            throw new ConfigurationException("No such keyspace: " + cf_def.keyspace.toString());
         
         CFMetaData oldCfm = DatabaseDescriptor.getCFMetaData(CFMetaData.getId(cf_def.keyspace.toString(), cf_def.name.toString()));
         

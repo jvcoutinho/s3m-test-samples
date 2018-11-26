@@ -70,10 +70,11 @@ public class PomReader {
     private static final String PLUGIN = "plugin";
     private static final String TYPE = "type";
 
-    private Map<String, String> properties = new HashMap<String, String>();
+    private final Map<String, String> properties = new HashMap<String, String>();
     private final Map<String, PomDependencyMgt> inheritedDependencyMgts = new LinkedHashMap<String, PomDependencyMgt>();
     private Map<String, PomDependencyMgt> dependencyMgts;
     private final Map<String, PomDependencyData> inheritedDependencies = new LinkedHashMap<String, PomDependencyData>();
+    private Map<String, PomDependencyData> dependencies;
 
     private final Element projectElement;
     private final Element parentElement;
@@ -117,15 +118,15 @@ public class PomReader {
     }
 
     private enum GavProperty {
-        PARENT_VERSION(new String[] {"parent.version", "project.parent.version"}),
-        PARENT_GROUP_ID(new String[] {"parent.groupId", "project.parent.groupId"}),
-        GROUP_ID(new String[] {"project.groupId", "pom.groupId", "groupId"}),
-        ARTIFACT_ID(new String[] {"project.artifactId", "pom.artifactId", "artifactId"}),
-        VERSION(new String[] {"project.version", "pom.version", "version"});
+        PARENT_VERSION("parent.version", "project.parent.version"),
+        PARENT_GROUP_ID("parent.groupId", "project.parent.groupId"),
+        GROUP_ID("project.groupId", "pom.groupId", "groupId"),
+        ARTIFACT_ID("project.artifactId", "pom.artifactId", "artifactId"),
+        VERSION("project.version", "pom.version", "version");
 
         private final String[] names;
 
-        private GavProperty(String[] names) {
+        private GavProperty(String... names) {
             this.names = names;
         }
 
@@ -174,10 +175,16 @@ public class PomReader {
     }
 
     public void addInheritedDependencyMgts(Map<String, PomDependencyMgt> inherited) {
+        if (dependencyMgts != null) {
+            throw new IllegalStateException("Cannot add inherited dependency management elements after dependency management elements have been resolved for this POM.");
+        }
         inheritedDependencyMgts.putAll(inherited);
     }
 
     public void addInheritedDependencies(Map<String, PomDependencyData> inherited) {
+        if (dependencies != null) {
+            throw new IllegalStateException("Cannot add inherited dependencies after dependencies have been resolved for this POM.");
+        }
         inheritedDependencies.putAll(inherited);
     }
 
@@ -198,8 +205,6 @@ public class PomReader {
         return replaceProps(groupId);
     }
 
-
-
     public String getArtifactId() {
         String val = getFirstChildText(projectElement , ARTIFACT_ID);
         if (val == null) {
@@ -216,7 +221,6 @@ public class PomReader {
         return replaceProps(val);
     }
 
-
     public String getVersion() {
         String val = getFirstChildText(projectElement , VERSION);
         if (val == null) {
@@ -232,7 +236,6 @@ public class PomReader {
         }
         return replaceProps(val);
     }
-
 
     public String getPackaging() {
         String val = getFirstChildText(projectElement , PACKAGING);
@@ -258,10 +261,10 @@ public class PomReader {
         return val.trim();
     }
 
-    public License[] getLicenses() {
+    public List<License> getLicenses() {
         Element licenses = getFirstChildElement(projectElement, LICENSES);
         if (licenses == null) {
-            return new License[0];
+            return Collections.emptyList();
         }
         licenses.normalize();
         List<License> lics = new ArrayList<License>();
@@ -283,9 +286,8 @@ public class PomReader {
                 lics.add(new License(name, url));
             }
         }
-        return lics.toArray(new License[lics.size()]);
+        return lics;
     }
-
 
     public ModuleRevisionId getRelocation() {
         Element distrMgt = getFirstChildElement(projectElement, DISTRIBUTION_MGT);
@@ -303,9 +305,19 @@ public class PomReader {
         }
     }
 
+    /**
+     * Returns all dependencies for this POM, including those inherited from parent POMs.
+     */
     public Map<String, PomDependencyData> getDependencies() {
-        Element dependenciesElement = getFirstChildElement(projectElement, DEPENDENCIES);
+        if (dependencies == null) {
+            dependencies = resolveDependencies();
+        }
+        return dependencies;
+    }
+
+    private Map<String, PomDependencyData> resolveDependencies() {
         Map<String, PomDependencyData> dependencies = new LinkedHashMap<String, PomDependencyData>();
+        Element dependenciesElement = getFirstChildElement(projectElement, DEPENDENCIES);
         if (dependenciesElement != null) {
             NodeList childs = dependenciesElement.getChildNodes();
             for (int i = 0; i < childs.getLength(); i++) {
@@ -317,22 +329,40 @@ public class PomReader {
                 }
             }
         }
-        inheritedDependencies.putAll(dependencies);
-        return inheritedDependencies;
+
+        // Maven adds inherited dependencies last
+        for (Map.Entry<String, PomDependencyData> entry : inheritedDependencies.entrySet()) {
+            if (!dependencies.containsKey(entry.getKey())) {
+                dependencies.put(entry.getKey(), entry.getValue());
+            }
+        }
+
+        return dependencies;
     }
 
+    /**
+     * Returns all dependency management elements for this POM, including those inherited from parent and imported POMs.
+     */
     public Map<String, PomDependencyMgt> getDependencyMgt() {
         if(dependencyMgts == null) {
             dependencyMgts = resolveDependencyMgt();
         }
 
-        inheritedDependencyMgts.putAll(dependencyMgts);
-        return inheritedDependencyMgts;
+        return dependencyMgts;
     }
 
     private Map<String, PomDependencyMgt> resolveDependencyMgt() {
-        Map<String, PomDependencyMgt> resolvedDependencyMgts = new LinkedHashMap<String, PomDependencyMgt>();
+        Map<String, PomDependencyMgt> dependencies = new LinkedHashMap<String, PomDependencyMgt>();
+        dependencies.putAll(inheritedDependencyMgts);
+        dependencies.putAll(getPomDependencyMgt());
+        return dependencies;
+    }
 
+    /**
+     * Returns the dependency management elements declared in this POM.
+     */
+    public Map<String, PomDependencyMgt> getPomDependencyMgt() {
+        Map<String, PomDependencyMgt> depMgmtElements = new LinkedHashMap<String, PomDependencyMgt>();
         Element dependenciesElement = getFirstChildElement(projectElement, DEPENDENCY_MGT);
         dependenciesElement = getFirstChildElement(dependenciesElement, DEPENDENCIES);
         if (dependenciesElement != null) {
@@ -342,12 +372,11 @@ public class PomReader {
                 if (node instanceof Element && DEPENDENCY.equals(node.getNodeName())) {
                     PomDependencyMgt pomDependencyMgt = new PomDependencyMgtElement((Element) node);
                     String key = createPomDependencyMgtKey(pomDependencyMgt.getGroupId(), pomDependencyMgt.getArtifactId());
-                    resolvedDependencyMgts.put(key, pomDependencyMgt);
+                    depMgmtElements.put(key, pomDependencyMgt);
                 }
             }
         }
-
-        return resolvedDependencyMgts;
+        return depMgmtElements;
     }
 
     private String createPomDependencyMgtKey(String groupId, String artifactId) {

@@ -36,32 +36,36 @@
  */
 package org.atmosphere.websocket;
 
-import org.atmosphere.cpr.CometSupport;
+import org.atmosphere.cpr.AtmosphereRequest;
+import org.atmosphere.cpr.AtmosphereResource;
+import org.atmosphere.cpr.AsyncIOWriter;
+import org.atmosphere.cpr.AtmosphereResponse;
 
+import javax.servlet.http.HttpServletRequest;
 import java.io.IOException;
 
 /**
- * All {@link CometSupport} implementation that support WebSocket must provide an implementation
- * of this class, which is used for writing websocket message.
+ * Represent a portable WebSocket implementation which can be used to write message.
  *
  * @author Jeanfrancois Arcand
  */
-public interface WebSocket {
+public interface WebSocket extends AsyncIOWriter {
 
     public final static String WEBSOCKET_INITIATED = WebSocket.class.getName() + ".initiated";
     public final static String WEBSOCKET_SUSPEND = WebSocket.class.getName() + ".suspend";
     public final static String WEBSOCKET_RESUME = WebSocket.class.getName() + ".resume";
 
-    void writeError(int errorCode, String message) throws IOException;
-
-    void redirect(String location) throws IOException;
-
-    void write(byte frame, String data) throws IOException;
-
-    void write(byte frame, byte[] data) throws IOException;
-
-    void write(byte frame, byte[] data, int offset, int length) throws IOException;
-
+    /**
+     * Close the underlying WebSocket connection
+     * @throws IOException
+     */
     void close() throws IOException;
 
+    /**
+     * Return the current {@link AtmosphereResource} representing the underlying connection and the original
+     * {@link HttpServletRequest}
+     *
+     * @return the current {@link AtmosphereResource}
+     */
+    AtmosphereResource<?, ?> resource();
 }

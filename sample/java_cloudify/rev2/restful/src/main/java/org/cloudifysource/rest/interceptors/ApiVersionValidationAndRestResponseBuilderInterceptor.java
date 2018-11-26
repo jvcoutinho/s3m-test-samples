@@ -17,13 +17,14 @@ package org.cloudifysource.rest.interceptors;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.core.MediaType;
 
-import org.apache.commons.collections.MapUtils;
+import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.dsl.internal.CloudifyMessageKeys;
 import org.cloudifysource.dsl.rest.response.Response;
 import org.cloudifysource.rest.controllers.RestErrorException;
@@ -61,8 +62,17 @@ public class ApiVersionValidationAndRestResponseBuilderInterceptor extends Handl
     public boolean preHandle(final HttpServletRequest request,
                              final HttpServletResponse response, final Object handler)
             throws Exception {
-
-        String requestVersion = extractVersionFromRequest(request);
+    	String requestVersion = extractVersionFromRequest(request);
+    	if (CloudifyConstants.SERVICE_CONTROLLER_URL.equals(requestVersion)) {
+    		// if this is a request to service/** than this is not the right interceptor.
+    		// (for example service/templates request will arrive here because of the 'templates' suffix 
+    		// but it is not a template controller and it will be processed in the VersionValidateInterceptor)
+    		return true;
+    	}
+    	if (logger.isLoggable(Level.FINEST)) {
+    		logger.finest("pre handle request from " + request.getRequestURI());
+    	}
+        // checks the request's version
         if (!CURRENT_API_VERSION.equalsIgnoreCase(requestVersion)) {
             throw new RestErrorException(CloudifyMessageKeys.API_VERSION_MISMATCH.getName(),
                     requestVersion, CURRENT_API_VERSION);
@@ -81,7 +91,17 @@ public class ApiVersionValidationAndRestResponseBuilderInterceptor extends Handl
     public void postHandle(final HttpServletRequest request,
                            final HttpServletResponse response, final Object handler,
                            final ModelAndView modelAndView) throws Exception {
-    	
+    	String requestVersion = extractVersionFromRequest(request);
+    	if (CloudifyConstants.SERVICE_CONTROLLER_URL.equals(requestVersion)) {
+    		// if this is a request to service/** than this is not the right interceptor.
+    		// (for example service/templates request will arrive here because of the 'templates' suffix 
+    		// but it is not a template controller and it will be processed in the VersionValidateInterceptor)
+    		return;
+    	}
+    	if (logger.isLoggable(Level.FINEST)) {
+    		logger.finest("post handle request from " + request.getRequestURI() + " with model " 
+    				+ modelAndView.getModel().toString() + " and view " + modelAndView.getView().toString());
+    	}
         Object model = filterModel(modelAndView, handler);
         modelAndView.clear();
         response.setContentType(MediaType.APPLICATION_JSON);
@@ -116,7 +136,7 @@ public class ApiVersionValidationAndRestResponseBuilderInterceptor extends Handl
     	Object methodReturnObject = null;
     	Map<String, Object> model = modelAndView.getModel();
     	
-    	if (MapUtils.isNotEmpty(model)) {
+    	if (!model.isEmpty()) {
     		// the model is not empty. The return value is the first value that is not a BindingResult
     		for (Map.Entry<String, Object> entry : model.entrySet()) {
                 Object value = entry.getValue();

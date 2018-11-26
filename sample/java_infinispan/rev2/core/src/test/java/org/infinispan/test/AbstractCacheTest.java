@@ -96,6 +96,7 @@ public class AbstractCacheTest extends AbstractInfinispanTest {
             .sync()
                .stateRetrieval().fetchInMemoryState(false)
             .transaction().syncCommitPhase(true).syncRollbackPhase(true)
+               .cacheStopTimeout(0)
          .build();
    }
 

@@ -11,6 +11,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.Pipeline;
 import redis.clients.jedis.Protocol.Keyword;
 import redis.clients.jedis.Response;
 import redis.clients.jedis.Transaction;
@@ -293,5 +294,49 @@ public class TransactionCommandsTest extends JedisCommandTestBase {
 	List<Object> results = t.exec();
 
 	assertNull(results);
+    }
+
+    @Test
+    public void testResetStateWhenInMulti() {
+	jedis.auth("foobared");
+
+	Transaction t = jedis.multi();
+	t.set("foooo", "barrr");
+
+	jedis.resetState();
+	assertEquals(null, jedis.get("foooo"));
+    }
+
+    @Test
+    public void testResetStateWhenInMultiWithinPipeline() {
+	jedis.auth("foobared");
+
+	Pipeline p = jedis.pipelined();
+	p.multi();
+	p.set("foooo", "barrr");
+
+	jedis.resetState();
+	assertEquals(null, jedis.get("foooo"));
+    }
+
+    @Test
+    public void testResetStateWhenInWatch() {
+	jedis.watch("mykey", "somekey");
+
+	// state reset : unwatch
+	jedis.resetState();
+
+	Transaction t = jedis.multi();
+
+	nj.connect();
+	nj.auth("foobared");
+	nj.set("mykey", "bar");
+	nj.disconnect();
+
+	t.set("mykey", "foo");
+	List<Object> resp = t.exec();
+	assertNotNull(resp);
+	assertEquals(1, resp.size());
+	assertEquals("foo", jedis.get("mykey"));
     }
 }

@@ -38,7 +38,7 @@ public class AggregateTestResultsProvider implements TestResultsProvider {
     public void visitClasses(final Action<? super TestClassResult> visitor) {
         classOutputProviders = new HashMap<String, TestResultsProvider>();
         for (File dir : binaryResultDirs) {
-            final BinaryResultBackedTestResultsProvider provider = new BinaryResultBackedTestResultsProvider(dir);
+            final BinaryResultBackedTestResultsProvider provider = new BinaryResultBackedTestResultsProvider(dir, new TestOutputStore(dir).reader());
             provider.visitClasses(new Action<TestClassResult>() {
                 public void execute(TestClassResult classResult) {
                     if (classOutputProviders.containsKey(classResult.getClassName())) {
@@ -56,11 +56,15 @@ public class AggregateTestResultsProvider implements TestResultsProvider {
         return classOutputProviders.get(className).hasOutput(className, destination);
     }
 
-    public void writeOutputs(String className, TestOutputEvent.Destination destination, Writer writer) {
-        classOutputProviders.get(className).writeOutputs(className, destination, writer);
+    public void writeAllOutput(String className, TestOutputEvent.Destination destination, Writer writer) {
+        classOutputProviders.get(className).writeAllOutput(className, destination, writer);
     }
 
-    public void writeOutputs(String className, String testCaseName, TestOutputEvent.Destination destination, Writer writer) {
-        classOutputProviders.get(className).writeOutputs(className, testCaseName, destination, writer);
+    public void writeNonTestOutput(String className, TestOutputEvent.Destination destination, Writer writer) {
+        classOutputProviders.get(className).writeNonTestOutput(className, destination, writer);
+    }
+
+    public void writeTestOutput(String className, Object testId, TestOutputEvent.Destination destination, Writer writer) {
+        classOutputProviders.get(className).writeTestOutput(className, testId, destination, writer);
     }
 }

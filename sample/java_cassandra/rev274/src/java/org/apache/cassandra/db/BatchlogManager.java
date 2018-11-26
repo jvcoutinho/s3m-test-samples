@@ -46,7 +46,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UUIDType;
@@ -67,7 +66,6 @@ import org.apache.cassandra.utils.WrappedRunnable;
 public class BatchlogManager implements BatchlogManagerMBean
 {
     private static final String MBEAN_NAME = "org.apache.cassandra.db:type=BatchlogManager";
-    private static final int VERSION = MessagingService.VERSION_12;
     private static final long REPLAY_INTERVAL = 60 * 1000; // milliseconds
     private static final int PAGE_SIZE = 128; // same as HHOM, for now, w/out using any heuristics. TODO: set based on avg batch size.
 
@@ -104,7 +102,7 @@ public class BatchlogManager implements BatchlogManagerMBean
 
     public int countAllBatches()
     {
-        return (int) process("SELECT count(*) FROM %s.%s", Table.SYSTEM_KS, SystemTable.BATCHLOG_CF).one().getLong("count");
+        return (int) process("SELECT count(*) FROM %s.%s", Keyspace.SYSTEM_KS, SystemKeyspace.BATCHLOG_CF).one().getLong("count");
     }
 
     public long getTotalBatchesReplayed()
@@ -135,26 +133,24 @@ public class BatchlogManager implements BatchlogManagerMBean
         ByteBuffer writtenAt = LongType.instance.decompose(now / 1000);
         ByteBuffer data = serializeRowMutations(mutations);
 
-        ColumnFamily cf = ColumnFamily.create(CFMetaData.BatchlogCf);
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(CFMetaData.BatchlogCf);
         cf.addColumn(new Column(columnName(""), ByteBufferUtil.EMPTY_BYTE_BUFFER, now));
-        cf.addColumn(new Column(columnName("written_at"), writtenAt, now));
         cf.addColumn(new Column(columnName("data"), data, now));
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, UUIDType.instance.decompose(uuid));
-        rm.add(cf);
+        cf.addColumn(new Column(columnName("written_at"), writtenAt, now));
 
-        return rm;
+        return new RowMutation(Keyspace.SYSTEM_KS, UUIDType.instance.decompose(uuid), cf);
     }
 
     private static ByteBuffer serializeRowMutations(Collection<RowMutation> mutations)
     {
         FastByteArrayOutputStream bos = new FastByteArrayOutputStream();
-        DataOutputStream dos = new DataOutputStream(bos);
+        DataOutputStream out = new DataOutputStream(bos);
 
         try
         {
-            dos.writeInt(mutations.size());
+            out.writeInt(mutations.size());
             for (RowMutation rm : mutations)
-                RowMutation.serializer.serialize(rm, dos, VERSION);
+                RowMutation.serializer.serialize(rm, out, MessagingService.VERSION_12);
         }
         catch (IOException e)
         {
@@ -179,9 +175,9 @@ public class BatchlogManager implements BatchlogManagerMBean
 
         try
         {
-            UntypedResultSet page = process("SELECT id, data, written_at FROM %s.%s LIMIT %d",
-                                            Table.SYSTEM_KS,
-                                            SystemTable.BATCHLOG_CF,
+            UntypedResultSet page = process("SELECT id, data, written_at, version FROM %s.%s LIMIT %d",
+                                            Keyspace.SYSTEM_KS,
+                                            SystemKeyspace.BATCHLOG_CF,
                                             PAGE_SIZE);
 
             while (!page.isEmpty())
@@ -191,9 +187,9 @@ public class BatchlogManager implements BatchlogManagerMBean
                 if (page.size() < PAGE_SIZE)
                     break; // we've exhausted the batchlog, next query would be empty.
 
-                page = process("SELECT id, data, written_at FROM %s.%s WHERE token(id) > token(%s) LIMIT %d",
-                               Table.SYSTEM_KS,
-                               SystemTable.BATCHLOG_CF,
+                page = process("SELECT id, data, written_at, version FROM %s.%s WHERE token(id) > token(%s) LIMIT %d",
+                               Keyspace.SYSTEM_KS,
+                               SystemKeyspace.BATCHLOG_CF,
                                id,
                                PAGE_SIZE);
             }
@@ -216,22 +212,23 @@ public class BatchlogManager implements BatchlogManagerMBean
         {
             id = row.getUUID("id");
             long writtenAt = row.getLong("written_at");
+            int version = row.has("version") ? row.getInt("version") : MessagingService.VERSION_12;
             // enough time for the actual write + batchlog entry mutation delivery (two separate requests).
             long timeout = DatabaseDescriptor.getWriteRpcTimeout() * 2; // enough time for the actual write + BM removal mutation
             if (System.currentTimeMillis() < writtenAt + timeout)
                 continue; // not ready to replay yet, might still get a deletion.
-            replayBatch(id, row.getBytes("data"), writtenAt, rateLimiter);
+            replayBatch(id, row.getBytes("data"), writtenAt, version, rateLimiter);
         }
         return id;
     }
 
-    private void replayBatch(UUID id, ByteBuffer data, long writtenAt, RateLimiter rateLimiter)
+    private void replayBatch(UUID id, ByteBuffer data, long writtenAt, int version, RateLimiter rateLimiter)
     {
         logger.debug("Replaying batch {}", id);
 
         try
         {
-            replaySerializedMutations(data, writtenAt, rateLimiter);
+            replaySerializedMutations(data, writtenAt, version, rateLimiter);
         }
         catch (IOException e)
         {
@@ -245,33 +242,33 @@ public class BatchlogManager implements BatchlogManagerMBean
 
     private void deleteBatch(UUID id)
     {
-        RowMutation mutation = new RowMutation(Table.SYSTEM_KS, UUIDType.instance.decompose(id));
-        mutation.delete(new QueryPath(SystemTable.BATCHLOG_CF, null, null), FBUtilities.timestampMicros());
+        RowMutation mutation = new RowMutation(Keyspace.SYSTEM_KS, UUIDType.instance.decompose(id));
+        mutation.delete(SystemKeyspace.BATCHLOG_CF, FBUtilities.timestampMicros());
         mutation.apply();
     }
 
-    private void replaySerializedMutations(ByteBuffer data, long writtenAt, RateLimiter rateLimiter) throws IOException
+    private void replaySerializedMutations(ByteBuffer data, long writtenAt, int version, RateLimiter rateLimiter) throws IOException
     {
         DataInputStream in = new DataInputStream(ByteBufferUtil.inputStream(data));
         int size = in.readInt();
         for (int i = 0; i < size; i++)
-            replaySerializedMutation(RowMutation.serializer.deserialize(in, VERSION), writtenAt, rateLimiter);
+            replaySerializedMutation(RowMutation.serializer.deserialize(in, version), writtenAt, version, rateLimiter);
     }
 
     /*
      * We try to deliver the mutations to the replicas ourselves if they are alive and only resort to writing hints
      * when a replica is down or a write request times out.
      */
-    private void replaySerializedMutation(RowMutation mutation, long writtenAt, RateLimiter rateLimiter) throws IOException
+    private void replaySerializedMutation(RowMutation mutation, long writtenAt, int version, RateLimiter rateLimiter)
     {
         int ttl = calculateHintTTL(mutation, writtenAt);
         if (ttl <= 0)
             return; // the mutation isn't safe to replay.
 
-        Set<InetAddress> liveEndpoints = new HashSet<InetAddress>();
-        String ks = mutation.getTable();
-        Token tk = StorageService.getPartitioner().getToken(mutation.key());
-        int mutationSize = (int) RowMutation.serializer.serializedSize(mutation, VERSION);
+        Set<InetAddress> liveEndpoints = new HashSet<>();
+        String ks = mutation.getKeyspaceName();
+        Token<?> tk = StorageService.getPartitioner().getToken(mutation.key());
+        int mutationSize = (int) RowMutation.serializer.serializedSize(mutation, version);
 
         for (InetAddress endpoint : Iterables.concat(StorageService.instance.getNaturalEndpoints(ks, tk),
                                                      StorageService.instance.getTokenMetadata().pendingEndpointsFor(tk, ks)))
@@ -289,10 +286,10 @@ public class BatchlogManager implements BatchlogManagerMBean
             attemptDirectDelivery(mutation, writtenAt, liveEndpoints);
     }
 
-    private void attemptDirectDelivery(RowMutation mutation, long writtenAt, Set<InetAddress> endpoints) throws IOException
+    private void attemptDirectDelivery(RowMutation mutation, long writtenAt, Set<InetAddress> endpoints)
     {
         List<WriteResponseHandler> handlers = Lists.newArrayList();
-        final CopyOnWriteArraySet<InetAddress> undelivered = new CopyOnWriteArraySet<InetAddress>(endpoints);
+        final CopyOnWriteArraySet<InetAddress> undelivered = new CopyOnWriteArraySet<>(endpoints);
         for (final InetAddress ep : endpoints)
         {
             Runnable callback = new Runnable()
@@ -333,7 +330,7 @@ public class BatchlogManager implements BatchlogManagerMBean
     // this ensures that deletes aren't "undone" by an old batch replay.
     private int calculateHintTTL(RowMutation mutation, long writtenAt)
     {
-        return (int) ((mutation.calculateHintTTL() * 1000 - (System.currentTimeMillis() - writtenAt)) / 1000);
+        return (int) ((HintedHandOffManager.calculateHintTTL(mutation) * 1000 - (System.currentTimeMillis() - writtenAt)) / 1000);
     }
 
     private static ByteBuffer columnName(String name)
@@ -344,9 +341,9 @@ public class BatchlogManager implements BatchlogManagerMBean
     // force flush + compaction to reclaim space from the replayed batches
     private void cleanup() throws ExecutionException, InterruptedException
     {
-        ColumnFamilyStore cfs = Table.open(Table.SYSTEM_KS).getColumnFamilyStore(SystemTable.BATCHLOG_CF);
+        ColumnFamilyStore cfs = Keyspace.open(Keyspace.SYSTEM_KS).getColumnFamilyStore(SystemKeyspace.BATCHLOG_CF);
         cfs.forceBlockingFlush();
-        Collection<Descriptor> descriptors = new ArrayList<Descriptor>();
+        Collection<Descriptor> descriptors = new ArrayList<>();
         for (SSTableReader sstr : cfs.getSSTables())
             descriptors.add(sstr.descriptor);
         if (!descriptors.isEmpty()) // don't pollute the logs if there is nothing to compact.

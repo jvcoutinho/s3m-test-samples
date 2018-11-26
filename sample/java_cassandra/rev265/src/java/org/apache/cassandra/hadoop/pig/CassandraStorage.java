@@ -1,18 +1,19 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements. See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership. The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.cassandra.hadoop.pig;
 
@@ -21,11 +22,12 @@ import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.util.*;
 
+import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.apache.cassandra.auth.IAuthenticator;
-import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.db.marshal.*;
@@ -419,6 +421,10 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
                 {
                     throw new IOException(e);
                 }
+                catch (SyntaxException e)
+                {
+                    throw new IOException(e);
+                }
             }
         }
         return validators;
@@ -434,6 +440,10 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
             return TypeParser.parse(type);
         }
         catch (ConfigurationException e)
+        {
+            throw new IOException(e);
+        }
+        catch (SyntaxException e)
         {
             throw new IOException(e);
         }
@@ -560,7 +570,7 @@ public class CassandraStorage extends LoadFunc implements StoreFuncInterface, Lo
         else
             outputFormatClass = DEFAULT_OUTPUT_FORMAT;
         if (System.getenv(PIG_ALLOW_DELETES) != null)
-            allow_deletes = Boolean.valueOf(System.getenv(PIG_ALLOW_DELETES));
+            allow_deletes = Boolean.parseBoolean(System.getenv(PIG_ALLOW_DELETES));
     }
 
     private String getFullyQualifiedClassName(String classname)

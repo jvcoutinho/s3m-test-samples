@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db.compaction;
 
 import java.io.File;
@@ -32,6 +31,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.db.compaction.CompactionManager.CompactionExecutorStatsCollector;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
@@ -43,16 +43,12 @@ public class CompactionTask extends AbstractCompactionTask
 {
     protected static final Logger logger = LoggerFactory.getLogger(CompactionTask.class);
     protected final int gcBefore;
-    protected boolean isUserDefined;
-    protected OperationType compactionType;
     protected static long totalBytesCompacted = 0;
 
     public CompactionTask(ColumnFamilyStore cfs, Collection<SSTableReader> sstables, final int gcBefore)
     {
         super(cfs, sstables);
         this.gcBefore = gcBefore;
-        this.isUserDefined = false;
-        this.compactionType = OperationType.COMPACTION;
     }
 
     public static synchronized long addToTotalBytesCompacted(long bytesCompacted)
@@ -128,11 +124,11 @@ public class CompactionTask extends AbstractCompactionTask
                                       : new CompactionIterable(compactionType, strategy.getScanners(toCompact), controller);
         CloseableIterator<AbstractCompactedRow> iter = ci.iterator();
         Iterator<AbstractCompactedRow> nni = Iterators.filter(iter, Predicates.notNull());
-        Map<DecoratedKey, Long> cachedKeys = new HashMap<DecoratedKey, Long>();
+        Map<DecoratedKey, RowIndexEntry> cachedKeys = new HashMap<DecoratedKey, RowIndexEntry>();
 
         // we can't preheat until the tracker has been set. This doesn't happen until we tell the cfs to
         // replace the old entries.  Track entries to preheat here until then.
-        Map<SSTableReader, Map<DecoratedKey, Long>> cachedKeyMap =  new HashMap<SSTableReader, Map<DecoratedKey, Long>>();
+        Map<SSTableReader, Map<DecoratedKey, RowIndexEntry>> cachedKeyMap =  new HashMap<SSTableReader, Map<DecoratedKey, RowIndexEntry>>();
 
         Collection<SSTableReader> sstables = new ArrayList<SSTableReader>();
         Collection<SSTableWriter> writers = new ArrayList<SSTableWriter>();
@@ -161,7 +157,7 @@ public class CompactionTask extends AbstractCompactionTask
                 if (row.isEmpty())
                     continue;
 
-                long position = writer.append(row);
+                RowIndexEntry indexEntry = writer.append(row);
                 totalkeysWritten++;
 
                 if (DatabaseDescriptor.getPreheatKeyCache())
@@ -170,12 +166,12 @@ public class CompactionTask extends AbstractCompactionTask
                     {
                         if (sstable.getCachedPosition(row.key, false) != null)
                         {
-                            cachedKeys.put(row.key, position);
+                            cachedKeys.put(row.key, indexEntry);
                             break;
                         }
                     }
                 }
-                if (!nni.hasNext() || newSSTableSegmentThresholdReached(writer, position))
+                if (!nni.hasNext() || newSSTableSegmentThresholdReached(writer, indexEntry.position))
                 {
                     SSTableReader toIndex = writer.closeAndOpenReader(getMaxDataAge(toCompact));
                     cachedKeyMap.put(toIndex, cachedKeys);
@@ -184,7 +180,7 @@ public class CompactionTask extends AbstractCompactionTask
                     {
                         writer = cfs.createCompactionWriter(keysPerSSTable, compactionFileLocation, toCompact);
                         writers.add(writer);
-                        cachedKeys = new HashMap<DecoratedKey, Long>();
+                        cachedKeys = new HashMap<DecoratedKey, RowIndexEntry>();
                     }
                 }
             }
@@ -204,10 +200,10 @@ public class CompactionTask extends AbstractCompactionTask
 
         cfs.replaceCompactedSSTables(toCompact, sstables, compactionType);
         // TODO: this doesn't belong here, it should be part of the reader to load when the tracker is wired up
-        for (Entry<SSTableReader, Map<DecoratedKey, Long>> ssTableReaderMapEntry : cachedKeyMap.entrySet())
+        for (Entry<SSTableReader, Map<DecoratedKey, RowIndexEntry>> ssTableReaderMapEntry : cachedKeyMap.entrySet())
         {
             SSTableReader key = ssTableReaderMapEntry.getKey();
-            for (Entry<DecoratedKey, Long> entry : ssTableReaderMapEntry.getValue().entrySet())
+            for (Entry<DecoratedKey, RowIndexEntry> entry : ssTableReaderMapEntry.getValue().entrySet())
                key.cacheKey(entry.getKey(), entry.getValue());
         }
 
@@ -267,17 +263,5 @@ public class CompactionTask extends AbstractCompactionTask
                 max = sstable.maxDataAge;
         }
         return max;
-    }
-
-    public CompactionTask isUserDefined(boolean isUserDefined)
-    {
-        this.isUserDefined = isUserDefined;
-        return this;
-    }
-
-    public CompactionTask setCompactionType(OperationType compactionType)
-    {
-        this.compactionType = compactionType;
-        return this;
     }
 }

@@ -34,10 +34,11 @@ import org.apache.cassandra.auth.AllowAllAuthenticator;
 import org.apache.cassandra.auth.AllowAllAuthority;
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.auth.IAuthority;
+import org.apache.cassandra.cache.IRowCacheProvider;
 import org.apache.cassandra.config.Config.RequestSchedulerId;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DefsTable;
-import org.apache.cassandra.db.migration.Migration;
+import org.apache.cassandra.db.SystemTable;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.MmappedSegmentedFile;
@@ -47,6 +48,8 @@ import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.SeedProvider;
 import org.apache.cassandra.scheduler.IRequestScheduler;
 import org.apache.cassandra.scheduler.NoScheduler;
+import org.apache.cassandra.service.CacheService;
+import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.thrift.CassandraDaemon;
 import org.apache.cassandra.utils.FBUtilities;
 import org.yaml.snakeyaml.Loader;
@@ -68,7 +71,7 @@ public class DatabaseDescriptor
     private static IPartitioner partitioner;
 
     private static Config.DiskAccessMode indexAccessMode;
-    
+
     private static Config conf;
 
     private static IAuthenticator authenticator = new AllowAllAuthenticator();
@@ -79,6 +82,9 @@ public class DatabaseDescriptor
     private static IRequestScheduler requestScheduler;
     private static RequestSchedulerId requestSchedulerId;
     private static RequestSchedulerOptions requestSchedulerOptions;
+
+    private static int keyCacheSizeInMB;
+    private static IRowCacheProvider rowCacheProvider;
 
     /**
      * Inspect the classpath to find storage configuration file
@@ -105,14 +111,20 @@ public class DatabaseDescriptor
 
         return url;
     }
-    
+
     static
+    {
+        if (Config.getLoadYaml())
+            loadYaml();
+        else
+            conf = new Config();
+    }
+    static void loadYaml()
     {
         try
         {
             URL url = getStorageConfigURL();
             logger.info("Loading settings from " + url);
-
             InputStream input = null;
             try
             {
@@ -129,7 +141,7 @@ public class DatabaseDescriptor
             constructor.addTypeDescription(seedDesc);
             Yaml yaml = new Yaml(new Loader(constructor));
             conf = (Config)yaml.load(input);
-            
+
             if (conf.commitlog_sync == null)
             {
                 throw new ConfigurationException("Missing required directive CommitLogSync");
@@ -140,7 +152,7 @@ public class DatabaseDescriptor
                 if (conf.commitlog_sync_batch_window_in_ms == null)
                 {
                     throw new ConfigurationException("Missing value for commitlog_sync_batch_window_in_ms: Double expected.");
-                } 
+                }
                 else if (conf.commitlog_sync_period_in_ms != null)
                 {
                     throw new ConfigurationException("Batch sync specified, but commitlog_sync_period_in_ms found. Only specify commitlog_sync_batch_window_in_ms when using batch sync");
@@ -160,7 +172,7 @@ public class DatabaseDescriptor
                 logger.debug("Syncing log with a period of " + conf.commitlog_sync_period_in_ms);
             }
 
-            /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */           
+            /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
             if (conf.disk_access_mode == Config.DiskAccessMode.auto)
             {
                 conf.disk_access_mode = System.getProperty("os.arch").contains("64") ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
@@ -182,6 +194,8 @@ public class DatabaseDescriptor
             if (conf.disk_access_mode == Config.DiskAccessMode.mmap)
                 MmappedSegmentedFile.initCleaner();
 
+	        logger.debug("page_cache_hinting is " + conf.populate_io_cache_on_flush);
+
             /* Authentication and authorization backend, implementing IAuthenticator and IAuthority */
             if (conf.authenticator != null)
                 authenticator = FBUtilities.<IAuthenticator>construct(conf.authenticator, "authenticator");
@@ -189,7 +203,7 @@ public class DatabaseDescriptor
                 authority = FBUtilities.<IAuthority>construct(conf.authority, "authority");
             authenticator.validateConfiguration();
             authority.validateConfiguration();
-            
+
             /* Hashing strategy */
             if (conf.partitioner == null)
             {
@@ -209,9 +223,9 @@ public class DatabaseDescriptor
             {
                 throw new ConfigurationException("phi_convict_threshold must be between 5 and 16");
             }
-            
+
             /* Thread per pool */
-            if (conf.concurrent_reads != null && conf.concurrent_reads < 2) 
+            if (conf.concurrent_reads != null && conf.concurrent_reads < 2)
             {
                 throw new ConfigurationException("concurrent_reads must be at least 2");
             }
@@ -262,7 +276,7 @@ public class DatabaseDescriptor
                 {
                     throw new ConfigurationException("broadcast_address cannot be 0.0.0.0!");
                 }
-                
+
                 try
                 {
                     broadcastAddress = InetAddress.getByName(conf.broadcast_address);
@@ -272,7 +286,7 @@ public class DatabaseDescriptor
                     throw new ConfigurationException("Unknown broadcast_address '" + conf.broadcast_address + "'");
                 }
             }
-            
+
             /* Local IP or hostname to bind RPC server to */
             if (conf.rpc_address != null)
             {
@@ -347,7 +361,7 @@ public class DatabaseDescriptor
             {
                 logger.debug("setting auto_bootstrap to " + conf.auto_bootstrap);
             }
-            
+
            if (conf.in_memory_compaction_limit_in_mb != null && conf.in_memory_compaction_limit_in_mb <= 0)
             {
                 throw new ConfigurationException("in_memory_compaction_limit_in_mb must be a positive integer");
@@ -403,6 +417,24 @@ public class DatabaseDescriptor
             if (conf.initial_token != null)
                 partitioner.getTokenFactory().validate(conf.initial_token);
 
+            try
+            {
+                // if key_cache_size_in_mb option was set to "auto" then size of the cache should be "min(5% of Heap (in MB), 100MB)
+                keyCacheSizeInMB = (conf.key_cache_size_in_mb == null)
+                                    ? Math.min((int) (Runtime.getRuntime().totalMemory() * 0.05 / 1024 / 1024), 100)
+                                    : conf.key_cache_size_in_mb;
+
+                if (keyCacheSizeInMB < 0)
+                    throw new NumberFormatException(); // to escape duplicating error message
+            }
+            catch (NumberFormatException e)
+            {
+                throw new ConfigurationException("key_cache_size_in_mb option was set incorrectly to '"
+                                                 + conf.key_cache_size_in_mb + "', supported values are <integer> >= 0.");
+            }
+
+            rowCacheProvider = FBUtilities.newCacheProvider(conf.row_cache_provider);
+
             // Hardcoded system tables
             KSMetaData systemMeta = KSMetaData.systemKeyspace();
             Schema.instance.load(CFMetaData.StatusCf);
@@ -412,6 +444,9 @@ public class DatabaseDescriptor
             Schema.instance.load(CFMetaData.IndexCf);
             Schema.instance.load(CFMetaData.NodeIdCf);
             Schema.instance.load(CFMetaData.VersionCf);
+            Schema.instance.load(CFMetaData.SchemaKeyspacesCf);
+            Schema.instance.load(CFMetaData.SchemaColumnFamiliesCf);
+            Schema.instance.load(CFMetaData.SchemaColumnsCf);
 
             Schema.instance.addSystemTable(systemMeta);
 
@@ -420,7 +455,7 @@ public class DatabaseDescriptor
             {
                 throw new ConfigurationException("seeds configuration is missing; a minimum of one seed is required.");
             }
-            try 
+            try
             {
                 Class seedProviderClass = Class.forName(conf.seed_provider.class_name);
                 seedProvider = (SeedProvider)seedProviderClass.getConstructor(Map.class).newInstance(conf.seed_provider.parameters);
@@ -458,63 +493,74 @@ public class DatabaseDescriptor
     }
 
     /** load keyspace (table) definitions, but do not initialize the table instances. */
-    public static void loadSchemas() throws IOException                         
+    public static void loadSchemas() throws IOException
     {
-        // we can load tables from local storage if a version is set in the system table and that acutally maps to
-        // real data in the definitions table.  If we do end up loading from xml, store the defintions so that we
-        // don't load from xml anymore.
-        UUID uuid = Migration.getLastMigrationId();
-        if (uuid == null)
+        ColumnFamilyStore schemaCFS = SystemTable.schemaCFS(SystemTable.SCHEMA_KEYSPACES_CF);
+
+        // if table with definitions is empty try loading the old way
+        if (schemaCFS.estimateKeys() == 0)
         {
-            logger.info("Couldn't detect any schema definitions in local storage.");
-            // peek around the data directories to see if anything is there.
-            boolean hasExistingTables = false;
-            for (String dataDir : getAllDataFileLocations())
+            // we can load tables from local storage if a version is set in the system table and that actually maps to
+            // real data in the definitions table.  If we do end up loading from xml, store the definitions so that we
+            // don't load from xml anymore.
+            UUID uuid = MigrationManager.getLastMigrationId();
+
+            if (uuid == null)
             {
-                File dataPath = new File(dataDir);
-                if (dataPath.exists() && dataPath.isDirectory())
+                logger.info("Couldn't detect any schema definitions in local storage.");
+                // peek around the data directories to see if anything is there.
+                if (hasExistingNoSystemTables())
+                    logger.info("Found table data in data directories. Consider using the CLI to define your schema.");
+                else
+                    logger.info("To create keyspaces and column families, see 'help create keyspace' in the CLI, or set up a schema using the thrift system_* calls.");
+            }
+            else
+            {
+                logger.info("Loading schema version " + uuid.toString());
+                Collection<KSMetaData> tableDefs = DefsTable.loadFromStorage(uuid);
+
+                // happens when someone manually deletes all tables and restarts.
+                if (tableDefs.size() == 0)
                 {
-                    // see if there are other directories present.
-                    int dirCount = dataPath.listFiles(new FileFilter()
-                    {
-                        public boolean accept(File pathname)
-                        {
-                            return pathname.isDirectory();
-                        }
-                    }).length;
-                    if (dirCount > 0)
-                        hasExistingTables = true;
+                    logger.warn("No schema definitions were found in local storage.");
                 }
-                if (hasExistingTables)
+                else // if non-system tables where found, trying to load them
                 {
-                    break;
+                    Schema.instance.load(tableDefs);
                 }
             }
-            
-            if (hasExistingTables)
-                logger.info("Found table data in data directories. Consider using the CLI to define your schema.");
-            else
-                logger.info("To create keyspaces and column families, see 'help create keyspace' in the CLI, or set up a schema using the thrift system_* calls.");
         }
         else
         {
-            logger.info("Loading schema version " + uuid.toString());
-            Collection<KSMetaData> tableDefs = DefsTable.loadFromStorage(uuid);   
+            Schema.instance.load(DefsTable.loadFromTable());
+        }
 
-            // happens when someone manually deletes all tables and restarts.
-            if (tableDefs.size() == 0)
+        Schema.instance.updateVersion();
+        Schema.instance.fixCFMaxId();
+    }
+
+    private static boolean hasExistingNoSystemTables()
+    {
+        for (String dataDir : getAllDataFileLocations())
+        {
+            File dataPath = new File(dataDir);
+            if (dataPath.exists() && dataPath.isDirectory())
             {
-                logger.warn("No schema definitions were found in local storage.");
-                // set version so that migrations leading up to emptiness aren't replayed.
-                Schema.instance.setVersion(uuid);
-            }
-            else // if non-system tables where found, trying to load them
-            {
-                Schema.instance.load(tableDefs, uuid);
+                // see if there are other directories present.
+                int dirCount = dataPath.listFiles(new FileFilter()
+                {
+                    public boolean accept(File pathname)
+                    {
+                        return pathname.isDirectory();
+                    }
+                }).length;
+
+                if (dirCount > 0)
+                    return true;
             }
         }
 
-        Schema.instance.fixCFMaxId();
+        return false;
     }
 
     public static IAuthenticator getAuthenticator()
@@ -531,8 +577,8 @@ public class DatabaseDescriptor
     {
         return conf.thrift_max_message_length_in_mb * 1024 * 1024;
     }
-    
-    public static int getThriftFramedTransportSize() 
+
+    public static int getThriftFramedTransportSize()
     {
         return conf.thrift_framed_transport_size_in_mb * 1024 * 1024;
     }
@@ -572,7 +618,13 @@ public class DatabaseDescriptor
     {
         return partitioner;
     }
-    
+
+    /* For tests ONLY, don't use otherwise or all hell will break loose */
+    public static void setPartitioner(IPartitioner newPartitioner)
+    {
+        partitioner = newPartitioner;
+    }
+
     public static IEndpointSnitch getEndpointSnitch()
     {
         return snitch;
@@ -601,7 +653,7 @@ public class DatabaseDescriptor
     {
         return conf.job_tracker_host;
     }
-    
+
     public static int getColumnIndexSize()
     {
     	return conf.column_index_size_in_kb * 1024;
@@ -617,9 +669,14 @@ public class DatabaseDescriptor
         return System.getProperty("cassandra.replace_token", null);
     }
 
-   public static String getClusterName()
+    public static String getClusterName()
     {
         return conf.cluster_name;
+    }
+
+    public static int getMaxStreamingRetries()
+    {
+        return conf.max_streaming_retries;
     }
 
     public static String getJobJarLocation()
@@ -722,115 +779,49 @@ public class DatabaseDescriptor
         return conf.data_file_directories;
     }
 
-    /**
-     * Get a list of data directories for a given table
-     * 
-     * @param table name of the table.
-     * 
-     * @return an array of path to the data directories. 
-     */
-    public static String[] getAllDataFileLocationsForTable(String table)
-    {
-        String[] tableLocations = new String[conf.data_file_directories.length];
-
-        for (int i = 0; i < conf.data_file_directories.length; i++)
-        {
-            tableLocations[i] = conf.data_file_directories[i] + File.separator + table;
-        }
-
-        return tableLocations;
-    }
-
-
     public static String getCommitLogLocation()
     {
         return conf.commitlog_directory;
+    }
+
+    /**
+     * size of commitlog segments to allocate 
+     */
+    public static int getCommitLogSegmentSize()
+    {
+        return conf.commitlog_segment_size_in_mb * 1024 * 1024;
     }
 
     public static String getSavedCachesLocation()
     {
         return conf.saved_caches_directory;
     }
-    
+
     public static Set<InetAddress> getSeeds()
     {
         return Collections.unmodifiableSet(new HashSet(seedProvider.getSeeds()));
-    }
-
-    public synchronized static String getDataFileLocationForTable(String table, long expectedCompactedFileSize)
-    {
-        return getDataFileLocationForTable(table, expectedCompactedFileSize, true);
-    }
-
-    /*
-     * Loop through all the disks to see which disk has the max free space
-     * return the disk with max free space for compactions. If the size of the expected
-     * compacted file is greater than the max disk space available return null, we cannot
-     * do compaction in this case.
-     *
-     * @param table name of the table.
-     * @param expectedCompactedSize expected file size in bytes.
-     * @param ensureFreeSpace Flag if the function should ensure enough free space exists for the expected file size.
-     *                        If False and there is not enough free space a warning is logged, and the dir with the most space is returned.
-     */
-    public synchronized static String getDataFileLocationForTable(String table, long expectedCompactedFileSize, boolean ensureFreeSpace)
-    {
-        long maxFreeDisk = 0;
-        int maxDiskIndex = 0;
-        String dataFileDirectory = null;
-        String[] dataDirectoryForTable = getAllDataFileLocationsForTable(table);
-
-        for (int i = 0; i < dataDirectoryForTable.length; i++)
-        {
-            File f = new File(dataDirectoryForTable[i]);
-
-            if (maxFreeDisk < f.getUsableSpace())
-            {
-                maxFreeDisk = f.getUsableSpace();
-                maxDiskIndex = i;
-            }
-        }
-
-        logger.debug("expected data files size is {}; largest free partition has {} bytes free",
-                     expectedCompactedFileSize,
-                     maxFreeDisk);
-
-        // Load factor of 0.9 we do not want to use the entire disk that is too risky.
-        maxFreeDisk = (long) (0.9 * maxFreeDisk);
-        if (!ensureFreeSpace || expectedCompactedFileSize < maxFreeDisk)
-        {
-            dataFileDirectory = dataDirectoryForTable[maxDiskIndex];
-
-            if (expectedCompactedFileSize >= maxFreeDisk)
-                logger.warn(String.format("Data file location %s only has %d free, expected size is %d",
-                                          dataFileDirectory,
-                                          maxFreeDisk,
-                                          expectedCompactedFileSize));
-        }
-
-        return dataFileDirectory;
     }
 
     public static InetAddress getListenAddress()
     {
         return listenAddress;
     }
-    
+
     public static InetAddress getBroadcastAddress()
     {
         return broadcastAddress;
     }
-    
+
     public static void setBroadcastAddress(InetAddress broadcastAdd)
     {
         broadcastAddress = broadcastAdd;
     }
-    
+
     public static InetAddress getRpcAddress()
     {
         return rpcAddress;
     }
-    
+
     public static String getRpcServerType()
     {
         return conf.rpc_server_type;
@@ -845,12 +836,12 @@ public class DatabaseDescriptor
     {
         return conf.rpc_min_threads;
     }
-    
+
     public static Integer getRpcMaxThreads()
     {
         return conf.rpc_max_threads;
     }
-    
+
     public static Integer getRpcSendBufferSize()
     {
         return conf.rpc_send_buff_size_in_bytes;
@@ -885,16 +876,6 @@ public class DatabaseDescriptor
         return indexAccessMode;
     }
 
-    public static int getIndexedReadBufferSizeInKB()
-    {
-        return conf.column_index_size_in_kb;
-    }
-
-    public static int getSlicedReadBufferSizeInKB()
-    {
-        return conf.sliced_buffer_size_in_kb;
-    }
-
     public static boolean isSnapshotBeforeCompaction()
     {
         return conf.snapshot_before_compaction;
@@ -924,7 +905,7 @@ public class DatabaseDescriptor
         return conf.index_interval;
     }
 
-    public static File getSerializedCachePath(String ksName, String cfName, ColumnFamilyStore.CacheType cacheType)
+    public static File getSerializedCachePath(String ksName, String cfName, CacheService.CacheType cacheType)
     {
         return new File(conf.saved_caches_directory + File.separator + ksName + "-" + cfName + "-" + cacheType);
     }
@@ -1001,9 +982,14 @@ public class DatabaseDescriptor
             throw new ConfigurationException("memtable_operations_in_millions must be less than " + Long.MAX_VALUE / 1024 * 1024);
     }
 
-    public static boolean incrementalBackupsEnabled()
+    public static boolean isIncrementalBackupsEnabled()
     {
         return conf.incremental_backups;
+    }
+
+    public static void setIncrementalBackupsEnabled(boolean value)
+    {
+        conf.incremental_backups = value;
     }
 
     public static int getFlushQueueSize()
@@ -1023,8 +1009,58 @@ public class DatabaseDescriptor
         return conf.commitlog_total_space_in_mb;
     }
 
+    public static boolean getTrickleFsync()
+    {
+        return conf.trickle_fsync;
+    }
+
+    public static int getTrickleFsyncIntervalInKb()
+    {
+        return conf.trickle_fsync_interval_in_kb;
+    }
+
+    public static int getKeyCacheSizeInMB()
+    {
+        return keyCacheSizeInMB;
+    }
+
+    public static int getKeyCacheSavePeriod()
+    {
+        return conf.key_cache_save_period;
+    }
+
+    public static int getKeyCacheKeysToSave()
+    {
+        return conf.key_cache_keys_to_save;
+    }
+
+    public static int getRowCacheSizeInMB()
+    {
+        return conf.row_cache_size_in_mb;
+    }
+
+    public static int getRowCacheSavePeriod()
+    {
+        return conf.row_cache_save_period;
+    }
+
+    public static int getRowCacheKeysToSave()
+    {
+        return conf.row_cache_keys_to_save;
+    }
+
+    public static IRowCacheProvider getRowCacheProvider()
+    {
+        return rowCacheProvider;
+    }
+
     public static int getStreamingSocketTimeout()
     {
         return conf.streaming_socket_timeout_in_ms;
+    }
+
+    public static boolean populateIOCacheOnFlush()
+    {
+        return conf.populate_io_cache_on_flush;
     }
 }

@@ -39,17 +39,15 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
 {
     public static final AbstractType<?> definitionType = UTF8Type.instance;
 
-    private static final String DEFAULT_KEY_ALIAS = "key";
-    private static final String DEFAULT_COLUMN_ALIAS = "column";
-    private static final String DEFAULT_VALUE_ALIAS = "value";
 
     public final CFMetaData cfm;
     // LinkedHashMap because the order does matter (it is the order in the composite type)
-    public final LinkedHashMap<ColumnIdentifier, Name> keys = new LinkedHashMap<ColumnIdentifier, Name>();
-    public final LinkedHashMap<ColumnIdentifier, Name> columns = new LinkedHashMap<ColumnIdentifier, Name>();
-    public final Name value;
+    private final LinkedHashMap<ColumnIdentifier, Name> partitionKeys = new LinkedHashMap<ColumnIdentifier, Name>();
+    private final LinkedHashMap<ColumnIdentifier, Name> clusteringColumns = new LinkedHashMap<ColumnIdentifier, Name>();
+    private final Name compactValue;
     // Keep metadata lexicographically ordered so that wildcard expansion have a deterministic order
-    public final Map<ColumnIdentifier, Name> metadata = new TreeMap<ColumnIdentifier, Name>();
+    private final Map<ColumnIdentifier, Name> staticColumns = new TreeMap<ColumnIdentifier, Name>();
+    private final Map<ColumnIdentifier, Name> regularColumns = new TreeMap<ColumnIdentifier, Name>();
 
     public final boolean isComposite;
     public final boolean hasCompositeKey;
@@ -64,135 +62,40 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
     {
         this.cfm = cfm;
 
-        if (cfm.getKeyValidator() instanceof CompositeType)
+        this.hasCompositeKey = cfm.getKeyValidator() instanceof CompositeType;
+        for (int i = 0; i < cfm.partitionKeyColumns().size(); ++i)
         {
-            this.hasCompositeKey = true;
-            CompositeType keyComposite = (CompositeType)cfm.getKeyValidator();
-            assert keyComposite.types.size() > 1;
-            for (int i = 0; i < keyComposite.types.size(); i++)
-            {
-                ColumnIdentifier id = getKeyId(cfm, i);
-                this.keys.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.KEY_ALIAS, i, keyComposite.types.get(i)));
-            }
+            ColumnIdentifier id = new ColumnIdentifier(cfm.partitionKeyColumns().get(i).name, definitionType);
+            this.partitionKeys.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.KEY_ALIAS, i, cfm.getKeyValidator().getComponents().get(i)));
+        }
+
+        this.isComposite = cfm.comparator instanceof CompositeType;
+        this.hasCollections = cfm.comparator.getComponents().get(cfm.comparator.componentsCount() - 1) instanceof ColumnToCollectionType;
+        this.isCompact = cfm.clusteringKeyColumns().size() == cfm.comparator.componentsCount();
+        for (int i = 0; i < cfm.clusteringKeyColumns().size(); ++i)
+        {
+            ColumnIdentifier id = new ColumnIdentifier(cfm.clusteringKeyColumns().get(i).name, definitionType);
+            this.clusteringColumns.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_ALIAS, i, cfm.comparator.getComponents().get(i)));
+        }
+
+        if (isCompact)
+        {
+            this.compactValue = createValue(cfm);
         }
         else
         {
-            this.hasCompositeKey = false;
-            ColumnIdentifier id = getKeyId(cfm, 0);
-            this.keys.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.KEY_ALIAS, 0, cfm.getKeyValidator()));
-        }
-
-        if (cfm.comparator instanceof CompositeType)
-        {
-            this.isComposite = true;
-            CompositeType composite = (CompositeType)cfm.comparator;
-            /*
-             * We are a "sparse" composite, i.e. a non-compact one, if either:
-             *   - the last type of the composite is a ColumnToCollectionType
-             *   - or we have one less alias than of composite types and the last type is UTF8Type.
-             *
-             * Note that this is not perfect: if someone upgrading from thrift "renames" all but
-             * the last column alias, the cf will be considered "sparse" and he will be stuck with
-             * that even though that might not be what he wants. But the simple workaround is
-             * for that user to rename all the aliases at the same time in the first place.
-             */
-            int last = composite.types.size() - 1;
-            AbstractType<?> lastType = composite.types.get(last);
-            if (lastType instanceof ColumnToCollectionType
-                || (cfm.getColumnAliases().size() == last && lastType instanceof UTF8Type))
+            this.compactValue = null;
+            for (ColumnDefinition def : cfm.regularColumns())
             {
-                // "sparse" composite
-                this.isCompact = false;
-                this.value = null;
-                assert cfm.getValueAlias() == null;
-                // check for collection type
-                if (lastType instanceof ColumnToCollectionType)
-                {
-                    --last;
-                    this.hasCollections = true;
-                }
-                else
-                {
-                    this.hasCollections = false;
-                }
-
-                for (int i = 0; i < last; i++)
-                {
-                    ColumnIdentifier id = getColumnId(cfm, i);
-                    this.columns.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_ALIAS, i, composite.types.get(i)));
-                }
-
-                for (Map.Entry<ByteBuffer, ColumnDefinition> def : cfm.getColumn_metadata().entrySet())
-                {
-                    ColumnIdentifier id = new ColumnIdentifier(def.getKey(), cfm.getColumnDefinitionComparator(def.getValue()));
-                    this.metadata.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_METADATA, def.getValue().getValidator()));
-                }
+                ColumnIdentifier id = new ColumnIdentifier(def.name, cfm.getColumnDefinitionComparator(def));
+                this.regularColumns.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_METADATA, def.getValidator()));
             }
-            else
+            for (ColumnDefinition def : cfm.staticColumns())
             {
-                // "dense" composite
-                this.isCompact = true;
-                this.hasCollections = false;
-                for (int i = 0; i < composite.types.size(); i++)
-                {
-                    ColumnIdentifier id = getColumnId(cfm, i);
-                    this.columns.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_ALIAS, i, composite.types.get(i)));
-                }
-                this.value = createValue(cfm);
+                ColumnIdentifier id = new ColumnIdentifier(def.name, cfm.getColumnDefinitionComparator(def));
+                this.staticColumns.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.STATIC, def.getValidator()));
             }
         }
-        else
-        {
-            this.isComposite = false;
-            this.hasCollections = false;
-            if (!cfm.getColumnAliases().isEmpty() || cfm.getColumn_metadata().isEmpty())
-            {
-                // dynamic CF
-                this.isCompact = true;
-                ColumnIdentifier id = getColumnId(cfm, 0);
-                Name name = new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_ALIAS, 0, cfm.comparator);
-                this.columns.put(id, name);
-                this.value = createValue(cfm);
-            }
-            else
-            {
-                // static CF
-                this.isCompact = false;
-                this.value = null;
-                assert cfm.getValueAlias() == null;
-                assert cfm.getColumnAliases() == null || cfm.getColumnAliases().isEmpty();
-                for (Map.Entry<ByteBuffer, ColumnDefinition> def : cfm.getColumn_metadata().entrySet())
-                {
-                    ColumnIdentifier id = new ColumnIdentifier(def.getKey(), cfm.getColumnDefinitionComparator(def.getValue()));
-                    this.metadata.put(id, new Name(cfm.ksName, cfm.cfName, id, Name.Kind.COLUMN_METADATA, def.getValue().getValidator()));
-                }
-            }
-        }
-        assert value == null || metadata.isEmpty();
-    }
-
-    private static ColumnIdentifier getKeyId(CFMetaData cfm, int i)
-    {
-        List<ByteBuffer> definedNames = cfm.getKeyAliases();
-        // For compatibility sake, non-composite key default alias is 'key', not 'key1'.
-        return definedNames == null || i >= definedNames.size() || cfm.getKeyAliases().get(i) == null
-             ? new ColumnIdentifier(i == 0 ? DEFAULT_KEY_ALIAS : DEFAULT_KEY_ALIAS + (i + 1), false)
-             : new ColumnIdentifier(cfm.getKeyAliases().get(i), definitionType);
-    }
-
-    private static ColumnIdentifier getColumnId(CFMetaData cfm, int i)
-    {
-        List<ByteBuffer> definedNames = cfm.getColumnAliases();
-        return definedNames == null || i >= definedNames.size() || cfm.getColumnAliases().get(i) == null
-             ? new ColumnIdentifier(DEFAULT_COLUMN_ALIAS + (i + 1), false)
-             : new ColumnIdentifier(cfm.getColumnAliases().get(i), definitionType);
-    }
-
-    private static ColumnIdentifier getValueId(CFMetaData cfm)
-    {
-        return cfm.getValueAlias() == null
-             ? new ColumnIdentifier(DEFAULT_VALUE_ALIAS, false)
-             : new ColumnIdentifier(cfm.getValueAlias(), definitionType);
     }
 
     public ColumnToCollectionType getCollectionType()
@@ -206,52 +109,94 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
 
     private static Name createValue(CFMetaData cfm)
     {
-        ColumnIdentifier alias = getValueId(cfm);
+        ColumnIdentifier alias = new ColumnIdentifier(cfm.compactValueColumn().name, definitionType);
         // That's how we distinguish between 'no value alias because coming from thrift' and 'I explicitely did not
-        // define a value' (see CreateColumnFamilyStatement)
+        // define a value' (see CreateTableStatement)
         return alias.key.equals(ByteBufferUtil.EMPTY_BYTE_BUFFER)
                ? null
                : new Name(cfm.ksName, cfm.cfName, alias, Name.Kind.VALUE_ALIAS, cfm.getDefaultValidator());
     }
 
+    public int partitionKeyCount()
+    {
+        return partitionKeys.size();
+    }
+
+    public Collection<Name> partitionKeys()
+    {
+        return partitionKeys.values();
+    }
+
+    public int clusteringColumnsCount()
+    {
+        return clusteringColumns.size();
+    }
+
+    public Collection<Name> clusteringColumns()
+    {
+        return clusteringColumns.values();
+    }
+
+    public Collection<Name> regularColumns()
+    {
+        return regularColumns.values();
+    }
+
+    public Collection<Name> staticColumns()
+    {
+        return regularColumns.values();
+    }
+
+    public Name compactValue()
+    {
+        return compactValue;
+    }
+
     public Name get(ColumnIdentifier name)
     {
-        CFDefinition.Name kdef = keys.get(name);
-        if (kdef != null)
-            return kdef;
-        if (value != null && name.equals(value.name))
-            return value;
-        CFDefinition.Name def = columns.get(name);
+        CFDefinition.Name def = partitionKeys.get(name);
         if (def != null)
             return def;
-        return metadata.get(name);
+        if (compactValue != null && name.equals(compactValue.name))
+            return compactValue;
+        def = clusteringColumns.get(name);
+        if (def != null)
+            return def;
+        def = regularColumns.get(name);
+        if (def != null)
+            return def;
+        return staticColumns.get(name);
     }
 
     public Iterator<Name> iterator()
     {
         return new AbstractIterator<Name>()
         {
-            private final Iterator<Name> keyIter = keys.values().iterator();
-            private final Iterator<Name> columnIter = columns.values().iterator();
+            private final Iterator<Name> keyIter = partitionKeys.values().iterator();
+            private final Iterator<Name> clusteringIter = clusteringColumns.values().iterator();
             private boolean valueDone;
-            private final Iterator<Name> metadataIter = metadata.values().iterator();
+            private final Iterator<Name> staticIter = staticColumns.values().iterator();
+            private final Iterator<Name> regularIter = regularColumns.values().iterator();
 
             protected Name computeNext()
             {
                 if (keyIter.hasNext())
                     return keyIter.next();
 
-                if (columnIter.hasNext())
-                    return columnIter.next();
+                if (clusteringIter.hasNext())
+                    return clusteringIter.next();
 
-                if (value != null && !valueDone)
+                if (compactValue != null && !valueDone)
                 {
                     valueDone = true;
-                    return value;
+                    return compactValue;
                 }
 
-                if (metadataIter.hasNext())
-                    return metadataIter.next();
+                if (staticIter.hasNext())
+                    return staticIter.next();
+
+                if (regularIter.hasNext())
+                    return regularIter.next();
 
                 return endOfData();
             }
@@ -276,7 +221,7 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
     {
         public static enum Kind
         {
-            KEY_ALIAS, COLUMN_ALIAS, VALUE_ALIAS, COLUMN_METADATA
+            KEY_ALIAS, COLUMN_ALIAS, VALUE_ALIAS, COLUMN_METADATA, STATIC
         }
 
         private Name(String ksName, String cfName, ColumnIdentifier name, Kind kind, AbstractType<?> type)
@@ -313,20 +258,29 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
         {
             return Objects.hashCode(ksName, cfName, name, type, kind, position);
         }
+
+        public boolean isPrimaryKeyColumn()
+        {
+            return kind == Kind.KEY_ALIAS || kind == Kind.COLUMN_ALIAS;
+        }
     }
 
     @Override
     public String toString()
     {
         StringBuilder sb = new StringBuilder();
-        sb.append(Joiner.on(", ").join(keys.values()));
-        if (!columns.isEmpty())
-            sb.append(", ").append(Joiner.on(", ").join(columns.values()));
+        sb.append(Joiner.on(", ").join(partitionKeys.values()));
+        if (!clusteringColumns.isEmpty())
+            sb.append(", ").append(Joiner.on(", ").join(clusteringColumns.values()));
         sb.append(" => ");
-        if (value != null)
-            sb.append(value.name);
-        if (!metadata.isEmpty())
-            sb.append("{").append(Joiner.on(", ").join(metadata.values())).append(" }");
+        if (compactValue != null)
+            sb.append(compactValue.name);
+        sb.append("{");
+        sb.append(Joiner.on(", ").join(staticColumns.values()));
+        if (!staticColumns.isEmpty())
+            sb.append(", ");
+        sb.append(Joiner.on(", ").join(regularColumns.values()));
+        sb.append("}");
         return sb.toString();
     }
 
@@ -349,11 +303,6 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
             return this;
         }
 
-        public NonCompositeBuilder add(ByteBuffer bb, Relation.Type op)
-        {
-            return add(bb);
-        }
-
         public int componentCount()
         {
             return columnName == null ? 0 : 1;
@@ -362,6 +311,14 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
         public int remainingCount()
         {
             return columnName == null ? 1 : 0;
+        }
+
+        public ByteBuffer get(int i)
+        {
+            if (i < 0 || i >= (columnName == null ? 0 : 1))
+                throw new IllegalArgumentException();
+
+            return columnName;
         }
 
         public ByteBuffer build()
@@ -374,11 +331,24 @@ public class CFDefinition implements Iterable<CFDefinition.Name>
             return build();
         }
 
+        public ByteBuffer buildForRelation(Relation.Type op)
+        {
+            return build();
+        }
+
         public NonCompositeBuilder copy()
         {
             NonCompositeBuilder newBuilder = new NonCompositeBuilder(type);
             newBuilder.columnName = columnName;
             return newBuilder;
+        }
+
+        public ByteBuffer getComponent(int i)
+        {
+            if (i != 0 || columnName == null)
+                throw new IllegalArgumentException();
+
+            return columnName;
         }
     }
 }

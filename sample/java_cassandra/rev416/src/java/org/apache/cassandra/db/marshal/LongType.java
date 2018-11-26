@@ -25,11 +25,16 @@ import java.nio.ByteBuffer;
 
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-public class LongType extends AbstractType
+public class LongType extends AbstractType<Long>
 {
     public static final LongType instance = new LongType();
 
     LongType() {} // singleton
+
+    public Long compose(ByteBuffer bytes)
+    {
+        return ByteBufferUtil.toLong(bytes);
+    }
 
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
@@ -61,12 +66,20 @@ public class LongType extends AbstractType
             throw new MarshalException("A long is exactly 8 bytes: "+bytes.remaining());
         }
         
-        
         return String.valueOf(bytes.getLong(bytes.position()));
     }
 
-    public ByteBuffer fromString(String source)
+    public String toString(Long l)
     {
+        return l.toString();
+    }
+
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+
         long longType;
 
         try
@@ -75,7 +88,7 @@ public class LongType extends AbstractType
         }
         catch (Exception e)
         {
-            throw new RuntimeException("'" + source + "' could not be translated into a LongType.");
+            throw new MarshalException(String.format("unable to make long from '%s'", source), e);
         }
 
         return ByteBufferUtil.bytes(longType);
@@ -85,5 +98,10 @@ public class LongType extends AbstractType
     {
         if (bytes.remaining() != 8 && bytes.remaining() != 0)
             throw new MarshalException(String.format("Expected 8 or 0 byte long (%d)", bytes.remaining()));
+    }
+
+    public Class<Long> getType()
+    {
+        return Long.class;
     }
 }

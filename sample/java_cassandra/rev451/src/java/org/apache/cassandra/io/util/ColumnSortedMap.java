@@ -28,6 +28,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.Map.Entry;
 
+import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.ColumnSerializer;
 import org.apache.cassandra.db.IColumn;
 
@@ -38,17 +39,21 @@ import org.apache.cassandra.db.IColumn;
  */
 public class ColumnSortedMap implements SortedMap<ByteBuffer, IColumn>
 {
-    private ColumnSerializer serializer;
-    private DataInput dis;
-    private Comparator<ByteBuffer> comparator;
-    private int length;
+    private final ColumnSerializer serializer;
+    private final DataInput dis;
+    private final Comparator<ByteBuffer> comparator;
+    private final int length;
+    private final ColumnFamilyStore interner;
+    private final boolean fromRemote;
 
-    public ColumnSortedMap(Comparator<ByteBuffer> comparator, ColumnSerializer serializer, DataInput dis, int length)
+    public ColumnSortedMap(Comparator<ByteBuffer> comparator, ColumnSerializer serializer, DataInput dis, ColumnFamilyStore interner, int length, boolean fromRemote)
     {
         this.comparator = comparator;
         this.serializer = serializer;
+        this.interner = interner;
         this.dis = dis;
         this.length = length;
+        this.fromRemote = fromRemote;
     }
 
     public int size()
@@ -138,21 +143,25 @@ public class ColumnSortedMap implements SortedMap<ByteBuffer, IColumn>
 
     public Set<Map.Entry<ByteBuffer, IColumn>> entrySet()
     {
-        return new ColumnSet(serializer, dis, length);
+        return new ColumnSet(serializer, dis, interner, length, fromRemote);
     }
 }
 
 class ColumnSet implements Set<Map.Entry<ByteBuffer, IColumn>>
 {
-    private ColumnSerializer serializer;
-    private DataInput dis;
-    private int length;
+    private final ColumnSerializer serializer;
+    private final DataInput dis;
+    private final int length;
+    private final ColumnFamilyStore interner;
+    private boolean fromRemote;
 
-    public ColumnSet(ColumnSerializer serializer, DataInput dis, int length)
+    public ColumnSet(ColumnSerializer serializer, DataInput dis, ColumnFamilyStore interner, int length, boolean fromRemote)
     {
         this.serializer = serializer;
         this.dis = dis;
+        this.interner = interner;
         this.length = length;
+        this.fromRemote = fromRemote;
     }
 
     public int size()
@@ -172,7 +181,7 @@ class ColumnSet implements Set<Map.Entry<ByteBuffer, IColumn>>
 
     public Iterator<Entry<ByteBuffer, IColumn>> iterator()
     {
-        return new ColumnIterator(serializer, dis, length);
+        return new ColumnIterator(serializer, dis, interner, length, fromRemote);
     }
 
     public Object[] toArray()
@@ -222,16 +231,20 @@ class ColumnSet implements Set<Map.Entry<ByteBuffer, IColumn>>
 
 class ColumnIterator implements Iterator<Map.Entry<ByteBuffer, IColumn>>
 {
-    private ColumnSerializer serializer;
-    private DataInput dis;
-    private int length;
+    private final ColumnSerializer serializer;
+    private final DataInput dis;
+    private final int length;
+    private final boolean fromRemote;
     private int count = 0;
+    private ColumnFamilyStore interner;
 
-    public ColumnIterator(ColumnSerializer serializer, DataInput dis, int length)
+    public ColumnIterator(ColumnSerializer serializer, DataInput dis, ColumnFamilyStore interner, int length, boolean fromRemote)
     {
         this.dis = dis;
         this.serializer = serializer;
+        this.interner = interner;
         this.length = length;
+        this.fromRemote = fromRemote;
     }
 
     private IColumn deserializeNext()
@@ -239,7 +252,7 @@ class ColumnIterator implements Iterator<Map.Entry<ByteBuffer, IColumn>>
         try
         {
             count++;
-            return serializer.deserialize(dis);
+            return serializer.deserialize(dis, interner, fromRemote);
         }
         catch (IOException e)
         {

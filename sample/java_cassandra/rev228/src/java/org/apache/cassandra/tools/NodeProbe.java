@@ -636,6 +636,11 @@ public class NodeProbe
         return fdProxy.getAllEndpointStates();
     }
 
+    public void stop(String string)
+    {
+        compactionProxy.stopCompaction(string);
+    }
+
     public List<String> describeRing(String keyspaceName) throws InvalidRequestException
     {
         return ssProxy.describeRingJMX(keyspaceName);

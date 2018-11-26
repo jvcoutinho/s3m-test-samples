@@ -108,6 +108,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         INDEX_SCAN,
         REPLICATION_FINISHED,
         INTERNAL_RESPONSE, // responses to internal calls
+        COUNTER_MUTATION,
         // use as padding for backwards compatability where a previous version needs to validate a verb from the future.
         UNUSED_1,
         UNUSED_2,
@@ -140,6 +141,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         put(Verb.INDEX_SCAN, Stage.READ);
         put(Verb.REPLICATION_FINISHED, Stage.MISC);
         put(Verb.INTERNAL_RESPONSE, Stage.INTERNAL_RESPONSE);
+        put(Verb.COUNTER_MUTATION, Stage.MUTATION);
         put(Verb.UNUSED_1, Stage.INTERNAL_RESPONSE);
         put(Verb.UNUSED_2, Stage.INTERNAL_RESPONSE);
         put(Verb.UNUSED_3, Stage.INTERNAL_RESPONSE);
@@ -225,6 +227,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance().registerVerbHandlers(Verb.READ, new ReadVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.RANGE_SLICE, new RangeSliceVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.INDEX_SCAN, new IndexScanVerbHandler());
+        MessagingService.instance().registerVerbHandlers(Verb.COUNTER_MUTATION, new CounterMutationVerbHandler());
         // see BootStrapper for a summary of how the bootstrap verbs interact
         MessagingService.instance().registerVerbHandlers(Verb.BOOTSTRAP_TOKEN, new BootStrapper.BootstrapTokenVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.STREAM_REQUEST, new StreamRequestVerbHandler());
@@ -271,7 +274,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (!initialized)
         {
             logger_.warn("Starting gossip by operator request");
-            Gossiper.instance.start(FBUtilities.getLocalAddress(), (int)(System.currentTimeMillis() / 1000));
+            Gossiper.instance.start((int)(System.currentTimeMillis() / 1000));
             initialized = true;
         }
     }
@@ -332,7 +335,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         logger_.info("Starting up client gossip");
         setMode("Client", false);
         Gossiper.instance.register(this);
-        Gossiper.instance.start(FBUtilities.getLocalAddress(), (int)(System.currentTimeMillis() / 1000)); // needed for node-ring gathering.
+        Gossiper.instance.start((int)(System.currentTimeMillis() / 1000)); // needed for node-ring gathering.
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
         
         // sleep a while to allow gossip to warm up (the other nodes need to know about this one before they can reply).
@@ -416,7 +419,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // (we won't be part of the storage ring though until we add a nodeId to our state, below.)
         Gossiper.instance.register(this);
         Gossiper.instance.register(migrationManager);
-        Gossiper.instance.start(FBUtilities.getLocalAddress(), SystemTable.incrementAndGetGeneration()); // needed for node-ring gathering.
+        Gossiper.instance.start(SystemTable.incrementAndGetGeneration()); // needed for node-ring gathering.
 
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
         StorageLoadBalancer.instance.startBroadcasting();
@@ -430,6 +433,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.info("This node will not auto bootstrap because it is configured to be a seed node.");
 
         Token token;
+        boolean bootstrapped = false;
         if (DatabaseDescriptor.isAutoBootstrap()
             && !(DatabaseDescriptor.getSeeds().contains(FBUtilities.getLocalAddress()) || SystemTable.isBootstrapped()))
         {
@@ -449,6 +453,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             {
                 bootstrap(token);
                 assert !isBootstrapMode; // bootstrap will block until finished
+                bootstrapped = true;
+                SystemTable.setBootstrapped(true); // first startup is only chance to bootstrap
             }
             // else nothing to do, go directly to participating in ring
         }
@@ -477,7 +483,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         SystemTable.setBootstrapped(true); // first startup is only chance to bootstrap
         setToken(token);
-
         assert tokenMetadata_.sortedTokens().size() > 0;
     }
 
@@ -1041,7 +1046,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 };
                 if (logger_.isDebugEnabled())
                     logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(ranges, ", "));
-                StreamIn.requestRanges(source, table, ranges, callback);
+                StreamIn.requestRanges(source, table, ranges, callback, OperationType.RESTORE_REPLICA_COUNT);
             }
         }
     }
@@ -1449,11 +1454,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return getNaturalEndpoints(table, partitioner.getToken(key));
     }
 
-    public List<InetAddress> getNaturalEndpoints(String table, byte[] key)
-    {
-        return getNaturalEndpoints(table, ByteBuffer.wrap(key));
-    }
-
     /**
      * This method returns the N endpoints that are responsible for storing the
      * specified key i.e for replication.
@@ -1604,7 +1604,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.left(getLocalToken()));
         try
         {
-            Thread.sleep(2 * Gossiper.intervalInMillis_);
+            Thread.sleep(2 * Gossiper.intervalInMillis);
         }
         catch (InterruptedException e)
         {
@@ -1649,7 +1649,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                     public void run()
                     {
                         // TODO each call to transferRanges re-flushes, this is potentially a lot of waste
-                        StreamOut.transferRanges(newEndpoint, table, Arrays.asList(range), callback);
+                        StreamOut.transferRanges(newEndpoint, table, Arrays.asList(range), callback, OperationType.UNBOOTSTRAP);
                     }
                 });
             }
@@ -2032,6 +2032,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 rcf.comment = cfm.getComment();
                 rcf.keys_cached = cfm.getKeyCacheSize();
                 rcf.read_repair_chance = cfm.getReadRepairChance();
+                rcf.replicate_on_write = cfm.getReplicateOnWrite();
                 rcf.gc_grace_seconds = cfm.getGcGraceSeconds();
                 rcf.rows_cached = cfm.getRowCacheSize();
                 rcf.column_metadata = new RawColumnDefinition[cfm.getColumn_metadata().size()];

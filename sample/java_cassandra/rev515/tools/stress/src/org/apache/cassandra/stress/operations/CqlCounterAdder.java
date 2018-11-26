@@ -23,10 +23,7 @@ package org.apache.cassandra.stress.operations;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-
-import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class CqlCounterAdder extends CqlOperation<Integer>
 {
@@ -38,14 +35,7 @@ public class CqlCounterAdder extends CqlOperation<Integer>
     @Override
     protected String buildQuery()
     {
-        String counterCF = state.isCql2() ? state.type.table : "Counter3";
-
-        StringBuilder query = new StringBuilder("UPDATE ").append(wrapInQuotesIfRequired(counterCF));
-
-        if (state.isCql2())
-            query.append(" USING CONSISTENCY ").append(state.settings.command.consistencyLevel);
-
-        query.append(" SET ");
+        StringBuilder query = new StringBuilder("UPDATE \"Counter3\" SET ");
 
         // TODO : increment distribution subset of columns
         for (int i = 0; i < state.settings.columns.maxColumnsPerKey; i++)
@@ -53,7 +43,8 @@ public class CqlCounterAdder extends CqlOperation<Integer>
             if (i > 0)
                 query.append(",");
 
-            query.append('C').append(i).append("=C").append(i).append("+?");
+            String name = state.settings.columns.namestrs.get(i);
+            query.append(name).append("=").append(name).append("+?");
         }
         query.append(" WHERE KEY=?");
         return query.toString();

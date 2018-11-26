@@ -20,7 +20,9 @@ package org.apache.cassandra.avro;
  * 
  */
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -34,7 +36,10 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
+import java.util.zip.DataFormatException;
+import java.util.zip.Inflater;
 
+import org.antlr.runtime.RecognitionException;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericArray;
 import org.apache.avro.generic.GenericData;
@@ -57,6 +62,7 @@ import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
+import org.apache.cassandra.cql.QueryProcessor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.MarshalException;
@@ -71,7 +77,7 @@ import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
 
 import static org.apache.cassandra.avro.AvroRecordFactory.*;
-import static org.apache.cassandra.avro.ErrorFactory.*;
+import static org.apache.cassandra.avro.AvroErrorFactory.*;
 
 public class CassandraServer implements Cassandra {
     private static Logger logger = LoggerFactory.getLogger(CassandraServer.class);
@@ -82,7 +88,6 @@ public class CassandraServer implements Cassandra {
     
     // CfDef default values
     private final static String D_CF_CFTYPE = "Standard";
-    private final static String D_CF_CFCLOCKTYPE = "Timestamp";
     private final static String D_CF_COMPTYPE = "BytesType";
     private final static String D_CF_SUBCOMPTYPE = "";
     private final static String D_CF_RECONCILER = null;
@@ -831,6 +836,7 @@ public class CassandraServer implements Cassandra {
                               cf_def.row_cache_size == null ? CFMetaData.DEFAULT_ROW_CACHE_SIZE : cf_def.row_cache_size,
                               cf_def.key_cache_size == null ? CFMetaData.DEFAULT_KEY_CACHE_SIZE : cf_def.key_cache_size,
                               cf_def.read_repair_chance == null ? CFMetaData.DEFAULT_READ_REPAIR_CHANCE : cf_def.read_repair_chance,
+                              cf_def.replicate_on_write == null ? CFMetaData.DEFAULT_REPLICATE_ON_WRITE : cf_def.replicate_on_write,
                               cf_def.gc_grace_seconds != null ? cf_def.gc_grace_seconds : CFMetaData.DEFAULT_GC_GRACE_SECONDS,
                               DatabaseDescriptor.getComparator(validate),
                               cf_def.min_compaction_threshold == null ? CFMetaData.DEFAULT_MIN_COMPACTION_THRESHOLD : cf_def.min_compaction_threshold,
@@ -1161,5 +1167,55 @@ public class CassandraServer implements Cassandra {
             case LT: return org.apache.cassandra.thrift.IndexOperator.LT;
         }
         return null;
+    }
+
+    @Override
+    public CqlResult execute_cql_query(ByteBuffer query, Compression compression)
+    throws UnavailableException, InvalidRequestException, TimedOutException
+    {
+        String queryString = null;
+        
+        // Decompress the query string.
+        try
+        {
+            switch (compression)
+            {
+                case GZIP:
+                    Inflater decompressor = new Inflater();
+                    decompressor.setInput(query.array(), 0, query.array().length);
+                    
+                    ByteArrayOutputStream byteArray = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[1024];
+                    
+                    while (!decompressor.finished())
+                    {
+                        int size = decompressor.inflate(buffer);
+                        byteArray.write(buffer, 0, size);
+                    }
+                    
+                    decompressor.end();
+                    
+                    queryString = new String(byteArray.toByteArray(), 0, byteArray.size(), "UTF-8");
+            }
+        }
+        catch (DataFormatException e)
+        {
+            throw newInvalidRequestException("Error deflating query string.");
+        }
+        catch (UnsupportedEncodingException e)
+        {
+            throw newInvalidRequestException("Unknown query string encoding.");
+        }
+        
+        try
+        {
+            return QueryProcessor.process(queryString, state());
+        }
+        catch (RecognitionException e)
+        {
+            InvalidRequestException badQuery = newInvalidRequestException("Invalid or malformed CQL query string");
+            badQuery.initCause(e);
+            throw badQuery;
+        }
     }
 }

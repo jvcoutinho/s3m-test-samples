@@ -677,16 +677,16 @@ public class BinaryClient extends Connection {
 	sendCommand(SYNC);
     }
 
-    public void lpushx(final byte[] key, final byte[] string) {
-	sendCommand(LPUSHX, key, string);
+    public void lpushx(final byte[] key, final byte[]... string) {
+	sendCommand(LPUSHX, joinParameters(key, string));
     }
 
     public void persist(final byte[] key) {
 	sendCommand(PERSIST, key);
     }
 
-    public void rpushx(final byte[] key, final byte[] string) {
-	sendCommand(RPUSHX, key, string);
+    public void rpushx(final byte[] key, final byte[]... string) {
+	sendCommand(RPUSHX, joinParameters(key, string));
     }
 
     public void echo(final byte[] string) {
@@ -713,6 +713,10 @@ public class BinaryClient extends Connection {
 
     public void setbit(byte[] key, long offset, byte[] value) {
 	sendCommand(SETBIT, key, toByteArray(offset), value);
+    }
+
+    public void setbit(byte[] key, long offset, boolean value) {
+    sendCommand(SETBIT, key, toByteArray(offset), toByteArray(value));
     }
 
     public void getbit(byte[] key, long offset) {
@@ -755,8 +759,16 @@ public class BinaryClient extends Connection {
 	sendEvalCommand(EVAL, script, keyCount, params);
     }
 
-    public void evalsha(byte[] sha1, byte[] keyCount, byte[][] params) {
+    public void eval(byte[] script, int keyCount, byte[]... params) {
+    	eval(script, toByteArray(keyCount), params);
+    }
+
+    public void evalsha(byte[] sha1, byte[] keyCount, byte[]... params) {
 	sendEvalCommand(EVALSHA, sha1, keyCount, params);
+    }
+
+    public void evalsha(byte[] sha1, int keyCount, byte[]... params) {
+    sendEvalCommand(EVALSHA, sha1, toByteArray(keyCount), params);
     }
 
     public void scriptFlush() {
@@ -806,5 +818,42 @@ public class BinaryClient extends Connection {
 
     public void objectEncoding(byte[] key) {
 	sendCommand(OBJECT, ENCODING.raw, key);
+    }
+
+    public void bitcount(byte[] key) {
+        sendCommand(BITCOUNT, key);
+    }
+
+    public void bitcount(byte[] key, long start, long end) {
+        sendCommand(BITCOUNT, key, toByteArray(start), toByteArray(end));
+    }
+
+    public void bitop(BitOP op, byte[] destKey, byte[]... srcKeys) {
+        Keyword kw = Keyword.AND;
+        int len = srcKeys.length;
+        switch (op) {
+            case AND:
+                kw = Keyword.AND;
+                break;
+            case OR:
+                kw = Keyword.OR;
+                break;
+            case XOR:
+                kw = Keyword.XOR;
+                break;
+            case NOT:
+                kw = Keyword.NOT;
+                len = Math.min(1, len);
+                break;
+        }
+
+        byte[][] bargs = new byte[len + 2][];
+        bargs[0] = kw.raw;
+        bargs[1] = destKey;
+        for (int i = 0; i < len; ++i) {
+            bargs[i + 2] = srcKeys[i];
+        }
+
+        sendCommand(BITOP, bargs);
     }
 }

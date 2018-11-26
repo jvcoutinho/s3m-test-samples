@@ -1,6 +1,4 @@
-package org.apache.cassandra.db.compaction;
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -9,30 +7,28 @@ package org.apache.cassandra.db.compaction;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
+package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicReference;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.collect.*;
+import com.google.common.primitives.Doubles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.columniterator.IColumnIterator;
+import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.SSTable;
@@ -46,11 +42,11 @@ import org.apache.cassandra.notifications.SSTableListChangedNotification;
 public class LeveledCompactionStrategy extends AbstractCompactionStrategy implements INotificationConsumer
 {
     private static final Logger logger = LoggerFactory.getLogger(LeveledCompactionStrategy.class);
+    private static final String SSTABLE_SIZE_OPTION = "sstable_size_in_mb";
 
-    private final LeveledManifest manifest;
-    private final String SSTABLE_SIZE_OPTION = "sstable_size_in_mb";
+    @VisibleForTesting
+    final LeveledManifest manifest;
     private final int maxSSTableSizeInMB;
-    private final AtomicReference<LeveledCompactionTask> task = new AtomicReference<LeveledCompactionTask>();
 
     public LeveledCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options)
     {
@@ -59,7 +55,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         if (options != null)
         {
             String value = options.containsKey(SSTABLE_SIZE_OPTION) ? options.get(SSTABLE_SIZE_OPTION) : null;
-            if (null != value)
+            if (value != null)
             {
                 try
                 {
@@ -92,6 +88,11 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         return manifest.getLevelSize(i);
     }
 
+    public int[] getAllLevelSize()
+    {
+        return manifest.getAllLevelSize();
+    }
+
     /**
      * the only difference between background and maximal in LCS is that maximal is still allowed
      * (by explicit user request) even when compaction is disabled.
@@ -104,26 +105,32 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         return getMaximalTask(gcBefore);
     }
 
-    public AbstractCompactionTask getMaximalTask(int gcBefore)
+    public synchronized AbstractCompactionTask getMaximalTask(int gcBefore)
     {
-        LeveledCompactionTask currentTask = task.get();
-        if (currentTask != null && !currentTask.isDone())
-        {
-            logger.debug("Compaction still in progress for {}", this);
-            return null;
-        }
-
         Collection<SSTableReader> sstables = manifest.getCompactionCandidates();
+        OperationType op = OperationType.COMPACTION;
         if (sstables.isEmpty())
         {
-            logger.debug("No compaction necessary for {}", this);
+            // if there is no sstable to compact in standard way, try compacting based on droppable tombstone ratio
+            SSTableReader sstable = findDroppableSSTable(gcBefore);
+            if (sstable == null)
+            {
+                logger.debug("No compaction necessary for {}", this);
+                return null;
+            }
+            sstables = Collections.singleton(sstable);
+            op = OperationType.TOMBSTONE_COMPACTION;
+        }
+
+        if (!cfs.getDataTracker().markCompacting(sstables))
+        {
+            logger.debug("Unable to mark {} for compaction; probably a user-defined compaction got in the way", sstables);
             return null;
         }
 
-        LeveledCompactionTask newTask = new LeveledCompactionTask(cfs, sstables, gcBefore, this.maxSSTableSizeInMB);
-        return task.compareAndSet(currentTask, newTask)
-               ? newTask
-               : null;
+        LeveledCompactionTask newTask = new LeveledCompactionTask(cfs, sstables, gcBefore, maxSSTableSizeInMB);
+        newTask.setCompactionType(op);
+        return newTask;
     }
 
     public AbstractCompactionTask getUserDefinedTask(Collection<SSTableReader> sstables, int gcBefore)
@@ -152,6 +159,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
                 case CLEANUP:
                 case SCRUB:
                 case UPGRADE_SSTABLES:
+                case TOMBSTONE_COMPACTION: // Also when performing tombstone removal.
                     manifest.replace(listChangedNotification.removed, listChangedNotification.added);
                     break;
                 default:
@@ -166,13 +174,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         return maxSSTableSizeInMB * 1024L * 1024L;
     }
 
-    public boolean isKeyExistenceExpensive(Set<? extends SSTable> sstablesToIgnore)
-    {
-        Set<SSTableReader> L0 = ImmutableSet.copyOf(manifest.getLevel(0));
-        return Sets.difference(L0, sstablesToIgnore).size() + manifest.getLevelCount() > 20;
-    }
-
-    public List<ICompactionScanner> getScanners(Collection<SSTableReader> sstables, Range<Token> range) throws IOException
+    public List<ICompactionScanner> getScanners(Collection<SSTableReader> sstables, Range<Token> range)
     {
         Multimap<Integer, SSTableReader> byLevel = ArrayListMultimap.create();
         for (SSTableReader sstable : sstables)
@@ -201,7 +203,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
 
     // Lazily creates SSTableBoundedScanner for sstable that are assumed to be from the
     // same level (e.g. non overlapping) - see #4142
-    private static class LeveledScanner extends AbstractIterator<IColumnIterator> implements ICompactionScanner
+    private static class LeveledScanner extends AbstractIterator<OnDiskAtomIterator> implements ICompactionScanner
     {
         private final Range<Token> range;
         private final List<SSTableReader> sstables;
@@ -225,7 +227,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
             totalLength = length;
         }
 
-        protected IColumnIterator computeNext()
+        protected OnDiskAtomIterator computeNext()
         {
             try
             {
@@ -273,5 +275,34 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
     public String toString()
     {
         return String.format("LCS@%d(%s)", hashCode(), cfs.columnFamily);
+    }
+
+    private SSTableReader findDroppableSSTable(final int gcBefore)
+    {
+        level:
+        for (int i = manifest.getLevelCount(); i >= 0; i--)
+        {
+            // sort sstables by droppable ratio in descending order
+            SortedSet<SSTableReader> sstables = manifest.getLevelSorted(i, new Comparator<SSTableReader>()
+            {
+                public int compare(SSTableReader o1, SSTableReader o2)
+                {
+                    double r1 = o1.getEstimatedDroppableTombstoneRatio(gcBefore);
+                    double r2 = o2.getEstimatedDroppableTombstoneRatio(gcBefore);
+                    return -1 * Doubles.compare(r1, r2);
+                }
+            });
+            if (sstables.isEmpty())
+                continue;
+
+            for (SSTableReader sstable : sstables)
+            {
+                if (sstable.getEstimatedDroppableTombstoneRatio(gcBefore) <= tombstoneThreshold)
+                    continue level;
+                else if (!sstable.isMarkedSuspect() && worthDroppingTombstones(sstable, gcBefore))
+                    return sstable;
+            }
+        }
+        return null;
     }
 }

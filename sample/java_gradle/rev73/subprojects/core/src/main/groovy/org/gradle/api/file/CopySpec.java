@@ -19,6 +19,7 @@ import groovy.lang.Closure;
 import org.gradle.api.Action;
 import org.gradle.api.Incubating;
 import org.gradle.api.Nullable;
+import org.gradle.api.internal.HasInternalProtocol;
 import org.gradle.api.specs.Spec;
 import org.gradle.api.tasks.util.PatternFilterable;
 
@@ -68,6 +69,7 @@ import java.util.regex.Pattern;
  * @see org.gradle.api.tasks.Copy Copy Task
  * @see org.gradle.api.Project#copy(groovy.lang.Closure) Project.copy()
  */
+@HasInternalProtocol
 public interface CopySpec extends CopySourceSpec, CopyProcessingSpec, PatternFilterable {
     /**
      * Specifies whether case-sensitive pattern matching should be used.
@@ -106,8 +108,8 @@ public interface CopySpec extends CopySourceSpec, CopyProcessingSpec, PatternFil
      * <p>
      * This strategy can be overridden for individual files by using {@link #eachFile(org.gradle.api.Action)} or {@link #filesMatching(String, org.gradle.api.Action)}.
      *
-     * @see DuplicatesStrategy
      * @return the strategy, or {@code null} if no strategy has been set
+     * @see DuplicatesStrategy
      */
     @Incubating
     @Nullable

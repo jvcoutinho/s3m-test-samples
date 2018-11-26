@@ -35,7 +35,7 @@ import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
-import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.index.composites.CompositesIndex;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
@@ -137,21 +137,9 @@ public class SchemaLoader
 
         // these column definitions will will be applied to the jdbc utf and integer column familes respectively.
         Map<ByteBuffer, ColumnDefinition> integerColumn = new HashMap<ByteBuffer, ColumnDefinition>();
-        integerColumn.put(IntegerType.instance.fromString("42"), new ColumnDefinition(
-            IntegerType.instance.fromString("42"),
-            UTF8Type.instance,
-            null,
-            null,
-            null,
-            null));
+        integerColumn.put(IntegerType.instance.fromString("42"), ColumnDefinition.regularDef(IntegerType.instance.fromString("42"), UTF8Type.instance, null));
         Map<ByteBuffer, ColumnDefinition> utf8Column = new HashMap<ByteBuffer, ColumnDefinition>();
-        utf8Column.put(UTF8Type.instance.fromString("fortytwo"), new ColumnDefinition(
-            UTF8Type.instance.fromString("fortytwo"),
-            IntegerType.instance,
-            null,
-            null,
-            null,
-            null));
+        utf8Column.put(UTF8Type.instance.fromString("fortytwo"), ColumnDefinition.regularDef(UTF8Type.instance.fromString("fortytwo"), IntegerType.instance, null));
 
         // Make it easy to test compaction
         Map<String, String> compactionOptions = new HashMap<String, String>();
@@ -322,7 +310,7 @@ public class SchemaLoader
                                 IndexType.CUSTOM,
                                 indexOptions,
                                 ByteBufferUtil.bytesToHex(cName),
-                                null));
+                                null, ColumnDefinition.Type.REGULAR));
                     }});
     }
 
@@ -367,12 +355,11 @@ public class SchemaLoader
                    {{
                         ByteBuffer cName = ByteBuffer.wrap("birthdate".getBytes(Charsets.UTF_8));
                         IndexType keys = withIdxType ? IndexType.KEYS : null;
-                        put(cName, new ColumnDefinition(cName, LongType.instance, keys, null, withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, null));
+                        put(cName, ColumnDefinition.regularDef(cName, LongType.instance, null).setIndex(withIdxType ? ByteBufferUtil.bytesToHex(cName) : null, keys, null));
                     }});
     }
     private static CFMetaData compositeIndexCFMD(String ksName, String cfName, final Boolean withIdxType, boolean withOldCfIds) throws ConfigurationException
     {
-        final Map<String, String> idxOpts = Collections.singletonMap(CompositesIndex.PREFIX_SIZE_OPTION, "1");
         final CompositeType composite = CompositeType.getInstance(Arrays.asList(new AbstractType<?>[]{UTF8Type.instance, UTF8Type.instance})); 
         return new CFMetaData(ksName,
                 cfName,
@@ -383,7 +370,8 @@ public class SchemaLoader
                 {{
                    ByteBuffer cName = ByteBuffer.wrap("col1".getBytes(Charsets.UTF_8));
                    IndexType idxType = withIdxType ? IndexType.COMPOSITES : null;
-                   put(cName, new ColumnDefinition(cName, UTF8Type.instance, idxType, idxOpts, withIdxType ? "col1_idx" : null, 1));
+                   put(cName, ColumnDefinition.regularDef(cName, UTF8Type.instance, 1)
+                                              .setIndex(withIdxType ? "col1_idx" : null, idxType, Collections.<String, String>emptyMap()));
                 }});
     }
     
@@ -440,9 +428,7 @@ public class SchemaLoader
         {
             ByteBuffer key = ByteBufferUtil.bytes("key" + i);
             RowMutation rowMutation = new RowMutation(keyspace, key);
-            QueryPath path = new QueryPath(columnFamily, null, ByteBufferUtil.bytes("col" + i));
-
-            rowMutation.add(path, ByteBufferUtil.bytes("val" + i), System.currentTimeMillis());
+            rowMutation.add(columnFamily, ByteBufferUtil.bytes("col" + i), ByteBufferUtil.bytes("val" + i), System.currentTimeMillis());
             rowMutation.applyUnsafe();
         }
     }
@@ -454,9 +440,7 @@ public class SchemaLoader
         for (int i = offset; i < offset + numberOfRows; i++)
         {
             DecoratedKey key = Util.dk("key" + i);
-            QueryPath path = new QueryPath(columnFamily, null, ByteBufferUtil.bytes("col" + i));
-
-            store.getColumnFamily(key, path, ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1);
+            store.getColumnFamily(QueryFilter.getNamesFilter(key, columnFamily, ByteBufferUtil.bytes("col" + i)));
         }
     }
 

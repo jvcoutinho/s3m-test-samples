@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,10 +15,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db.compaction;
 
-import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
@@ -39,14 +37,22 @@ import org.apache.cassandra.service.StorageService;
  */
 public abstract class AbstractCompactionStrategy
 {
+    protected static final float DEFAULT_TOMBSTONE_THRESHOLD = 0.2f;
+    protected static final String TOMBSTONE_THRESHOLD_KEY = "tombstone_threshold";
+
     protected final ColumnFamilyStore cfs;
     protected final Map<String, String> options;
+
+    protected float tombstoneThreshold;
 
     protected AbstractCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options)
     {
         assert cfs != null;
         this.cfs = cfs;
         this.options = options;
+
+        String optionValue = options.get(TOMBSTONE_THRESHOLD_KEY);
+        tombstoneThreshold = optionValue == null ? DEFAULT_TOMBSTONE_THRESHOLD : Float.parseFloat(optionValue);
 
         // start compactions in five minutes (if no flushes have occurred by then to do so)
         Runnable runnable = new Runnable()
@@ -135,7 +141,7 @@ public abstract class AbstractCompactionStrategy
      * allow for a more memory efficient solution if we know the sstable don't overlap (see
      * LeveledCompactionStrategy for instance).
      */
-    public List<ICompactionScanner> getScanners(Collection<SSTableReader> sstables, Range<Token> range) throws IOException
+    public List<ICompactionScanner> getScanners(Collection<SSTableReader> sstables, Range<Token> range)
     {
         ArrayList<ICompactionScanner> scanners = new ArrayList<ICompactionScanner>();
         for (SSTableReader sstable : sstables)
@@ -143,8 +149,44 @@ public abstract class AbstractCompactionStrategy
         return scanners;
     }
 
-    public List<ICompactionScanner> getScanners(Collection<SSTableReader> toCompact) throws IOException
+    public List<ICompactionScanner> getScanners(Collection<SSTableReader> toCompact)
     {
         return getScanners(toCompact, null);
+    }
+
+    /**
+     * @param sstable SSTable to check
+     * @param gcBefore time to drop tombstones
+     * @return true if given sstable's tombstones are expected to be removed
+     */
+    protected boolean worthDroppingTombstones(SSTableReader sstable, int gcBefore)
+    {
+        double droppableRatio = sstable.getEstimatedDroppableTombstoneRatio(gcBefore);
+        if (droppableRatio <= tombstoneThreshold)
+            return false;
+
+        Set<SSTableReader> overlaps = cfs.getOverlappingSSTables(Collections.singleton(sstable));
+        if (overlaps.isEmpty())
+        {
+            // there is no overlap, tombstones are safely droppable
+            return true;
+        }
+        else
+        {
+            // what percentage of columns do we expect to compact outside of overlap?
+            // first, calculate estimated keys that do not overlap
+            long keys = sstable.estimatedKeys();
+            Set<Range<Token>> ranges = new HashSet<Range<Token>>();
+            for (SSTableReader overlap : overlaps)
+                ranges.add(new Range<Token>(overlap.first.token, overlap.last.token, overlap.partitioner));
+            long remainingKeys = keys - sstable.estimatedKeysForRanges(ranges);
+            // next, calculate what percentage of columns we have within those keys
+            double remainingKeysRatio = ((double) remainingKeys) / keys;
+            long columns = sstable.getEstimatedColumnCount().percentile(remainingKeysRatio) * remainingKeys;
+            double remainingColumnsRatio = ((double) columns) / (sstable.getEstimatedColumnCount().count() * sstable.getEstimatedColumnCount().mean());
+
+            // return if we still expect to have droppable tombstones in rest of columns
+            return remainingColumnsRatio * droppableRatio > tombstoneThreshold;
+        }
     }
 }

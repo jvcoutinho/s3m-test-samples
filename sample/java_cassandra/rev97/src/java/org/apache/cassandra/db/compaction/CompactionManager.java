@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,11 +15,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db.compaction;
 
 import java.io.File;
-import java.io.IOError;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
@@ -46,7 +44,6 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.*;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.service.AntiEntropyService;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.*;
@@ -55,7 +52,7 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.base.Predicates;
 import com.google.common.collect.Iterators;
-import com.google.common.collect.ImmutableSet;
+import com.google.common.primitives.Longs;
 
 /**
  * A singleton which manages a private executor of ongoing compactions. A readwrite lock
@@ -97,8 +94,8 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    private CompactionExecutor executor = new CompactionExecutor();
-    private CompactionExecutor validationExecutor = new ValidationExecutor();
+    private final CompactionExecutor executor = new CompactionExecutor();
+    private final CompactionExecutor validationExecutor = new ValidationExecutor();
 
     /**
      * @return A lock, for which acquisition means no compactions can run.
@@ -250,7 +247,18 @@ public class CompactionManager implements CompactionManagerMBean
         {
             public void perform(ColumnFamilyStore store, Collection<SSTableReader> sstables) throws IOException
             {
-                doCleanupCompaction(store, sstables, renewer);
+                // Sort the column families in order of SSTable size, so cleanup of smaller CFs
+                // can free up space for larger ones
+                List<SSTableReader> sortedSSTables = new ArrayList<SSTableReader>(sstables);
+                Collections.sort(sortedSSTables, new Comparator<SSTableReader>()
+                {
+                    public int compare(SSTableReader o1, SSTableReader o2)
+                    {
+                        return Longs.compare(o1.onDiskLength(), o2.onDiskLength());
+                    }
+                });
+
+                doCleanupCompaction(store, sortedSSTables, renewer);
             }
         });
     }
@@ -579,15 +587,15 @@ public class CompactionManager implements CompactionManagerMBean
 
                             while (row.hasNext())
                             {
-                                IColumn column = row.next();
+                                OnDiskAtom column = row.next();
                                 if (column instanceof CounterColumn)
                                     renewer.maybeRenew((CounterColumn) column);
-                                if (indexedColumns.contains(column.name()))
+                                if (column instanceof IColumn && indexedColumns.contains(column.name()))
                                 {
                                     if (indexedColumnsInRow == null)
                                         indexedColumnsInRow = new ArrayList<IColumn>();
 
-                                    indexedColumnsInRow.add(column);
+                                    indexedColumnsInRow.add((IColumn)column);
                                 }
                             }
 
@@ -850,9 +858,7 @@ public class CompactionManager implements CompactionManagerMBean
         {
             super(cfs,
                   Integer.MAX_VALUE,
-                  true,
-                  null,
-                  cfs.getCompactionStrategy().isKeyExistenceExpensive(ImmutableSet.copyOf(sstables)));
+                  null);
         }
 
         @Override
@@ -892,13 +898,17 @@ public class CompactionManager implements CompactionManagerMBean
 
         public void beginCompaction(CompactionInfo.Holder ci)
         {
+            // notify
+            ci.started();
             compactions.add(ci);
         }
 
         public void finishCompaction(CompactionInfo.Holder ci)
         {
+            // notify
+            ci.finished();
             compactions.remove(ci);
-            totalBytesCompacted += ci.getCompactionInfo().getTotalBytes();
+            totalBytesCompacted += ci.getCompactionInfo().getTotal();
             totalCompactionsCompleted += 1;
         }
 
@@ -911,7 +921,7 @@ public class CompactionManager implements CompactionManagerMBean
         {
             long bytesCompletedInProgress = 0L;
             for (CompactionInfo.Holder ci : compactions)
-                bytesCompletedInProgress += ci.getCompactionInfo().getBytesComplete();
+                bytesCompletedInProgress += ci.getCompactionInfo().getCompleted();
             return bytesCompletedInProgress + totalBytesCompacted;
         }
 

@@ -95,6 +95,7 @@ import static org.atmosphere.cpr.HeaderConfig.ACCESS_CONTROL_ALLOW_CREDENTIALS;
 import static org.atmosphere.cpr.HeaderConfig.ACCESS_CONTROL_ALLOW_ORIGIN;
 import static org.atmosphere.cpr.HeaderConfig.CACHE_CONTROL;
 import static org.atmosphere.cpr.HeaderConfig.EXPIRES;
+import static org.atmosphere.cpr.HeaderConfig.JSONP_TRANSPORT;
 import static org.atmosphere.cpr.HeaderConfig.LONG_POLLING_TRANSPORT;
 import static org.atmosphere.cpr.HeaderConfig.PRAGMA;
 import static org.atmosphere.cpr.HeaderConfig.WEBSOCKET_UPGRADE;
@@ -188,7 +189,7 @@ public class AtmosphereFilter implements ResourceFilterFactory {
 
         boolean resumeOnBroadcast(ContainerRequest request, boolean resumeOnBroadcast) {
             String transport = request.getHeaderValue(X_ATMOSPHERE_TRANSPORT);
-            if (transport != null && transport.equals(LONG_POLLING_TRANSPORT)) {
+            if (transport != null && (transport.equals(JSONP_TRANSPORT) || transport.equals(LONG_POLLING_TRANSPORT))) {
                 return true;
             }
             return resumeOnBroadcast;
@@ -209,7 +210,7 @@ public class AtmosphereFilter implements ResourceFilterFactory {
             String transport = request.getHeaderValue(X_ATMOSPHERE_TRANSPORT);
             if (webSocketEnabled) {
                 return false;
-            } else if (transport != null && transport.equals(LONG_POLLING_TRANSPORT)) {
+            } else if (transport != null && (transport.equals(JSONP_TRANSPORT) || transport.equals(LONG_POLLING_TRANSPORT))) {
                 return false;
             }
 
@@ -617,16 +618,12 @@ public class AtmosphereFilter implements ResourceFilterFactory {
             if ((localScope == Suspend.SCOPE.REQUEST) && bc == null) {
                 if (bc == null) {
                     try {
-                        String id = UUID.randomUUID().toString();
-
-                        // Re-generate a new one with proper scope.
-                        Class<Broadcaster> c = null;
-                        try {
-                            c = (Class<Broadcaster>) Class.forName((String) servletReq.getAttribute(ApplicationConfig.BROADCASTER_CLASS));
-                        } catch (Throwable e) {
-                            throw new IllegalStateException(e.getMessage());
+                        String id = servletReq.getHeader(X_ATMOSPHERE_TRACKING_ID);
+                        if (id == null){
+                            id = UUID.randomUUID().toString();
                         }
-                        bc = broadcasterFactory.get(c, id);
+
+                        bc = broadcasterFactory.get(id);
                         bc.setScope(Broadcaster.SCOPE.REQUEST);
                     } catch (Exception ex) {
                         logger.error("failed to instantiate broadcaster with factory: " + broadcasterFactory, ex);
@@ -677,9 +674,23 @@ public class AtmosphereFilter implements ResourceFilterFactory {
                 if (entity != null) {
                     b = b.header("Content-Type", contentType != null ?
                             contentType.toString() : "text/html; charset=ISO-8859-1");
+                    servletReq.setAttribute(FrameworkConfig.EXPECTED_CONTENT_TYPE, contentType.toString());
                 }
 
-                if (comments && !resumeOnBroadcast) {
+                boolean eclipse362468 = false;
+                String serverInfo = r.getAtmosphereConfig().getServletContext().getServerInfo();
+                if (serverInfo.indexOf("jetty") != -1) {
+                    String[] jettyVersion = serverInfo.substring(6).split("\\.");
+                    // https://bugs.eclipse.org/bugs/show_bug.cgi?id=362468
+                    eclipse362468 = ((Integer.valueOf(jettyVersion[0]) == 8 && Integer.valueOf(jettyVersion[1]) == 0 && Integer.valueOf(jettyVersion[2]) > 1))
+                            || ((Integer.valueOf(jettyVersion[0]) == 7 && Integer.valueOf(jettyVersion[1]) == 5 && Integer.valueOf(jettyVersion[2]) == 4));
+
+                    if (comments && eclipse362468) {
+                        logger.debug("Padding response is disabled to workaround https://bugs.eclipse.org/bugs/show_bug.cgi?id=362468");
+                    }
+                }
+
+                if (!eclipse362468 && comments && !resumeOnBroadcast) {
                     String padding = (String) servletReq.getAttribute(ApplicationConfig.STREAMING_PADDING_MODE);
                     String paddingData = AtmosphereResourceImpl.createStreamingPadding(padding);
 

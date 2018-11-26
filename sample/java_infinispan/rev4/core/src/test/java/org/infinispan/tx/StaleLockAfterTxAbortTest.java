@@ -24,18 +24,14 @@ package org.infinispan.tx;
 
 import org.infinispan.Cache;
 import org.infinispan.config.Configuration;
-import org.infinispan.context.InvocationContext;
-import org.infinispan.context.InvocationContextContainer;
-import org.infinispan.context.InvocationContextContainerImpl;
 import org.infinispan.manager.EmbeddedCacheManager;
 import org.infinispan.test.SingleCacheManagerTest;
-import org.infinispan.test.TestingUtil;
 import org.infinispan.test.fwk.TestCacheManagerFactory;
-import org.infinispan.util.concurrent.locks.LockManager;
+import org.infinispan.transaction.lookup.DummyTransactionManagerLookup;
+import org.infinispan.transaction.tm.DummyTransaction;
+import org.infinispan.transaction.tm.DummyTransactionManager;
 import org.testng.annotations.Test;
 
-import javax.transaction.InvalidTransactionException;
-import javax.transaction.SystemException;
 import javax.transaction.Transaction;
 import javax.transaction.TransactionManager;
 import java.util.concurrent.CountDownLatch;
@@ -56,19 +52,27 @@ public class StaleLockAfterTxAbortTest extends SingleCacheManagerTest {
    @Override
    protected EmbeddedCacheManager createCacheManager() throws Exception {
       Configuration c = getDefaultStandaloneConfig(true);
-      return TestCacheManagerFactory.createCacheManager(c, true);
+      c.fluent().transaction().transactionManagerLookup(new DummyTransactionManagerLookup());
+      return TestCacheManagerFactory.createCacheManager(c);
    }
 
-   public void doTest() throws InterruptedException, SystemException, InvalidTransactionException {
+   public void doTest() throws Throwable {
       cache.put(k, "value"); // init value
 
       assertNotLocked(cache, k);
 
-      InvocationContextContainerImpl icc = (InvocationContextContainerImpl) TestingUtil.extractComponent(cache, InvocationContextContainer.class);
-      InvocationContext ctx = icc.getInvocationContext();
-      LockManager lockManager = TestingUtil.extractComponent(cache, LockManager.class);
-      lockManager.lockAndRecord(k, ctx);
-      ctx.putLookedUpEntry(k, null);
+//      InvocationContextContainerImpl icc = (InvocationContextContainerImpl) TestingUtil.extractComponent(cache, InvocationContextContainer.class);
+//      InvocationContext ctx = icc.getInvocationContext();
+//      LockManager lockManager = TestingUtil.extractComponent(cache, LockManager.class);
+//      lockManager.lockAndRecord(k, ctx);
+//      ctx.putLookedUpEntry(k, null);
+
+      DummyTransactionManager dtm = (DummyTransactionManager) tm();
+      tm().begin();
+      cache.put(k, "some");
+      final DummyTransaction transaction = dtm.getTransaction();
+      transaction.runPrepare();
+      tm().suspend();
 
       // test that the key is indeed locked.
       assertLocked(cache, k);
@@ -85,8 +89,8 @@ public class StaleLockAfterTxAbortTest extends SingleCacheManagerTest {
       transactionThread.tm.rollback();
 
       // now release the lock
-      icc.resume(ctx);
-      lockManager.releaseLocks(ctx);
+      tm().resume(transaction);
+      transaction.runRollback();
       transactionThread.join();
 
       assertNotLocked(cache, k);

@@ -20,7 +20,7 @@
 
 package org.graylog2.rest.resources.streams;
 
-import java.util.Date;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
@@ -38,20 +38,24 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.bson.types.ObjectId;
 import org.graylog2.Core;
 import org.graylog2.database.NotFoundException;
+import org.graylog2.database.ValidationException;
+import org.graylog2.plugin.Tools;
 import org.graylog2.plugin.streams.Stream;
 import org.graylog2.rest.RestResource;
 import org.graylog2.rest.resources.streams.requests.CreateRequest;
 import org.graylog2.streams.StreamImpl;
+import org.joda.time.DateTime;
+import org.joda.time.DateTimeZone;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.beust.jcommander.internal.Lists;
 import com.google.common.collect.Maps;
-import com.google.gson.Gson;
-import com.google.gson.JsonSyntaxException;
 import com.sun.jersey.api.core.ResourceConfig;
 
 /**
@@ -66,7 +70,7 @@ public class StreamResource extends RestResource {
     @POST @Path("/")
     @Consumes(MediaType.APPLICATION_JSON) 
     @Produces(MediaType.APPLICATION_JSON)
-    public Response create(String body) {
+    public Response create(String body, @QueryParam("pretty") boolean prettyPrint) {
         Core core = (Core) rc.getProperty("core");
 
         if (body == null || body.isEmpty()) {
@@ -76,25 +80,31 @@ public class StreamResource extends RestResource {
 
         CreateRequest cr;
         try {
-        	cr = new Gson().fromJson(body, CreateRequest.class);
-        } catch(JsonSyntaxException e) {
-        	LOG.error("Malformed JSON. Returning HTTP 400.");
-        	throw new WebApplicationException(400);
+            cr = objectMapper.readValue(body, CreateRequest.class);
+        } catch(IOException e) {
+            LOG.error("Error while parsing JSON", e);
+            throw new WebApplicationException(e, Status.BAD_REQUEST);
         }
-        
+
         // Create stream.
         Map<String, Object> streamData = Maps.newHashMap();
         streamData.put("title", cr.title);
-        streamData.put("creator_user_id", cr.creatorUserId);
-        streamData.put("created_at", new Date());
-        
+        streamData.put("creator_user_id", cr.creator_user_id);
+        streamData.put("created_at", new DateTime(DateTimeZone.UTC));
+
         StreamImpl stream = new StreamImpl(streamData, core);
-        ObjectId id = stream.save();
+        ObjectId id;
+        try {
+            id = stream.save();
+        } catch (ValidationException e) {
+            LOG.error("Validation error.", e);
+            throw new WebApplicationException(e, Status.BAD_REQUEST);
+        }
 
         Map<String, Object> result = Maps.newHashMap();
         result.put("stream_id", id.toStringMongod());
 
-        return Response.status(Status.CREATED).entity(json(result)).build();
+        return Response.status(Status.CREATED).entity(json(result, prettyPrint)).build();
     }
     
     @GET @Path("/")
@@ -130,10 +140,10 @@ public class StreamResource extends RestResource {
         } catch (NotFoundException e) {
         	throw new WebApplicationException(404);
         }
-        
+
         return json(stream.asMap(), prettyPrint);
     }
-    
+
     @DELETE @Path("/{streamId}")
     public Response delete(@PathParam("streamId") String streamId) {
         Core core = (Core) rc.getProperty("core");

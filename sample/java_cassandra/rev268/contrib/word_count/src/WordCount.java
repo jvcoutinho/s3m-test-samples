@@ -49,9 +49,6 @@ import org.apache.hadoop.util.ToolRunner;
  * "text" containing a sequence of words.
  *
  * For each word, we output the total number of occurrences across all texts.
- *
- * When outputting to Cassandra, we write the word counts as a {word, count} column/value pair,
- * with a row key equal to the name of the source column we read the words from.
  */
 public class WordCount extends Configured implements Tool
 {
@@ -77,17 +74,11 @@ public class WordCount extends Configured implements Tool
     {
         private final static IntWritable one = new IntWritable(1);
         private Text word = new Text();
-        private ByteBuffer sourceColumn;
-
-        protected void setup(org.apache.hadoop.mapreduce.Mapper.Context context)
-        throws IOException, InterruptedException
-        {
-            sourceColumn = ByteBuffer.wrap(context.getConfiguration().get(CONF_COLUMN_NAME).getBytes());
-        }
+        private ByteBuffer columnName;
 
         public void map(ByteBuffer key, SortedMap<ByteBuffer, IColumn> columns, Context context) throws IOException, InterruptedException
         {
-            IColumn column = columns.get(sourceColumn);
+            IColumn column = columns.get(columnName);
             if (column == null)
                 return;
             String value = ByteBufferUtil.string(column.value());
@@ -100,48 +91,78 @@ public class WordCount extends Configured implements Tool
                 context.write(word, one);
             }
         }
+
+        protected void setup(org.apache.hadoop.mapreduce.Mapper.Context context)
+            throws IOException, InterruptedException
+        {
+            this.columnName = ByteBuffer.wrap(context.getConfiguration().get(CONF_COLUMN_NAME).getBytes());
+        }
+        
     }
 
     public static class ReducerToFilesystem extends Reducer<Text, IntWritable, Text, IntWritable>
     {
+        private IntWritable result = new IntWritable();
+
         public void reduce(Text key, Iterable<IntWritable> values, Context context) throws IOException, InterruptedException
         {
             int sum = 0;
             for (IntWritable val : values)
+            {
                 sum += val.get();
-            context.write(key, new IntWritable(sum));
+            }
+
+            result.set(sum);
+            context.write(key, result);
         }
     }
 
     public static class ReducerToCassandra extends Reducer<Text, IntWritable, ByteBuffer, List<Mutation>>
     {
-        private ByteBuffer outputKey;
+        private List<Mutation> results = new ArrayList<Mutation>();
+        private String columnName;
 
-        protected void setup(org.apache.hadoop.mapreduce.Reducer.Context context)
-        throws IOException, InterruptedException
-        {
-            outputKey = ByteBuffer.wrap(context.getConfiguration().get(CONF_COLUMN_NAME).getBytes());
-        }
-
-        public void reduce(Text word, Iterable<IntWritable> values, Context context) throws IOException, InterruptedException
+        public void reduce(Text key, Iterable<IntWritable> values, Context context) throws IOException, InterruptedException
         {
             int sum = 0;
             for (IntWritable val : values)
+            {
                 sum += val.get();
-            context.write(outputKey, Collections.singletonList(getMutation(word, sum)));
+            }
+
+            results.add(getMutation(key, sum));
+            context.write(ByteBuffer.wrap(columnName.getBytes()), results);
+            results.clear();
         }
 
-        private static Mutation getMutation(Text word, int sum)
+        protected void setup(org.apache.hadoop.mapreduce.Reducer.Context context)
+            throws IOException, InterruptedException
         {
-            Column c = new Column();
-            c.name = ByteBuffer.wrap(word.getBytes());
-            c.value = ByteBuffer.wrap(String.valueOf(sum).getBytes());
-            c.timestamp = System.currentTimeMillis() * 1000;
+            this.columnName = context.getConfiguration().get(CONF_COLUMN_NAME);
+        }
 
+        private static Mutation getMutation(Text key, int sum)
+        {
             Mutation m = new Mutation();
-            m.column_or_supercolumn = new ColumnOrSuperColumn();
-            m.column_or_supercolumn.column = c;
+            m.column_or_supercolumn = getCoSC(key, sum);
             return m;
+        }
+
+        private static ColumnOrSuperColumn getCoSC(Text key, int sum)
+        {
+            // Have to convert both the key and the sum to ByteBuffers
+            // for the generalized output format
+            ByteBuffer name = ByteBuffer.wrap(key.getBytes());
+            ByteBuffer value = ByteBuffer.wrap(String.valueOf(sum).getBytes());
+
+            Column c = new Column();
+            c.name = name;
+            c.value = value;
+            c.timestamp = System.currentTimeMillis() * 1000;
+            c.ttl = 0;
+            ColumnOrSuperColumn cosc = new ColumnOrSuperColumn();
+            cosc.column = c;
+            return cosc;
         }
     }
 
@@ -183,7 +204,7 @@ public class WordCount extends Configured implements Tool
                 job.setOutputValueClass(List.class);
 
                 job.setOutputFormatClass(ColumnFamilyOutputFormat.class);
-
+                
                 ConfigHelper.setOutputColumnFamily(job.getConfiguration(), KEYSPACE, OUTPUT_COLUMN_FAMILY);
             }
 

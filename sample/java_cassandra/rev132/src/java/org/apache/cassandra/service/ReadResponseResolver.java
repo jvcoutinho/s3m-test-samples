@@ -29,11 +29,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.commons.lang.ArrayUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.marshal.AbstractCommutativeType;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
@@ -50,14 +53,14 @@ public class ReadResponseResolver implements IResponseResolver<Row>
     private final ConcurrentMap<Message, ReadResponse> results = new NonBlockingHashMap<Message, ReadResponse>();
     private DecoratedKey key;
     private ByteBuffer digest;
-    private static final Message FAKE_MESSAGE = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.INTERNAL_RESPONSE, ArrayUtils.EMPTY_BYTE_ARRAY);;
+    private static final Message FAKE_MESSAGE = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.INTERNAL_RESPONSE, ArrayUtils.EMPTY_BYTE_ARRAY, MessagingService.version_);
 
     public ReadResponseResolver(String table, ByteBuffer key)
     {
         this.table = table;
         this.key = StorageService.getPartitioner().decorateKey(key);
     }
-    
+
     public Row getData() throws IOException
     {
         for (Map.Entry<Message, ReadResponse> entry : results.entrySet())
@@ -118,8 +121,20 @@ public class ReadResponseResolver implements IResponseResolver<Row>
             }
             else
             {
-                versions.add(result.row().cf);
-                endpoints.add(message.getFrom());
+                ColumnFamily cf = result.row().cf;
+                InetAddress from = message.getFrom();
+
+                if (cf != null)
+                {
+                    AbstractType defaultValidator = cf.metadata().getDefaultValidator();
+                    if (!FBUtilities.getLocalAddress().equals(from) && defaultValidator.isCommutative())
+                    {
+                        cf = cf.cloneMe();
+                        ((AbstractCommutativeType) defaultValidator).cleanContext(cf, FBUtilities.getLocalAddress());
+                    }
+                }
+                versions.add(cf);
+                endpoints.add(from);
             }
 
             results.remove(message);
@@ -175,11 +190,19 @@ public class ReadResponseResolver implements IResponseResolver<Row>
 
             // create and send the row mutation message based on the diff
             RowMutation rowMutation = new RowMutation(table, key.key);
+
+            AbstractType defaultValidator = diffCf.metadata().getDefaultValidator();
+            if (defaultValidator.isCommutative())
+                ((AbstractCommutativeType)defaultValidator).cleanContext(diffCf, endpoints.get(i));
+
+            if (diffCf.getColumnsMap().isEmpty() && !diffCf.isMarkedForDelete())
+                continue;
+
             rowMutation.add(diffCf);
             Message repairMessage;
             try
             {
-                repairMessage = rowMutation.makeRowMutationMessage(StorageService.Verb.READ_REPAIR);
+                repairMessage = rowMutation.makeRowMutationMessage(StorageService.Verb.READ_REPAIR, Gossiper.instance.getVersion(endpoints.get(i)));
             }
             catch (IOException e)
             {
@@ -198,7 +221,7 @@ public class ReadResponseResolver implements IResponseResolver<Row>
         {
             if (cf != null)
             {
-                resolved = cf.cloneMe();
+                resolved = cf.cloneMeShallow();
                 break;
             }
         }
@@ -217,7 +240,7 @@ public class ReadResponseResolver implements IResponseResolver<Row>
         ByteArrayInputStream bufIn = new ByteArrayInputStream(body);
         try
         {
-            ReadResponse result = ReadResponse.serializer().deserialize(new DataInputStream(bufIn));
+            ReadResponse result = ReadResponse.serializer().deserialize(new DataInputStream(bufIn), message.getVersion());
             if (logger_.isDebugEnabled())
                 logger_.debug("Preprocessed {} response", result.isDigestQuery() ? "digest" : "data");
             results.put(message, result);

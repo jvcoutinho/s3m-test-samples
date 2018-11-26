@@ -32,24 +32,22 @@ import java.util.concurrent.ExecutionException;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Maps;
 import org.apache.commons.cli.*;
-import org.yaml.snakeyaml.Loader;
-import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutorMBean;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
 import org.apache.cassandra.db.compaction.OperationType;
-import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.EndpointSnitchInfoMBean;
 import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.service.CacheServiceMBean;
-import org.apache.cassandra.service.PBSPredictionResult;
-import org.apache.cassandra.service.PBSPredictorMBean;
 import org.apache.cassandra.service.StorageProxyMBean;
+import org.apache.cassandra.streaming.StreamState;
+import org.apache.cassandra.streaming.ProgressInfo;
+import org.apache.cassandra.streaming.SessionInfo;
 import org.apache.cassandra.utils.EstimatedHistogram;
 import org.apache.cassandra.utils.Pair;
 
@@ -118,6 +116,8 @@ public class NodeCmd
         ENABLETHRIFT,
         FLUSH,
         GETCOMPACTIONTHRESHOLD,
+        DISABLEAUTOCOMPACTION,
+        ENABLEAUTOCOMPACTION,
         GETCOMPACTIONTHROUGHPUT,
         GETSTREAMTHROUGHPUT,
         GETENDPOINTS,
@@ -157,7 +157,6 @@ public class NodeCmd
         RANGEKEYSAMPLE,
         REBUILD_INDEX,
         RESETLOCALSCHEMA,
-        PREDICTCONSISTENCY,
         ENABLEBACKUP,
         DISABLEBACKUP
     }
@@ -195,9 +194,7 @@ public class NodeCmd
         try
         {
             final Constructor constructor = new Constructor(NodeToolHelp.class);
-            TypeDescription desc = new TypeDescription(NodeToolHelp.class);
-            desc.putListPropertyType("commands", NodeToolHelp.NodeToolCommand.class);
-            final Yaml yaml = new Yaml(new Loader(constructor));
+            final Yaml yaml = new Yaml(constructor);
             return (NodeToolHelp)yaml.load(is);
         }
         finally
@@ -402,7 +399,7 @@ public class NodeCmd
         {
             if (format == null)
             {
-                StringBuffer buf = new StringBuffer();
+                StringBuilder buf = new StringBuilder();
                 String addressPlaceholder = String.format("%%-%ds  ", maxAddressLength);
                 buf.append("%s%s  ");                         // status
                 buf.append(addressPlaceholder);               // address
@@ -517,7 +514,7 @@ public class NodeCmd
         }
     }
 
-    /** Writes a table of cluster-wide node information to a PrintStream
+    /** Writes a keyspaceName of cluster-wide node information to a PrintStream
      * @throws UnknownHostException */
     public void printClusterStatus(PrintStream outs, String keyspace) throws UnknownHostException
     {
@@ -629,56 +626,34 @@ public class NodeCmd
     public void printNetworkStats(final InetAddress addr, PrintStream outs)
     {
         outs.printf("Mode: %s%n", probe.getOperationMode());
-        Set<InetAddress> hosts = addr == null ? probe.getStreamDestinations() : new HashSet<InetAddress>(){{add(addr);}};
-        if (hosts.size() == 0)
+        Set<StreamState> statuses = probe.getStreamStatus();
+        if (statuses.isEmpty())
             outs.println("Not sending any streams.");
-        for (InetAddress host : hosts)
+        for (StreamState status : statuses)
         {
-            try
+            outs.printf("%s %s%n", status.description, status.planId.toString());
+            for (SessionInfo info : status.sessions)
             {
-                List<String> files = probe.getFilesDestinedFor(host);
-                if (files.size() > 0)
+                outs.printf("    %s%n", info.peer.toString());
+                if (!info.receivingSummaries.isEmpty())
                 {
-                    outs.printf("Streaming to: %s%n", host);
-                    for (String file : files)
-                        outs.printf("   %s%n", file);
+                    outs.printf("        Receiving %d files, %d bytes total%n", info.getTotalFilesToReceive(), info.getTotalSizeToReceive());
+                    for (ProgressInfo progress : info.getReceivingFiles())
+                    {
+                        outs.printf("            %s%n", progress.toString());
+                    }
                 }
-                else
+                if (!info.sendingSummaries.isEmpty())
                 {
-                    outs.printf(" Nothing streaming to %s%n", host);
+                    outs.printf("        Sending %d files, %d bytes total%n", info.getTotalFilesToSend(), info.getTotalSizeToSend());
+                    for (ProgressInfo progress : info.getSendingFiles())
+                    {
+                        outs.printf("            %s%n", progress.toString());
+                    }
                 }
-            }
-            catch (IOException ex)
-            {
-                outs.printf("   Error retrieving file data for %s%n", host);
             }
         }
 
-        hosts = addr == null ? probe.getStreamSources() : new HashSet<InetAddress>(){{add(addr); }};
-        if (hosts.size() == 0)
-            outs.println("Not receiving any streams.");
-        for (InetAddress host : hosts)
-        {
-            try
-            {
-                List<String> files = probe.getIncomingFiles(host);
-                if (files.size() > 0)
-                {
-                    outs.printf("Streaming from: %s%n", host);
-                    for (String file : files)
-                        outs.printf("   %s%n", file);
-                }
-                else
-                {
-                    outs.printf(" Nothing streaming from %s%n", host);
-                }
-            }
-            catch (IOException ex)
-            {
-                outs.printf("   Error retrieving file data for %s%n", host);
-            }
-        }
-        
         outs.printf("Read Repair Statistics:%nAttempted: %d%nMismatch (Blocking): %d%nMismatch (Background): %d%n", probe.getReadRepairAttempted(), probe.getReadRepairRepairedBlocking(), probe.getReadRepairRepairedBackground());
 
         MessagingServiceMBean ms = probe.msProxy;
@@ -777,33 +752,33 @@ public class NodeCmd
         while (cfamilies.hasNext())
         {
             Entry<String, ColumnFamilyStoreMBean> entry = cfamilies.next();
-            String tableName = entry.getKey();
+            String keyspaceName = entry.getKey();
             ColumnFamilyStoreMBean cfsProxy = entry.getValue();
 
-            if (!cfstoreMap.containsKey(tableName))
+            if (!cfstoreMap.containsKey(keyspaceName))
             {
                 List<ColumnFamilyStoreMBean> columnFamilies = new ArrayList<ColumnFamilyStoreMBean>();
                 columnFamilies.add(cfsProxy);
-                cfstoreMap.put(tableName, columnFamilies);
+                cfstoreMap.put(keyspaceName, columnFamilies);
             }
             else
             {
-                cfstoreMap.get(tableName).add(cfsProxy);
+                cfstoreMap.get(keyspaceName).add(cfsProxy);
             }
         }
 
-        // print out the table statistics
+        // print out the keyspace statistics
         for (Entry<String, List<ColumnFamilyStoreMBean>> entry : cfstoreMap.entrySet())
         {
-            String tableName = entry.getKey();
+            String keyspaceName = entry.getKey();
             List<ColumnFamilyStoreMBean> columnFamilies = entry.getValue();
-            long tableReadCount = 0;
-            long tableWriteCount = 0;
-            int tablePendingTasks = 0;
-            double tableTotalReadTime = 0.0f;
-            double tableTotalWriteTime = 0.0f;
+            long keyspaceReadCount = 0;
+            long keyspaceWriteCount = 0;
+            int keyspacePendingTasks = 0;
+            double keyspaceTotalReadTime = 0.0f;
+            double keyspaceTotalWriteTime = 0.0f;
 
-            outs.println("Keyspace: " + tableName);
+            outs.println("Keyspace: " + keyspaceName);
             for (ColumnFamilyStoreMBean cfstore : columnFamilies)
             {
                 long writeCount = cfstore.getWriteCount();
@@ -811,27 +786,27 @@ public class NodeCmd
 
                 if (readCount > 0)
                 {
-                    tableReadCount += readCount;
-                    tableTotalReadTime += cfstore.getTotalReadLatencyMicros();
+                    keyspaceReadCount += readCount;
+                    keyspaceTotalReadTime += cfstore.getTotalReadLatencyMicros();
                 }
                 if (writeCount > 0)
                 {
-                    tableWriteCount += writeCount;
-                    tableTotalWriteTime += cfstore.getTotalWriteLatencyMicros();
+                    keyspaceWriteCount += writeCount;
+                    keyspaceTotalWriteTime += cfstore.getTotalWriteLatencyMicros();
                 }
-                tablePendingTasks += cfstore.getPendingTasks();
+                keyspacePendingTasks += cfstore.getPendingTasks();
             }
 
-            double tableReadLatency = tableReadCount > 0 ? tableTotalReadTime / tableReadCount / 1000 : Double.NaN;
-            double tableWriteLatency = tableWriteCount > 0 ? tableTotalWriteTime / tableWriteCount / 1000 : Double.NaN;
+            double keyspaceReadLatency = keyspaceReadCount > 0 ? keyspaceTotalReadTime / keyspaceReadCount / 1000 : Double.NaN;
+            double keyspaceWriteLatency = keyspaceWriteCount > 0 ? keyspaceTotalWriteTime / keyspaceWriteCount / 1000 : Double.NaN;
 
-            outs.println("\tRead Count: " + tableReadCount);
-            outs.println("\tRead Latency: " + String.format("%s", tableReadLatency) + " ms.");
-            outs.println("\tWrite Count: " + tableWriteCount);
-            outs.println("\tWrite Latency: " + String.format("%s", tableWriteLatency) + " ms.");
-            outs.println("\tPending Tasks: " + tablePendingTasks);
+            outs.println("\tRead Count: " + keyspaceReadCount);
+            outs.println("\tRead Latency: " + String.format("%s", keyspaceReadLatency) + " ms.");
+            outs.println("\tWrite Count: " + keyspaceWriteCount);
+            outs.println("\tWrite Latency: " + String.format("%s", keyspaceWriteLatency) + " ms.");
+            outs.println("\tPending Tasks: " + keyspacePendingTasks);
 
-            // print out column family statistics for this table
+            // print out column family statistics for this keyspace
             for (ColumnFamilyStoreMBean cfstore : columnFamilies)
             {
                 String cfName = cfstore.getColumnFamilyName();
@@ -971,49 +946,7 @@ public class NodeCmd
         outs.println(probe.isThriftServerRunning() ? "running" : "not running");
     }
 
-    public void predictConsistency(Integer replicationFactor,
-                                   Integer timeAfterWrite,
-                                   Integer numVersions,
-                                   Float percentileLatency,
-                                   PrintStream output)
-    {
-        PBSPredictorMBean predictorMBean = probe.getPBSPredictorMBean();
-
-        for(int r = 1; r <= replicationFactor; ++r) {
-            for(int w = 1; w <= replicationFactor; ++w) {
-                if(w+r > replicationFactor+1)
-                    continue;
-
-                try {
-                    PBSPredictionResult result = predictorMBean.doPrediction(replicationFactor,
-                                                                             r,
-                                                                             w,
-                                                                             timeAfterWrite,
-                                                                             numVersions,
-                                                                             percentileLatency);
-
-                    if(r == 1 && w == 1) {
-                        output.printf("%dms after a given write, with maximum version staleness of k=%d%n", timeAfterWrite, numVersions);
-                    }
-
-                    output.printf("N=%d, R=%d, W=%d%n", replicationFactor, r, w);
-                    output.printf("Probability of consistent reads: %f%n", result.getConsistencyProbability());
-                    output.printf("Average read latency: %fms (%.3fth %%ile %dms)%n", result.getAverageReadLatency(),
-                                                                                   result.getPercentileReadLatencyPercentile()*100,
-                                                                                   result.getPercentileReadLatencyValue());
-                    output.printf("Average write latency: %fms (%.3fth %%ile %dms)%n%n", result.getAverageWriteLatency(),
-                                                                                      result.getPercentileWriteLatencyPercentile()*100,
-                                                                                      result.getPercentileWriteLatencyValue());
-                } catch (Exception e) {
-                        System.out.println(e.getMessage());
-                        e.printStackTrace();
-                        return;
-                }
-            }
-        }
-    }
-
-    public static void main(String[] args) throws IOException, InterruptedException, ConfigurationException, ParseException
+    public static void main(String[] args) throws IOException, InterruptedException, ParseException
     {
         CommandLineParser parser = new PosixParser();
         ToolCommandLine cmd = null;
@@ -1044,45 +977,52 @@ public class NodeCmd
             }
         }
 
-        String username = cmd.getOptionValue(USERNAME_OPT.left);
-        String password = cmd.getOptionValue(PASSWORD_OPT.left);
+        NodeCommand command = null;
+
+        try
+        {
+            command = cmd.getCommand();
+        }
+        catch (IllegalArgumentException e)
+        {
+            badUse(e.getMessage());
+        }
+
+        if(NodeCommand.HELP.equals(command))
+        {
+            printUsage();
+            System.exit(0);
+        }
 
         NodeProbe probe = null;
+
         try
         {
-            probe = username == null ? new NodeProbe(host, port) : new NodeProbe(host, port, username, password);
-        }
-        catch (IOException ioe)
-        {
-            Throwable inner = findInnermostThrowable(ioe);
-            if (inner instanceof ConnectException)
-            {
-                System.err.printf("Failed to connect to '%s:%d': %s%n", host, port, inner.getMessage());
-                System.exit(1);
-            }
-            else if (inner instanceof UnknownHostException)
-            {
-                System.err.printf("Cannot resolve '%s': unknown host%n", host);
-                System.exit(1);
-            }
-            else
-            {
-                err(ioe, "Error connecting to remote JMX agent!");
-            }
-        }
-        try
-        {
-            NodeCommand command = null;
+            String username = cmd.getOptionValue(USERNAME_OPT.left);
+            String password = cmd.getOptionValue(PASSWORD_OPT.left);
 
             try
             {
-                command = cmd.getCommand();
+                probe = username == null ? new NodeProbe(host, port) : new NodeProbe(host, port, username, password);
             }
-            catch (IllegalArgumentException e)
+            catch (IOException ioe)
             {
-                badUse(e.getMessage());
+                Throwable inner = findInnermostThrowable(ioe);
+                if (inner instanceof ConnectException)
+                {
+                    System.err.printf("Failed to connect to '%s:%d': %s%n", host, port, inner.getMessage());
+                    System.exit(1);
+                }
+                else if (inner instanceof UnknownHostException)
+                {
+                    System.err.printf("Cannot resolve '%s': unknown host%n", host);
+                    System.exit(1);
+                }
+                else
+                {
+                    err(ioe, "Error connecting to remote JMX agent!");
+                }
             }
-
 
             NodeCmd nodeCmd = new NodeCmd(probe);
 
@@ -1093,7 +1033,6 @@ public class NodeCmd
 
             switch (command)
             {
-                case HELP : printUsage(); break;
                 case RING :
                     if (arguments.length > 0) { nodeCmd.printRing(System.out, arguments[0]); }
                     else                      { nodeCmd.printRing(System.out, null); };
@@ -1219,6 +1158,8 @@ public class NodeCmd
                 case FLUSH   :
                 case SCRUB   :
                 case UPGRADESSTABLES   :
+                case DISABLEAUTOCOMPACTION:
+                case ENABLEAUTOCOMPACTION:
                     optionalKSandCFs(command, cmd, arguments, probe);
                     break;
 
@@ -1249,7 +1190,6 @@ public class NodeCmd
                     if (minthreshold < 2 && maxthreshold != 0)    { badUse("Min threshold must be at least 2"); }
                     probe.setCompactionThreshold(arguments[0], arguments[1], minthreshold, maxthreshold);
                     break;
-
                 case GETENDPOINTS :
                     if (arguments.length != 3) { badUse("getendpoints requires ks, cf and key args"); }
                     nodeCmd.printEndPoints(arguments[0], arguments[1], arguments[2], System.out);
@@ -1293,20 +1233,6 @@ public class NodeCmd
 
                 case RANGEKEYSAMPLE :
                     nodeCmd.printRangeKeySample(System.out);
-                    break;
-
-                case PREDICTCONSISTENCY:
-                    if (arguments.length < 2) { badUse("Requires replication factor and time"); }
-                    int numVersions = 1;
-                    if (arguments.length == 3) { numVersions = Integer.parseInt(arguments[2]); }
-                    float percentileLatency = .999f;
-                    if (arguments.length == 4) { percentileLatency = Float.parseFloat(arguments[3]); }
-
-                    nodeCmd.predictConsistency(Integer.parseInt(arguments[0]),
-                                               Integer.parseInt(arguments[1]),
-                                               numVersions,
-                                               percentileLatency,
-                                               System.out);
                     break;
 
                 default :
@@ -1390,7 +1316,7 @@ public class NodeCmd
         }
     }
 
-    private static void handleSnapshots(NodeCommand nc, String tag, String[] cmdArgs, String columnFamily, NodeProbe probe) throws InterruptedException, IOException
+    private static void handleSnapshots(NodeCommand nc, String tag, String[] cmdArgs, String columnFamily, NodeProbe probe) throws IOException
     {
         String[] keyspaces = Arrays.copyOfRange(cmdArgs, 0, cmdArgs.length);
         System.out.print("Requested " + ((nc == NodeCommand.SNAPSHOT) ? "creating" : "clearing") + " snapshot for: ");
@@ -1453,16 +1379,16 @@ public class NodeCmd
                         probe.forceRepairAsync(System.out, keyspace, snapshot, localDC, primaryRange, columnFamilies);
                     break;
                 case FLUSH   :
-                    try { probe.forceTableFlush(keyspace, columnFamilies); }
+                    try { probe.forceKeyspaceFlush(keyspace, columnFamilies); }
                     catch (ExecutionException ee) { err(ee, "Error occurred during flushing"); }
                     break;
                 case COMPACT :
-                    try { probe.forceTableCompaction(keyspace, columnFamilies); }
+                    try { probe.forceKeyspaceCompaction(keyspace, columnFamilies); }
                     catch (ExecutionException ee) { err(ee, "Error occurred during compaction"); }
                     break;
                 case CLEANUP :
-                    if (keyspace.equals(Table.SYSTEM_KS)) { break; } // Skip cleanup on system cfs.
-                    try { probe.forceTableCleanup(keyspace, columnFamilies); }
+                    if (keyspace.equals(Keyspace.SYSTEM_KS)) { break; } // Skip cleanup on system cfs.
+                    try { probe.forceKeyspaceCleanup(keyspace, columnFamilies); }
                     catch (ExecutionException ee) { err(ee, "Error occurred during cleanup"); }
                     break;
                 case SCRUB :
@@ -1473,6 +1399,12 @@ public class NodeCmd
                     boolean excludeCurrentVersion = !cmd.hasOption(UPGRADE_ALL_SSTABLE_OPT.left);
                     try { probe.upgradeSSTables(keyspace, excludeCurrentVersion, columnFamilies); }
                     catch (ExecutionException ee) { err(ee, "Error occurred while upgrading the sstables for keyspace " + keyspace); }
+                    break;
+                case ENABLEAUTOCOMPACTION:
+                    probe.enableAutoCompaction(keyspace, columnFamilies);
+                    break;
+                case DISABLEAUTOCOMPACTION:
+                    probe.disableAutoCompaction(keyspace, columnFamilies);
                     break;
                 default:
                     throw new RuntimeException("Unreachable code.");

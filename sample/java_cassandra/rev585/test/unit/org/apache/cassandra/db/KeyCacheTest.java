@@ -35,7 +35,6 @@ import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import static junit.framework.Assert.assertEquals;
@@ -97,8 +96,7 @@ public class KeyCacheTest extends SchemaLoader
         CacheService.instance.invalidateKeyCache();
 
         // KeyCache should start at size 0 if we're caching X% of zero data.
-        int keyCacheSize = CacheService.instance.keyCache.size();
-        assert keyCacheSize == 0 : keyCacheSize;
+        assertEquals(0, CacheService.instance.keyCache.size());
 
         DecoratedKey key1 = Util.dk("key1");
         DecoratedKey key2 = Util.dk("key2");
@@ -106,10 +104,10 @@ public class KeyCacheTest extends SchemaLoader
 
         // inserts
         rm = new RowMutation(TABLE1, key1.key);
-        rm.add(new QueryPath(COLUMN_FAMILY1, null, ByteBufferUtil.bytes("1")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        rm.add(COLUMN_FAMILY1, ByteBufferUtil.bytes("1"), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
         rm = new RowMutation(TABLE1, key2.key);
-        rm.add(new QueryPath(COLUMN_FAMILY1, null, ByteBufferUtil.bytes("2")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        rm.add(COLUMN_FAMILY1, ByteBufferUtil.bytes("2"), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
 
         // to make sure we have SSTable
@@ -117,14 +115,14 @@ public class KeyCacheTest extends SchemaLoader
 
         // reads to cache key position
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key1,
-                                                       new QueryPath(new ColumnParent(COLUMN_FAMILY1)),
+                                                       COLUMN_FAMILY1,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
                                                        10));
 
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key2,
-                                                       new QueryPath(new ColumnParent(COLUMN_FAMILY1)),
+                                                       COLUMN_FAMILY1,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
@@ -133,21 +131,20 @@ public class KeyCacheTest extends SchemaLoader
         assert CacheService.instance.keyCache.size() == 2;
 
         Util.compactAll(cfs).get();
-        keyCacheSize = CacheService.instance.keyCache.size();
         // after compaction cache should have entries for
         // new SSTables, if we had 2 keys in cache previously it should become 4
-        assert keyCacheSize == 4 : keyCacheSize;
+        assertEquals(4, CacheService.instance.keyCache.size());
 
         // re-read same keys to verify that key cache didn't grow further
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key1,
-                                                       new QueryPath(new ColumnParent(COLUMN_FAMILY1)),
+                                                       COLUMN_FAMILY1,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,
                                                        10));
 
         cfs.getColumnFamily(QueryFilter.getSliceFilter(key2,
-                                                       new QueryPath(new ColumnParent(COLUMN_FAMILY1)),
+                                                       COLUMN_FAMILY1,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                        false,

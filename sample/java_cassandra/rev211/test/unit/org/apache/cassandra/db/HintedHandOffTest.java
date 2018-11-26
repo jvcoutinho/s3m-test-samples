@@ -6,15 +6,9 @@ import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.HintedHandOffManager;
-import org.apache.cassandra.db.RowMutation;
-import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy;
 import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.dht.IPartitioner;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -33,7 +27,7 @@ public class HintedHandOffTest extends SchemaLoader
     {
         // prepare hints column family
         Table systemTable = Table.open("system");
-        ColumnFamilyStore hintStore = systemTable.getColumnFamilyStore(HintedHandOffManager.HINTS_CF);
+        ColumnFamilyStore hintStore = systemTable.getColumnFamilyStore(SystemTable.HINTS_CF);
         hintStore.clearUnsafe();
         hintStore.metadata.gcGraceSeconds(36000); // 10 hours
         hintStore.setCompactionStrategyClass(SizeTieredCompactionStrategy.class.getCanonicalName());
@@ -47,7 +41,7 @@ public class HintedHandOffTest extends SchemaLoader
                ByteBufferUtil.EMPTY_BYTE_BUFFER,
                System.currentTimeMillis());
 
-        RowMutation.hintFor(rm, ByteBufferUtil.bytes("foo")).apply();
+        RowMutation.hintFor(rm, UUID.randomUUID()).apply();
 
         // flush data to disk
         hintStore.forceBlockingFlush();

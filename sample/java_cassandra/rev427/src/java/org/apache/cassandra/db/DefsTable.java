@@ -20,8 +20,6 @@ package org.apache.cassandra.db;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,7 +35,6 @@ import org.apache.avro.specific.SpecificRecord;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.migration.avro.KsDef;
@@ -181,7 +178,7 @@ public class DefsTable
             if (Schema.invalidSchemaRow(row))
                 continue;
 
-            for (IColumn column : row.cf.columns)
+            for (Column column : row.cf)
             {
                 Date columnDate = new Date(column.timestamp());
 
@@ -211,21 +208,9 @@ public class DefsTable
 
         logger.info("Fixing timestamps of schema ColumnFamily " + columnFamily + "...");
 
-        try
-        {
-            cfs.truncate().get();
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (InterruptedException e)
-        {
-            throw new AssertionError(e);
-        }
+        cfs.truncateBlocking();
 
         long microTimestamp = now.getTime() * 1000;
-
         for (Row row : rows)
         {
             if (Schema.invalidSchemaRow(row))
@@ -233,27 +218,16 @@ public class DefsTable
 
             RowMutation mutation = new RowMutation(Table.SYSTEM_KS, row.key.key);
 
-            for (IColumn column : row.cf.columns)
+            for (Column column : row.cf)
             {
                 if (column.isLive())
-                    mutation.add(new QueryPath(columnFamily, null, column.name()), column.value(), microTimestamp);
+                    mutation.add(columnFamily, column.name(), column.value(), microTimestamp);
             }
 
             mutation.apply();
         }
         // flush immediately because we read schema before replaying the commitlog
-        try
-        {
-            cfs.forceBlockingFlush();
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException("Could not flush after fixing schema timestamps", e);
-        }
-        catch (InterruptedException e)
-        {
-            throw new AssertionError(e);
-        }
+        cfs.forceBlockingFlush();
     }
 
     public static ByteBuffer searchComposite(String name, boolean start)
@@ -272,7 +246,7 @@ public class DefsTable
     private static Row serializedColumnFamilies(DecoratedKey ksNameKey)
     {
         ColumnFamilyStore cfsStore = SystemTable.schemaCFS(SystemTable.SCHEMA_COLUMNFAMILIES_CF);
-        return new Row(ksNameKey, cfsStore.getColumnFamily(QueryFilter.getIdentityFilter(ksNameKey, new QueryPath(SystemTable.SCHEMA_COLUMNFAMILIES_CF))));
+        return new Row(ksNameKey, cfsStore.getColumnFamily(QueryFilter.getIdentityFilter(ksNameKey, SystemTable.SCHEMA_COLUMNFAMILIES_CF)));
     }
 
     /**
@@ -290,8 +264,8 @@ public class DefsTable
         DecoratedKey vkey = StorageService.getPartitioner().decorateKey(toUTF8Bytes(version));
         Table defs = Table.open(Table.SYSTEM_KS);
         ColumnFamilyStore cfStore = defs.getColumnFamilyStore(OLD_SCHEMA_CF);
-        ColumnFamily cf = cfStore.getColumnFamily(QueryFilter.getIdentityFilter(vkey, new QueryPath(OLD_SCHEMA_CF)));
-        IColumn avroschema = cf.getColumn(DEFINITION_SCHEMA_COLUMN_NAME);
+        ColumnFamily cf = cfStore.getColumnFamily(QueryFilter.getIdentityFilter(vkey, OLD_SCHEMA_CF));
+        Column avroschema = cf.getColumn(DEFINITION_SCHEMA_COLUMN_NAME);
 
         Collection<KSMetaData> keyspaces = Collections.emptyList();
 
@@ -301,10 +275,9 @@ public class DefsTable
             org.apache.avro.Schema schema = org.apache.avro.Schema.parse(ByteBufferUtil.string(value));
 
             // deserialize keyspaces using schema
-            Collection<IColumn> columns = cf.getSortedColumns();
-            keyspaces = new ArrayList<KSMetaData>(columns.size());
+            keyspaces = new ArrayList<KSMetaData>(Iterables.size(cf));
 
-            for (IColumn column : columns)
+            for (Column column : cf)
             {
                 if (column.name().equals(DEFINITION_SCHEMA_COLUMN_NAME))
                     continue;
@@ -508,7 +481,7 @@ public class DefsTable
     private static void addColumnFamily(CFMetaData cfm)
     {
         assert Schema.instance.getCFMetaData(cfm.ksName, cfm.cfName) == null;
-        KSMetaData ksm = Schema.instance.getTableDefinition(cfm.ksName);
+        KSMetaData ksm = Schema.instance.getKSMetaData(cfm.ksName);
         ksm = KSMetaData.cloneWith(ksm, Iterables.concat(ksm.cfMetaData().values(), Collections.singleton(cfm)));
 
         Schema.instance.load(cfm);
@@ -557,10 +530,10 @@ public class DefsTable
 
     private static void dropKeyspace(String ksName) throws IOException
     {
-        KSMetaData ksm = Schema.instance.getTableDefinition(ksName);
+        KSMetaData ksm = Schema.instance.getKSMetaData(ksName);
         String snapshotName = Table.getTimestampedSnapshotName(ksName);
 
-        CompactionManager.instance.stopCompactionFor(ksm.cfMetaData().values());
+        CompactionManager.instance.interruptCompactionFor(ksm.cfMetaData().values(), true);
 
         // remove all cfs from the table instance.
         for (CFMetaData cfm : ksm.cfMetaData().values())
@@ -588,7 +561,7 @@ public class DefsTable
 
     private static void dropColumnFamily(String ksName, String cfName) throws IOException
     {
-        KSMetaData ksm = Schema.instance.getTableDefinition(ksName);
+        KSMetaData ksm = Schema.instance.getKSMetaData(ksName);
         assert ksm != null;
         ColumnFamilyStore cfs = Table.open(ksName).getColumnFamilyStore(cfName);
         assert cfs != null;
@@ -599,12 +572,12 @@ public class DefsTable
         Schema.instance.purge(cfm);
         Schema.instance.setTableDefinition(makeNewKeyspaceDefinition(ksm, cfm));
 
-        CompactionManager.instance.stopCompactionFor(Arrays.asList(cfm));
+        CompactionManager.instance.interruptCompactionFor(Arrays.asList(cfm), true);
 
         if (!StorageService.instance.isClientMode())
         {
             if (DatabaseDescriptor.isAutoSnapshot())
-                cfs.snapshot(Table.getTimestampedSnapshotName(cfs.columnFamily));
+                cfs.snapshot(Table.getTimestampedSnapshotName(cfs.name));
             Table.open(ksm.name).dropCf(cfm.cfId);
             MigrationManager.instance.notifyDropColumnFamily(cfm);
         }

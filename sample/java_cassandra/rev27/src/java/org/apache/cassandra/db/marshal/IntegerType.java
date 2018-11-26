@@ -21,6 +21,7 @@ package org.apache.cassandra.db.marshal;
 
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.sql.Types;
 
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.thrift.TBaseHelper;
@@ -125,7 +126,6 @@ public final class IntegerType extends AbstractType<BigInteger>
         return 0;
     }
 
-    @Override
     public String getString(ByteBuffer bytes)
     {
         if (bytes == null)
@@ -133,11 +133,20 @@ public final class IntegerType extends AbstractType<BigInteger>
         if (bytes.remaining() == 0)
             return "empty";
 
-        return new java.math.BigInteger(TBaseHelper.byteBufferToByteArray(bytes)).toString(10);
+        return new java.math.BigInteger(ByteBufferUtil.getArray(bytes)).toString(10);
+    }
+    
+    public String toString(BigInteger bi)
+    {
+        return bi.toString();
     }
 
-    public ByteBuffer fromString(String source)
+    public ByteBuffer fromString(String source) throws MarshalException
     {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+        
         BigInteger integerType;
 
         try
@@ -146,7 +155,7 @@ public final class IntegerType extends AbstractType<BigInteger>
         }
         catch (Exception e)
         {
-            throw new RuntimeException("'" + source + "' could not be translated into an IntegerType.");
+            throw new MarshalException(String.format("unable to make int from '%s'", source), e);
         }
 
         return decompose(integerType);
@@ -155,5 +164,45 @@ public final class IntegerType extends AbstractType<BigInteger>
     public void validate(ByteBuffer bytes) throws MarshalException
     {
         // no invalid integers.
+    }
+
+    public Class<BigInteger> getType()
+    {
+        return BigInteger.class;
+    }
+
+    public boolean isSigned()
+    {
+        return true;
+    }
+
+    public boolean isCaseSensitive()
+    {
+        return false;
+    }
+
+    public boolean isCurrency()
+    {
+        return false;
+    }
+
+    public int getPrecision(BigInteger obj)
+    {
+        return obj.toString().length();
+    }
+
+    public int getScale(BigInteger obj)
+    {
+        return 0;
+    }
+
+    public int getJdbcType()
+    {
+        return Types.BIGINT;
+    }
+
+    public boolean needsQuotes()
+    {
+        return false;
     }
 }

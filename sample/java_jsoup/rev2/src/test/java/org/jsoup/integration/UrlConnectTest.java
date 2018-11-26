@@ -4,6 +4,8 @@ import org.jsoup.HttpStatusException;
 import org.jsoup.UnsupportedMimeTypeException;
 import org.junit.Test;
 import org.junit.Ignore;
+
+import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.*;
 import org.jsoup.nodes.Document;
 import org.jsoup.Jsoup;
@@ -245,5 +247,26 @@ public class UrlConnectTest {
         assertEquals(196577, mediumRes.parse().text().length());
         assertEquals(actualDocText, largeRes.parse().text().length());
         assertEquals(actualDocText, unlimitedRes.parse().text().length());
+    }
+
+    /**
+     * Verify that security disabling feature works properly.
+     *
+     * 1. try to hit url with invalid certificate and evaluate that exception is thrown
+     * 2. disable security checks and call the same url to verify that content is consumed correctly
+     *
+     * @throws Exception
+     */
+    @Test
+    public void testUnsafe() throws Exception {
+        String url = "https://certs.cac.washington.edu/CAtest/";
+
+        try {
+            Jsoup.connect(url).execute();
+        } catch (IOException e) {
+//          that's expected exception
+        }
+        Connection.Response  defaultRes = Jsoup.connect(url).setSecure(false).execute();
+        assertThat(defaultRes.statusCode(),is(200));
     }
 }

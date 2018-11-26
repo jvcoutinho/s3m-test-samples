@@ -19,7 +19,6 @@ package org.apache.cassandra.utils;
 
 import java.io.*;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -34,6 +33,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.zip.Checksum;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.AbstractIterator;
@@ -41,7 +41,6 @@ import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.cache.IRowCacheProvider;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
@@ -50,7 +49,9 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
-import org.apache.cassandra.net.IAsyncResult;
+import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.io.util.IAllocator;
+import org.apache.cassandra.net.AsyncOneResponse;
 import org.apache.thrift.TBase;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
@@ -332,11 +333,18 @@ public class FBUtilities
         return scpurl.getFile();
     }
 
+    public static File cassandraHomeDir()
+    {
+        String libDir = new File(FBUtilities.class.getProtectionDomain().getCodeSource().getLocation().getPath()).getParent();
+        return new File(new File(libDir).getParent());
+    }
+
     public static String getReleaseVersionString()
     {
+        InputStream in = null;
         try
         {
-            InputStream in = FBUtilities.class.getClassLoader().getResourceAsStream("org/apache/cassandra/config/version.properties");
+            in = FBUtilities.class.getClassLoader().getResourceAsStream("org/apache/cassandra/config/version.properties");
             if (in == null)
             {
                 return "Unknown";
@@ -349,6 +357,10 @@ public class FBUtilities
         {
             logger.warn("Unable to load version.properties", e);
             return "debug version";
+        }
+        finally
+        {
+            FileUtils.closeQuietly(in);
         }
     }
 
@@ -365,11 +377,11 @@ public class FBUtilities
             waitOnFuture(f);
     }
 
-    public static void waitOnFuture(Future<?> future)
+    public static <T> T waitOnFuture(Future<T> future)
     {
         try
         {
-            future.get();
+            return future.get();
         }
         catch (ExecutionException ee)
         {
@@ -381,9 +393,9 @@ public class FBUtilities
         }
     }
 
-    public static void waitOnFutures(List<IAsyncResult> results, long ms) throws TimeoutException
+    public static void waitOnFutures(List<AsyncOneResponse> results, long ms) throws TimeoutException
     {
-        for (IAsyncResult result : results)
+        for (AsyncOneResponse result : results)
             result.get(ms, TimeUnit.MILLISECONDS);
     }
 
@@ -392,6 +404,13 @@ public class FBUtilities
         if (!partitionerClassName.contains("."))
             partitionerClassName = "org.apache.cassandra.dht." + partitionerClassName;
         return FBUtilities.construct(partitionerClassName, "partitioner");
+    }
+
+    public static IAllocator newOffHeapAllocator(String offheap_allocator) throws ConfigurationException
+    {
+        if (!offheap_allocator.contains("."))
+            offheap_allocator = "org.apache.cassandra.io.util." + offheap_allocator;
+        return FBUtilities.construct(offheap_allocator, "off-heap allocator");
     }
 
     /**
@@ -417,7 +436,7 @@ public class FBUtilities
     }
 
     /**
-     * Constructs an instance of the given class, which must have a no-arg constructor.
+     * Constructs an instance of the given class, which must have a no-arg or default constructor.
      * @param classname Fully qualified classname.
      * @param readable Descriptive noun for the role the class plays.
      * @throws ConfigurationException If the class cannot be found.
@@ -427,11 +446,7 @@ public class FBUtilities
         Class<T> cls = FBUtilities.classForName(classname, readable);
         try
         {
-            return cls.getConstructor().newInstance();
-        }
-        catch (NoSuchMethodException e)
-        {
-            throw new ConfigurationException(String.format("No default constructor for %s class '%s'.", readable, classname));
+            return cls.newInstance();
         }
         catch (IllegalAccessException e)
         {
@@ -441,8 +456,9 @@ public class FBUtilities
         {
             throw new ConfigurationException(String.format("Cannot use abstract class '%s' as %s.", classname, readable));
         }
-        catch (InvocationTargetException e)
+        catch (Exception e)
         {
+            // Catch-all because Class.newInstance() "propagates any exception thrown by the nullary constructor, including a checked exception".
             if (e.getCause() instanceof ConfigurationException)
                 throw (ConfigurationException)e.getCause();
             throw new ConfigurationException(String.format("Error instantiating %s class '%s'.", readable, classname), e);
@@ -481,13 +497,6 @@ public class FBUtilities
         }
 
         return field;
-    }
-
-    public static IRowCacheProvider newCacheProvider(String cache_provider) throws ConfigurationException
-    {
-        if (!cache_provider.contains("."))
-            cache_provider = "org.apache.cassandra.cache." + cache_provider;
-        return FBUtilities.construct(cache_provider, "row cache provider");
     }
 
     public static <T> CloseableIterator<T> closeableIterator(Iterator<T> iterator)
@@ -562,16 +571,12 @@ public class FBUtilities
         }
     }
 
-    public static void sleep(int millis)
+    public static void updateChecksumInt(Checksum checksum, int v)
     {
-        try
-        {
-            Thread.sleep(millis);
-        }
-        catch (InterruptedException e)
-        {
-            throw new AssertionError();
-        }
+        checksum.update((v >>> 24) & 0xFF);
+        checksum.update((v >>> 16) & 0xFF);
+        checksum.update((v >>> 8) & 0xFF);
+        checksum.update((v >>> 0) & 0xFF);
     }
 
     private static final class WrappedCloseableIterator<T>
@@ -593,14 +598,42 @@ public class FBUtilities
         public void close() {}
     }
 
-    public static <T> byte[] serialize(T object, IVersionedSerializer<T> serializer, int version) throws IOException
+    public static <T> byte[] serialize(T object, IVersionedSerializer<T> serializer, int version)
     {
-        int size = (int) serializer.serializedSize(object, version);
-        DataOutputBuffer buffer = new DataOutputBuffer(size);
-        serializer.serialize(object, buffer, version);
-        assert buffer.getLength() == size && buffer.getData().length == size
-               : String.format("Final buffer length %s to accommodate data size of %s (predicted %s) for %s",
-                               buffer.getData().length, buffer.getLength(), size, object);
-        return buffer.getData();
+        try
+        {
+            int size = (int) serializer.serializedSize(object, version);
+            DataOutputBuffer buffer = new DataOutputBuffer(size);
+            serializer.serialize(object, buffer, version);
+            assert buffer.getLength() == size && buffer.getData().length == size
+                : String.format("Final buffer length %s to accommodate data size of %s (predicted %s) for %s",
+                        buffer.getData().length, buffer.getLength(), size, object);
+            return buffer.getData();
+        }
+        catch (IOException e)
+        {
+            // We're doing in-memory serialization...
+            throw new AssertionError(e);
+        }
+    }
+
+    public static long copy(InputStream from, OutputStream to, long limit) throws IOException
+    {
+        byte[] buffer = new byte[64]; // 64 byte buffer
+        long copied = 0;
+        int toCopy = buffer.length;
+        while (true)
+        {
+            if (limit < buffer.length + copied)
+                toCopy = (int) (limit - copied);
+            int sofar = from.read(buffer, 0, toCopy);
+            if (sofar == -1)
+                break;
+            to.write(buffer, 0, sofar);
+            copied += sofar;
+            if (limit == copied)
+                break;
+        }
+        return copied;
     }
 }

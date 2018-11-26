@@ -5,6 +5,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -14,11 +15,7 @@ import org.junit.Test;
 import redis.clients.jedis.HostAndPort;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisCluster;
-import redis.clients.jedis.exceptions.JedisAskDataException;
-import redis.clients.jedis.exceptions.JedisClusterException;
-import redis.clients.jedis.exceptions.JedisClusterMaxRedirectionsException;
-import redis.clients.jedis.exceptions.JedisException;
-import redis.clients.jedis.exceptions.JedisMovedDataException;
+import redis.clients.jedis.exceptions.*;
 import redis.clients.jedis.tests.utils.JedisClusterTestUtil;
 import redis.clients.util.JedisClusterCRC16;
 
@@ -320,7 +317,18 @@ public class JedisClusterTest extends Assert {
 	node2.clusterSetSlotStable(slot51);
 	assertEquals("foo", jc.get("51"));
     }
-    
+
+    @Test(expected = JedisConnectionException.class)
+    public void testIfPoolConfigAppliesToClusterPools() {
+        GenericObjectPoolConfig config = new GenericObjectPoolConfig();
+        config.setMaxTotal(0);
+        config.setMaxWaitMillis(2000);
+        Set<HostAndPort> jedisClusterNode = new HashSet<HostAndPort>();
+        jedisClusterNode.add(new HostAndPort("127.0.0.1", 7379));
+        JedisCluster jc = new JedisCluster(jedisClusterNode, config);
+        jc.set("52", "poolTestValue");
+    }
+
     private static String getNodeServingSlotRange(String infoOutput) {
 	// f4f3dc4befda352a4e0beccf29f5e8828438705d 127.0.0.1:7380 master - 0 1394372400827 0 connected 5461-10922
 	for (String infoLine : infoOutput.split("\n")) {
@@ -346,21 +354,21 @@ public class JedisClusterTest extends Assert {
     }
 
     private List<Integer> getSlotsBeingMigrated(String infoLine) {
-	List<Integer> inconsistentSlots = new ArrayList<Integer>();
-	
-	String[] splitted = infoLine.split(" ");
-	
-	if (splitted.length > 8) {
-	    for (int index = 8 ; index < splitted.length ; index++) {
-		String info = splitted[index];
-		Integer slot = getSlotFromMigrationInfo(info);
-		if (slot != null) {
-		    inconsistentSlots.add(slot);
-		}
-	    }
-	}
-	
-	return inconsistentSlots;
+        List<Integer> inconsistentSlots = new ArrayList<Integer>();
+
+        String[] splitted = infoLine.split(" ");
+
+        if (splitted.length > 8) {
+            for (int index = 8 ; index < splitted.length ; index++) {
+                String info = splitted[index];
+                Integer slot = getSlotFromMigrationInfo(info);
+                if (slot != null) {
+                    inconsistentSlots.add(slot);
+                }
+            }
+        }
+
+        return inconsistentSlots;
     }
     
     private Integer getSlotFromMigrationInfo(String info) {

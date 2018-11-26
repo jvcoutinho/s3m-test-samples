@@ -1,5 +1,7 @@
 package redis.clients.jedis;
 
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
@@ -11,6 +13,7 @@ public abstract class JedisClusterConnectionHandler {
 
     protected Map<String, JedisPool> nodes = new HashMap<String, JedisPool>();
     protected Map<Integer, JedisPool> slots = new HashMap<Integer, JedisPool>();
+    final protected GenericObjectPoolConfig poolConfig;
 
     abstract Jedis getConnection();
 
@@ -26,7 +29,8 @@ public abstract class JedisClusterConnectionHandler {
 
     abstract Jedis getConnectionFromSlot(int slot);
 
-    public JedisClusterConnectionHandler(Set<HostAndPort> nodes) {
+    public JedisClusterConnectionHandler(Set<HostAndPort> nodes, final GenericObjectPoolConfig poolConfig) {
+    this.poolConfig = poolConfig;
 	initializeSlotsCache(nodes);
     }
 
@@ -36,7 +40,7 @@ public abstract class JedisClusterConnectionHandler {
 
     private void initializeSlotsCache(Set<HostAndPort> startNodes) {
 	for (HostAndPort hostAndPort : startNodes) {
-	    JedisPool jp = new JedisPool(hostAndPort.getHost(),
+	    JedisPool jp = new JedisPool(poolConfig, hostAndPort.getHost(),
 		    hostAndPort.getPort());
 
 	    this.nodes.clear();
@@ -70,8 +74,8 @@ public abstract class JedisClusterConnectionHandler {
 	String localNodes = jedis.clusterNodes();
 	for (String nodeInfo : localNodes.split("\n")) {
 	    HostAndPort node = getHostAndPortFromNodeLine(nodeInfo, jedis);
-	    setNodeIfNotExist(node);
-	    
+        setNodeIfNotExist(node);
+
 	    JedisPool nodePool = nodes.get(getNodeKey(node));
 	    populateNodeSlots(nodeInfo, nodePool);
 	}
@@ -82,7 +86,7 @@ public abstract class JedisClusterConnectionHandler {
 	if (nodes.containsKey(nodeKey))
 	    return;
 	
-	JedisPool nodePool = new JedisPool(node.getHost(), node.getPort());
+	JedisPool nodePool = new JedisPool(poolConfig, node.getHost(), node.getPort());
 	nodes.put(nodeKey, nodePool);
     }
 

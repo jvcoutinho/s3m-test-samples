@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.utils;
 
 import java.io.*;
@@ -57,12 +56,12 @@ import org.apache.thrift.TSerializer;
 
 public class FBUtilities
 {
-    private static Logger logger_ = LoggerFactory.getLogger(FBUtilities.class);
+    private static final Logger logger = LoggerFactory.getLogger(FBUtilities.class);
 
     public static final BigInteger TWO = new BigInteger("2");
 
-    private static volatile InetAddress localInetAddress_;
-    private static volatile InetAddress broadcastInetAddress_;
+    private static volatile InetAddress localInetAddress;
+    private static volatile InetAddress broadcastInetAddress;
 
     private static final ThreadLocal<MessageDigest> localMD5Digest = new ThreadLocal<MessageDigest>()
     {
@@ -119,10 +118,10 @@ public class FBUtilities
      */
     public static InetAddress getLocalAddress()
     {
-        if (localInetAddress_ == null)
+        if (localInetAddress == null)
             try
             {
-                localInetAddress_ = DatabaseDescriptor.getListenAddress() == null
+                localInetAddress = DatabaseDescriptor.getListenAddress() == null
                                     ? InetAddress.getLocalHost()
                                     : DatabaseDescriptor.getListenAddress();
             }
@@ -130,16 +129,16 @@ public class FBUtilities
             {
                 throw new RuntimeException(e);
             }
-        return localInetAddress_;
+        return localInetAddress;
     }
 
     public static InetAddress getBroadcastAddress()
     {
-        if (broadcastInetAddress_ == null)
-            broadcastInetAddress_ = DatabaseDescriptor.getBroadcastAddress() == null
-                                ? getLocalAddress()
-                                : DatabaseDescriptor.getBroadcastAddress();
-        return broadcastInetAddress_;
+        if (broadcastInetAddress == null)
+            broadcastInetAddress = DatabaseDescriptor.getBroadcastAddress() == null
+                                 ? getLocalAddress()
+                                 : DatabaseDescriptor.getBroadcastAddress();
+        return broadcastInetAddress;
     }
 
     /**
@@ -338,7 +337,7 @@ public class FBUtilities
         }
         catch (Exception e)
         {
-            logger_.warn("Unable to load version.properties", e);
+            logger.warn("Unable to load version.properties", e);
             return "debug version";
         }
     }

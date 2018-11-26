@@ -27,6 +27,9 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.base.Objects;
+
+import org.apache.cassandra.db.compaction.AbstractCompactedRow;
+import org.apache.cassandra.gms.Gossiper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,19 +37,20 @@ import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.CompactionManager;
+import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Table;
+import org.apache.cassandra.dht.AbstractBounds;
+import org.apache.cassandra.dht.RandomPartitioner;
 import org.apache.cassandra.dht.Range;
-import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.FailureDetector;
-import org.apache.cassandra.io.AbstractCompactedRow;
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.net.CompactEndpointSerializationHelper;
 import org.apache.cassandra.net.IVerbHandler;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.streaming.OperationType;
 import org.apache.cassandra.streaming.StreamIn;
 import org.apache.cassandra.streaming.StreamOut;
 import org.apache.cassandra.streaming.StreamOutSession;
@@ -120,9 +124,14 @@ public class AntiEntropyService
      * Requests repairs for the given table and column families, and blocks until all repairs have been completed.
      * TODO: Should add retries: if nodes go offline before they respond to the requests, this could block forever.
      */
-    public RepairSession getRepairSession(String tablename, String... cfnames)
+    public RepairSession getRepairSession(Range range, String tablename, String... cfnames)
     {
-        return new RepairSession(tablename, cfnames);
+        return new RepairSession(range, tablename, cfnames);
+    }
+    
+    RepairSession getArtificialRepairSession(TreeRequest req, String tablename, String... cfnames)
+    {
+        return new RepairSession(req, tablename, cfnames);
     }
 
     /**
@@ -152,17 +161,26 @@ public class AntiEntropyService
     /**
      * Return all of the neighbors with whom we share data.
      */
-    static Set<InetAddress> getNeighbors(String table)
+    static Set<InetAddress> getNeighbors(String table, Range range)
     {
         StorageService ss = StorageService.instance;
-        Set<InetAddress> neighbors = new HashSet<InetAddress>();
         Map<Range, List<InetAddress>> replicaSets = ss.getRangeToAddressMap(table);
-        for (Range range : ss.getLocalRanges(table))
+        if (!replicaSets.containsKey(range))
+            return Collections.emptySet();
+        Set<InetAddress> neighbors = new HashSet<InetAddress>(replicaSets.get(range));
+        neighbors.remove(FBUtilities.getBroadcastAddress());
+        // Excluding all node with version <= 0.7 since they don't know how to
+        // create a correct merkle tree (they build it over the full range)
+        Iterator<InetAddress> iter = neighbors.iterator();
+        while (iter.hasNext())
         {
-            // for every range stored locally (replica or original) collect neighbors storing copies
-            neighbors.addAll(replicaSets.get(range));
+            InetAddress endpoint = iter.next();
+            if (Gossiper.instance.getVersion(endpoint) <= MessagingService.VERSION_07)
+            {
+                logger.info("Excluding " + endpoint + " from repair because it is on version 0.7 or sooner. You should consider updating this node before running repair again.");
+                iter.remove();
+            }
         }
-        neighbors.remove(FBUtilities.getLocalAddress());
         return neighbors;
     }
 
@@ -171,7 +189,7 @@ public class AntiEntropyService
      */
     private void rendezvous(TreeRequest request, MerkleTree tree)
     {
-        InetAddress LOCAL = FBUtilities.getLocalAddress();
+        InetAddress LOCAL = FBUtilities.getBroadcastAddress();
 
         // the rendezvous pairs for this session
         Map<TreeRequest, TreePair> ctrees = rendezvousPairs(request.sessionid);
@@ -180,9 +198,9 @@ public class AntiEntropyService
         if (LOCAL.equals(request.endpoint))
         {
             // we're registering a local tree: rendezvous with remote requests for the session
-            for (InetAddress neighbor : getNeighbors(request.cf.left))
+            for (InetAddress neighbor : getNeighbors(request.cf.left, request.range))
             {
-                TreeRequest remotereq = new TreeRequest(request.sessionid, neighbor, request.cf);
+                TreeRequest remotereq = new TreeRequest(request.sessionid, neighbor, request.range, request.cf);
                 TreePair waiting = ctrees.remove(remotereq);
                 if (waiting != null && waiting.right != null)
                 {
@@ -224,10 +242,10 @@ public class AntiEntropyService
     /**
      * Requests a tree from the given node, and returns the request that was sent.
      */
-    TreeRequest request(String sessionid, InetAddress remote, String ksname, String cfname)
+    TreeRequest request(String sessionid, InetAddress remote, Range range, String ksname, String cfname)
     {
-        TreeRequest request = new TreeRequest(sessionid, remote, new CFPair(ksname, cfname));
-        MessagingService.instance().sendOneWay(TreeRequestVerbHandler.makeVerb(request), remote);
+        TreeRequest request = new TreeRequest(sessionid, remote, range, new CFPair(ksname, cfname));
+        MessagingService.instance().sendOneWay(TreeRequestVerbHandler.makeVerb(request, Gossiper.instance.getVersion(remote)), remote);
         return request;
     }
 
@@ -265,10 +283,7 @@ public class AntiEntropyService
         public final TreeRequest request;
         public final MerkleTree tree;
 
-        // the minimum token sorts first, but falls into the last range
-        private transient List<MerkleTree.RowHash> minrows;
         // null when all rows with the min token have been consumed
-        private transient Token mintoken;
         private transient long validated;
         private transient MerkleTree.TreeRange range;
         private transient MerkleTree.TreeRangeIterator ranges;
@@ -281,46 +296,57 @@ public class AntiEntropyService
             this(request,
                  // TODO: memory usage (maxsize) should either be tunable per
                  // CF, globally, or as shared for all CFs in a cluster
-                 new MerkleTree(DatabaseDescriptor.getPartitioner(), MerkleTree.RECOMMENDED_DEPTH, (int)Math.pow(2, 15)));
+                 new MerkleTree(DatabaseDescriptor.getPartitioner(), request.range, MerkleTree.RECOMMENDED_DEPTH, (int)Math.pow(2, 15)));
         }
 
         Validator(TreeRequest request, MerkleTree tree)
         {
             this.request = request;
             this.tree = tree;
-            minrows = new ArrayList<MerkleTree.RowHash>();
-            mintoken = null;
+            // Reestablishing the range because we don't serialize it (for bad
+            // reason - see MerkleTree for details)
+            this.tree.fullRange = this.request.range;
             validated = 0;
             range = null;
             ranges = null;
         }
-        
+
         public void prepare(ColumnFamilyStore cfs)
         {
-            List<DecoratedKey> keys = new ArrayList<DecoratedKey>();
-            for (DecoratedKey sample : cfs.allKeySamples())
-                keys.add(sample);
-
-            if (keys.isEmpty())
+            if (tree.partitioner() instanceof RandomPartitioner)
             {
-                // use an even tree distribution
+                // You can't beat an even tree distribution for md5
                 tree.init();
             }
             else
             {
-                int numkeys = keys.size();
-                Random random = new Random();
-                // sample the column family using random keys from the index 
-                while (true)
+                List<DecoratedKey> keys = new ArrayList<DecoratedKey>();
+                for (DecoratedKey sample : cfs.keySamples(request.range))
                 {
-                    DecoratedKey dk = keys.get(random.nextInt(numkeys));
-                    if (!tree.split(dk.token))
-                        break;
+                    assert request.range.contains(sample.token);
+                    keys.add(sample);
+                }
+
+                if (keys.isEmpty())
+                {
+                    // use an even tree distribution
+                    tree.init();
+                }
+                else
+                {
+                    int numkeys = keys.size();
+                    Random random = new Random();
+                    // sample the column family using random keys from the index
+                    while (true)
+                    {
+                        DecoratedKey dk = keys.get(random.nextInt(numkeys));
+                        if (!tree.split(dk.token))
+                            break;
+                    }
                 }
             }
             logger.debug("Prepared AEService tree of size " + tree.size() + " for " + request);
-            mintoken = tree.partitioner().getMinimumToken();
-            ranges = tree.invalids(new Range(mintoken, mintoken));
+            ranges = tree.invalids();
         }
 
         /**
@@ -343,23 +369,10 @@ public class AntiEntropyService
          */
         public void add(AbstractCompactedRow row)
         {
+            assert request.range.contains(row.key.token) : row.key.token + " is not contained in " + request.range;
             assert lastKey == null || lastKey.compareTo(row.key) < 0
                    : "row " + row.key + " received out of order wrt " + lastKey;
             lastKey = row.key;
-
-            if (mintoken != null)
-            {
-                assert ranges != null : "Validator was not prepared()";
-
-                // check for the minimum token special case
-                if (row.key.token.compareTo(mintoken) == 0)
-                {
-                    // and store it to be appended when we complete
-                    minrows.add(rowHash(row));
-                    return;
-                }
-                mintoken = null;
-            }
 
             if (range == null)
                 range = ranges.next();
@@ -399,10 +412,6 @@ public class AntiEntropyService
                 range = ranges.next();
                 range.addHash(EMPTY_ROW);
             }
-            // add rows with the minimum token to the final range
-            if (!minrows.isEmpty())
-                for (MerkleTree.RowHash minrow : minrows)
-                    range.addHash(minrow);
 
             StageManager.getStage(Stage.ANTI_ENTROPY).execute(this);
             logger.debug("Validated " + validated + " rows into AEService tree for " + request);
@@ -416,7 +425,7 @@ public class AntiEntropyService
         public void run()
         {
             // respond to the request that triggered this validation
-            AntiEntropyService.instance.respond(this, FBUtilities.getLocalAddress());
+            AntiEntropyService.instance.respond(this, FBUtilities.getBroadcastAddress());
         }
     }
 
@@ -428,14 +437,14 @@ public class AntiEntropyService
         public final TreeRequest request;
         public final MerkleTree ltree;
         public final MerkleTree rtree;
-        public final List<Range> differences;
+        public List<Range> differences;
 
         public Differencer(TreeRequest request, MerkleTree ltree, MerkleTree rtree)
         {
             this.request = request;
             this.ltree = ltree;
             this.rtree = rtree;
-            differences = new ArrayList<Range>();
+            this.differences = new ArrayList<Range>();
         }
 
         /**
@@ -443,8 +452,7 @@ public class AntiEntropyService
          */
         public void run()
         {
-            InetAddress local = FBUtilities.getLocalAddress();
-            StorageService ss = StorageService.instance;
+            InetAddress local = FBUtilities.getBroadcastAddress();
 
             // restore partitioners (in case we were serialized)
             if (ltree.partitioner() == null)
@@ -452,17 +460,11 @@ public class AntiEntropyService
             if (rtree.partitioner() == null)
                 rtree.partitioner(StorageService.getPartitioner());
 
-            // determine the ranges where responsibility overlaps
-            Set<Range> interesting = new HashSet(ss.getRangesForEndpoint(request.cf.left, local));
-            interesting.retainAll(ss.getRangesForEndpoint(request.cf.left, request.endpoint));
+            // compare trees, and collect differences
+            differences.addAll(MerkleTree.difference(ltree, rtree));
 
-            // compare trees, and collect interesting differences
-            for (MerkleTree.TreeRange diff : MerkleTree.difference(ltree, rtree))
-                for (Range localrange: interesting)
-                    differences.addAll(diff.intersectionWith(localrange));
-            
             // choose a repair method based on the significance of the difference
-            String format = "Endpoints " + local + " and " + request.endpoint + " %s for " + request.cf;
+            String format = "Endpoints " + local + " and " + request.endpoint + " %s for " + request.cf + " on " + request.range;
             if (differences.isEmpty())
             {
                 logger.info(String.format(format, "are consistent"));
@@ -492,14 +494,13 @@ public class AntiEntropyService
             ColumnFamilyStore cfstore = Table.open(request.cf.left).getColumnFamilyStore(request.cf.right);
             try
             {
-                List<Range> ranges = new ArrayList<Range>(differences);
                 Collection<SSTableReader> sstables = cfstore.getSSTables();
                 Callback callback = new Callback();
                 // send ranges to the remote node
                 StreamOutSession outsession = StreamOutSession.create(request.cf.left, request.endpoint, callback);
-                StreamOut.transferSSTables(outsession, sstables, ranges);
+                StreamOut.transferSSTables(outsession, sstables, differences, OperationType.AES);
                 // request ranges from the remote node
-                StreamIn.requestRanges(request.endpoint, request.cf.left, ranges, callback);
+                StreamIn.requestRanges(request.endpoint, request.cf.left, Collections.singletonList(cfstore), differences, callback, OperationType.AES);
             }
             catch(Exception e)
             {
@@ -541,14 +542,14 @@ public class AntiEntropyService
     public static class TreeRequestVerbHandler implements IVerbHandler, ICompactSerializer<TreeRequest>
     {
         public static final TreeRequestVerbHandler SERIALIZER = new TreeRequestVerbHandler();
-        static Message makeVerb(TreeRequest request)
+        static Message makeVerb(TreeRequest request, int version)
         {
             try
             {
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 DataOutputStream dos = new DataOutputStream(bos);
-                SERIALIZER.serialize(request, dos);
-                return new Message(FBUtilities.getLocalAddress(), StorageService.Verb.TREE_REQUEST, bos.toByteArray());
+                SERIALIZER.serialize(request, dos, version);
+                return new Message(FBUtilities.getBroadcastAddress(), StorageService.Verb.TREE_REQUEST, bos.toByteArray(), version);
             }
             catch(IOException e)
             {
@@ -556,19 +557,28 @@ public class AntiEntropyService
             }
         }
 
-        public void serialize(TreeRequest request, DataOutputStream dos) throws IOException
+        public void serialize(TreeRequest request, DataOutputStream dos, int version) throws IOException
         {
             dos.writeUTF(request.sessionid);
             CompactEndpointSerializationHelper.serialize(request.endpoint, dos);
             dos.writeUTF(request.cf.left);
             dos.writeUTF(request.cf.right);
+            if (version > MessagingService.VERSION_07)
+                AbstractBounds.serializer().serialize(request.range, dos);
         }
 
-        public TreeRequest deserialize(DataInputStream dis) throws IOException
+        public TreeRequest deserialize(DataInputStream dis, int version) throws IOException
         {
-            return new TreeRequest(dis.readUTF(),
-                                   CompactEndpointSerializationHelper.deserialize(dis),
-                                   new CFPair(dis.readUTF(), dis.readUTF()));
+            String sessId = dis.readUTF();
+            InetAddress endpoint = CompactEndpointSerializationHelper.deserialize(dis);
+            CFPair cfpair = new CFPair(dis.readUTF(), dis.readUTF());
+            Range range;
+            if (version > MessagingService.VERSION_07)
+                range = (Range) AbstractBounds.serializer().deserialize(dis);
+            else
+                range = new Range(StorageService.getPartitioner().getMinimumToken(), StorageService.getPartitioner().getMinimumToken());
+
+            return new TreeRequest(sessId, endpoint, range, cfpair);
         }
 
         /**
@@ -581,8 +591,8 @@ public class AntiEntropyService
             DataInputStream buffer = new DataInputStream(new ByteArrayInputStream(bytes));
             try
             {
-                TreeRequest remotereq = this.deserialize(buffer);
-                TreeRequest request = new TreeRequest(remotereq.sessionid, message.getFrom(), remotereq.cf);
+                TreeRequest remotereq = this.deserialize(buffer, message.getVersion());
+                TreeRequest request = new TreeRequest(remotereq.sessionid, message.getFrom(), remotereq.range, remotereq.cf);
 
                 // trigger readonly-compaction
                 ColumnFamilyStore store = Table.open(request.cf.left).getColumnFamilyStore(request.cf.right);
@@ -610,8 +620,11 @@ public class AntiEntropyService
             {
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 DataOutputStream dos = new DataOutputStream(bos);
-                SERIALIZER.serialize(validator, dos);
-                return new Message(local, StorageService.Verb.TREE_RESPONSE, bos.toByteArray());
+                SERIALIZER.serialize(validator, dos, Gossiper.instance.getVersion(validator.request.endpoint));
+                return new Message(local, 
+                                   StorageService.Verb.TREE_RESPONSE, 
+                                   bos.toByteArray(), 
+                                   Gossiper.instance.getVersion(validator.request.endpoint));
             }
             catch(IOException e)
             {
@@ -619,21 +632,19 @@ public class AntiEntropyService
             }
         }
 
-        public void serialize(Validator v, DataOutputStream dos) throws IOException
+        public void serialize(Validator v, DataOutputStream dos, int version) throws IOException
         {
-            TreeRequestVerbHandler.SERIALIZER.serialize(v.request, dos);
-            ObjectOutputStream oos = new ObjectOutputStream(dos);
-            oos.writeObject(v.tree);
-            oos.flush();
+            TreeRequestVerbHandler.SERIALIZER.serialize(v.request, dos, version);
+            MerkleTree.serializer.serialize(v.tree, dos, version);
+            dos.flush();
         }
 
-        public Validator deserialize(DataInputStream dis) throws IOException
+        public Validator deserialize(DataInputStream dis, int version) throws IOException
         {
-            final TreeRequest request = TreeRequestVerbHandler.SERIALIZER.deserialize(dis);
-            ObjectInputStream ois = new ObjectInputStream(dis);
+            final TreeRequest request = TreeRequestVerbHandler.SERIALIZER.deserialize(dis, version);
             try
             {
-                return new Validator(request, (MerkleTree)ois.readObject());
+                return new Validator(request, MerkleTree.serializer.deserialize(dis, version));
             }
             catch(Exception e)
             {
@@ -649,8 +660,8 @@ public class AntiEntropyService
             try
             {
                 // deserialize the remote tree, and register it
-                Validator response = this.deserialize(buffer);
-                TreeRequest request = new TreeRequest(response.request.sessionid, message.getFrom(), response.request.cf);
+                Validator response = this.deserialize(buffer, message.getVersion());
+                TreeRequest request = new TreeRequest(response.request.sessionid, message.getFrom(), response.request.range, response.request.cf);
                 AntiEntropyService.instance.rendezvous(request, response.tree);
             }
             catch (IOException e)
@@ -684,25 +695,27 @@ public class AntiEntropyService
     }
 
     /**
-     * A triple of table, cf and address that represents a location we have an outstanding TreeRequest for.
+     * A tuple of table, cf, address and range that represents a location we have an outstanding TreeRequest for.
      */
     public static class TreeRequest
     {
         public final String sessionid;
         public final InetAddress endpoint;
+        public final Range range;
         public final CFPair cf;
 
-        public TreeRequest(String sessionid, InetAddress endpoint, CFPair cf)
+        public TreeRequest(String sessionid, InetAddress endpoint, Range range, CFPair cf)
         {
             this.sessionid = sessionid;
             this.endpoint = endpoint;
             this.cf = cf;
+            this.range = range;
         }
 
         @Override
         public final int hashCode()
         {
-            return Objects.hashCode(sessionid, endpoint, cf);
+            return Objects.hashCode(sessionid, endpoint, cf, range);
         }
         
         @Override
@@ -712,19 +725,19 @@ public class AntiEntropyService
                 return false;
             TreeRequest that = (TreeRequest)o;
             // handles nulls properly
-            return Objects.equal(sessionid, that.sessionid) && Objects.equal(endpoint, that.endpoint) && Objects.equal(cf, that.cf);
+            return Objects.equal(sessionid, that.sessionid) && Objects.equal(endpoint, that.endpoint) && Objects.equal(cf, that.cf) && Objects.equal(range, that.range);
         }
         
         @Override
         public String toString()
         {
-            return "#<TreeRequest " + sessionid + ", " + endpoint + ", " + cf + ">";
+            return "#<TreeRequest " + sessionid + ", " + endpoint + ", " + cf + ", " + range + ">";
         }
     }
 
     /**
-     * Triggers repairs with all neighbors for the given table and cfs. Typical lifecycle is: start() then join().
-     * Executed in client threads.
+     * Triggers repairs with all neighbors for the given table, cfs and range.
+     * Typical lifecycle is: start() then join(). Executed in client threads.
      */
     class RepairSession extends Thread
     {
@@ -732,11 +745,27 @@ public class AntiEntropyService
         private final String[] cfnames;
         private final SimpleCondition requestsMade;
         private final ConcurrentHashMap<TreeRequest,Object> requests;
-        public RepairSession(String tablename, String... cfnames)
+        private final Range range;
+        
+        public RepairSession(TreeRequest req, String tablename, String... cfnames)
+        {
+            super(req.sessionid);
+            this.range = req.range;
+            this.tablename = tablename;
+            this.cfnames = cfnames;
+            requestsMade = new SimpleCondition();
+            this.requests = new ConcurrentHashMap<TreeRequest,Object>();
+            requests.put(req, this);
+            Callback callback = new Callback();
+            AntiEntropyService.instance.sessions.put(getName(), callback);
+        }
+        
+        public RepairSession(Range range, String tablename, String... cfnames)
         {
             super("manual-repair-" + UUID.randomUUID());
             this.tablename = tablename;
             this.cfnames = cfnames;
+            this.range = range;
             this.requestsMade = new SimpleCondition();
             this.requests = new ConcurrentHashMap<TreeRequest,Object>();
         }
@@ -752,10 +781,11 @@ public class AntiEntropyService
         @Override
         public void run()
         {
-            Set<InetAddress> endpoints = AntiEntropyService.getNeighbors(tablename);
+            Set<InetAddress> endpoints = AntiEntropyService.getNeighbors(tablename, range);
             if (endpoints.isEmpty())
             {
-                logger.info("No neighbors to repair with: " + getName() + " completed.");
+                requestsMade.signalAll();
+                logger.info("No neighbors to repair with for " + tablename + " on " + range + ": " + getName() + " completed.");
                 return;
             }
 
@@ -771,7 +801,7 @@ public class AntiEntropyService
 
             // begin a repair session
             Callback callback = new Callback();
-            AntiEntropyService.this.sessions.put(getName(), callback);
+            AntiEntropyService.instance.sessions.put(getName(), callback);
             try
             {
                 // request that all relevant endpoints generate trees
@@ -779,9 +809,9 @@ public class AntiEntropyService
                 {
                     // send requests to remote nodes and record them
                     for (InetAddress endpoint : endpoints)
-                        requests.put(AntiEntropyService.this.request(getName(), endpoint, tablename, cfname), this);
+                        requests.put(AntiEntropyService.instance.request(getName(), endpoint, range, tablename, cfname), this);
                     // send but don't record an outstanding request to the local node
-                    AntiEntropyService.this.request(getName(), FBUtilities.getLocalAddress(), tablename, cfname);
+                    AntiEntropyService.instance.request(getName(), FBUtilities.getBroadcastAddress(), range, tablename, cfname);
                 }
                 logger.info("Waiting for repair requests: " + requests.keySet());
                 requestsMade.signalAll();
@@ -821,7 +851,7 @@ public class AntiEntropyService
 
                 // all requests completed
                 logger.info("Repair session " + getName() + " completed successfully.");
-                AntiEntropyService.this.sessions.remove(getName());
+                AntiEntropyService.instance.sessions.remove(getName());
                 completed.signalAll();
             }
         }

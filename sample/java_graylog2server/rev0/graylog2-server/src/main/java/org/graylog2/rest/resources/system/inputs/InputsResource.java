@@ -20,12 +20,8 @@
 package org.graylog2.rest.resources.system.inputs;
 
 import com.codahale.metrics.annotation.Timed;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Maps;
-import com.sun.jersey.api.core.ResourceConfig;
 import org.bson.types.ObjectId;
-import org.graylog2.Core;
-import org.graylog2.database.ValidationException;
 import org.graylog2.inputs.Inputs;
 import org.graylog2.inputs.NoSuchInputTypeException;
 import org.graylog2.plugin.inputs.MessageInput;
@@ -33,18 +29,13 @@ import org.graylog2.plugin.inputs.MessageInputConfiguration;
 import org.graylog2.plugin.inputs.MessageInputConfigurationException;
 import org.graylog2.rest.resources.RestResource;
 import org.graylog2.rest.resources.system.inputs.requests.InputLaunchRequest;
-import org.graylog2.streams.StreamImpl;
-import org.joda.time.DateTime;
-import org.joda.time.DateTimeZone;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.ws.rs.*;
-import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import java.io.IOException;
-import java.net.BindException;
 import java.util.Map;
 
 /**
@@ -55,18 +46,11 @@ public class InputsResource extends RestResource {
 
     private static final Logger LOG = LoggerFactory.getLogger(InputsResource.class);
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    @Context
-    ResourceConfig rc;
-
     @POST
     @Timed
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
     public Response create(String body, @QueryParam("pretty") boolean prettyPrint) {
-        Core core = (Core) rc.getProperty("core");
-
         InputLaunchRequest lr;
         try {
             lr = objectMapper.readValue(body, InputLaunchRequest.class);

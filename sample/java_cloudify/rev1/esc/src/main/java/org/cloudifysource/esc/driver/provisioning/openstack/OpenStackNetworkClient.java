@@ -66,7 +66,7 @@ public class OpenStackNetworkClient extends OpenStackBaseClient {
 		this.serviceName = StringUtils.isEmpty(serviceName) ? "neutron" : serviceName;
 		this.networkApiVersion = StringUtils.isEmpty(networkApiVersion) ? "v2.0" : networkApiVersion;
 		logger.info("Openstack " + this.serviceName + " api version: " + this.networkApiVersion);
-		this.initToken();
+		// this.initToken();
 	}
 
 	@Override
@@ -226,8 +226,11 @@ public class OpenStackNetworkClient extends OpenStackBaseClient {
 		}
 
 		try {
-			final String input = String.format("{\"floatingip\":{\"floating_network_id\":\"%s\",\"port_id\":\"%s\"}}",
-					floatingNetworkId, port.getId());
+			final String input =
+					String.format(
+							"{\"floatingip\":{\"floating_network_id\":\"%s\","
+									+ "\"port_id\":\"%s\", \"fixed_ip_address\":\"%s\"}}",
+							floatingNetworkId, port.getId(), port.getFixedIps().get(0).getIpAddress());
 			final String response = this.doPost("floatingips", input);
 			final FloatingIp floatingIp = JsonUtils.unwrapRootToObject(FloatingIp.class, response);
 			return floatingIp.getFloatingIpAddress();
@@ -439,6 +442,21 @@ public class OpenStackNetworkClient extends OpenStackBaseClient {
 		final String response = this.doGet("networks", new String[] { "router:external", "true" });
 		final List<Network> networks = JsonUtils.unwrapRootToList(Network.class, response);
 		return networks;
+	}
+
+	/**
+	 * Retrieve a network by id.
+	 * 
+	 * @param networkId
+	 *            The id of the network.
+	 * @return The network.
+	 * @throws OpenstackException
+	 *             Thrown if something went wrong with the request.
+	 */
+	public Network getNetwork(final String networkId) throws OpenstackException {
+		final String response = this.doGet("networks/" + networkId);
+		final Network network = JsonUtils.unwrapRootToObject(Network.class, response);
+		return network;
 	}
 
 	/**

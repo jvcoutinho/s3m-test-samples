@@ -23,10 +23,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.exceptions.ConfigurationException;
-import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
+import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.io.compress.CompressionParameters;
 
 public class CFPropDefs extends PropertyDefinitions
@@ -41,7 +41,9 @@ public class CFPropDefs extends PropertyDefinitions
     public static final String KW_MAXCOMPACTIONTHRESHOLD = "max_threshold";
     public static final String KW_REPLICATEONWRITE = "replicate_on_write";
     public static final String KW_CACHING = "caching";
+    public static final String KW_DEFAULT_TIME_TO_LIVE = "default_time_to_live";
     public static final String KW_BF_FP_CHANCE = "bloom_filter_fp_chance";
+    public static final String KW_MEMTABLE_FLUSH_PERIOD = "memtable_flush_period_in_ms";
 
     public static final String KW_COMPACTION = "compaction";
     public static final String KW_COMPRESSION = "compression";
@@ -59,9 +61,11 @@ public class CFPropDefs extends PropertyDefinitions
         keywords.add(KW_GCGRACESECONDS);
         keywords.add(KW_REPLICATEONWRITE);
         keywords.add(KW_CACHING);
+        keywords.add(KW_DEFAULT_TIME_TO_LIVE);
         keywords.add(KW_BF_FP_CHANCE);
         keywords.add(KW_COMPACTION);
         keywords.add(KW_COMPRESSION);
+        keywords.add(KW_MEMTABLE_FLUSH_PERIOD);
 
         obsoleteKeywords.add("compaction_strategy_class");
         obsoleteKeywords.add("compaction_strategy_options");
@@ -86,6 +90,17 @@ public class CFPropDefs extends PropertyDefinitions
 
             compactionStrategyClass = CFMetaData.createCompactionStrategy(strategy);
             compactionOptions.remove(COMPACTION_STRATEGY_CLASS_KEY);
+        }
+
+        Integer defaultTimeToLive = getInt(KW_DEFAULT_TIME_TO_LIVE, null);
+
+        if (defaultTimeToLive != null)
+        {
+            if (defaultTimeToLive < 0)
+                throw new ConfigurationException(String.format("%s cannot be smaller than %s, (default %s)",
+                        KW_DEFAULT_TIME_TO_LIVE,
+                        0,
+                        CFMetaData.DEFAULT_DEFAULT_TIME_TO_LIVE));
         }
     }
 
@@ -117,7 +132,9 @@ public class CFPropDefs extends PropertyDefinitions
         cfm.minCompactionThreshold(toInt(KW_MINCOMPACTIONTHRESHOLD, getCompactionOptions().get(KW_MINCOMPACTIONTHRESHOLD), cfm.getMinCompactionThreshold()));
         cfm.maxCompactionThreshold(toInt(KW_MAXCOMPACTIONTHRESHOLD, getCompactionOptions().get(KW_MAXCOMPACTIONTHRESHOLD), cfm.getMaxCompactionThreshold()));
         cfm.caching(CFMetaData.Caching.fromString(getString(KW_CACHING, cfm.getCaching().toString())));
+        cfm.defaultTimeToLive(getInt(KW_DEFAULT_TIME_TO_LIVE, cfm.getDefaultTimeToLive()));
         cfm.bloomFilterFpChance(getDouble(KW_BF_FP_CHANCE, cfm.getBloomFilterFpChance()));
+        cfm.memtableFlushPeriod(getInt(KW_MEMTABLE_FLUSH_PERIOD, cfm.getMemtableFlushPeriod()));
 
         if (compactionStrategyClass != null)
         {

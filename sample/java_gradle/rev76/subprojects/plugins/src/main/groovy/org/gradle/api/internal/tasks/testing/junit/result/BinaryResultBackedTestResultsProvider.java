@@ -24,24 +24,28 @@ import java.io.Writer;
 
 public class BinaryResultBackedTestResultsProvider implements TestResultsProvider {
     private final File resultsDir;
-    private final TestOutputSerializer outputSerializer;
+    private final TestOutputStore.Reader outputReader;
     private final TestResultSerializer resultSerializer = new TestResultSerializer();
 
-    public BinaryResultBackedTestResultsProvider(File resultsDir) {
+    public BinaryResultBackedTestResultsProvider(File resultsDir, TestOutputStore.Reader outputReader) {
         this.resultsDir = resultsDir;
-        outputSerializer = new TestOutputSerializer(resultsDir);
+        this.outputReader = outputReader;
     }
 
     public boolean hasOutput(String className, TestOutputEvent.Destination destination) {
-        return outputSerializer.hasOutput(className, destination);
+        return outputReader.hasOutput(className, destination);
     }
 
-    public void writeOutputs(String className, TestOutputEvent.Destination destination, Writer writer) {
-        outputSerializer.writeOutputs(className, destination, writer);
+    public void writeAllOutput(String className, TestOutputEvent.Destination destination, Writer writer) {
+        outputReader.writeAllOutput(className, destination, writer);
     }
 
-    public void writeOutputs(String className, String testCaseName, TestOutputEvent.Destination destination, Writer writer) {
-        outputSerializer.writeOutputs(className, testCaseName, destination, writer);
+    public void writeNonTestOutput(String className, TestOutputEvent.Destination destination, Writer writer) {
+        outputReader.writeNonTestOutput(className, destination, writer);
+    }
+
+    public void writeTestOutput(String className, Object testId, TestOutputEvent.Destination destination, Writer writer) {
+        outputReader.writeTestOutput(className, testId, destination, writer);
     }
 
     public void visitClasses(final Action<? super TestClassResult> visitor) {

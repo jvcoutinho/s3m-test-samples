@@ -25,7 +25,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
-import org.apache.cassandra.db.columniterator.SimpleAbstractColumnIterator;
 import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy;
 import org.apache.cassandra.db.filter.NamesQueryFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
@@ -34,7 +33,6 @@ import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.tracing.Tracing;
-import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.HeapAllocator;
 
 public class CollationController
@@ -43,27 +41,20 @@ public class CollationController
 
     private final ColumnFamilyStore cfs;
     private final QueryFilter filter;
-    private final ISortedColumns.Factory factory;
     private final int gcBefore;
 
     private int sstablesIterated = 0;
 
-    public CollationController(ColumnFamilyStore cfs, boolean mutableColumns, QueryFilter filter, int gcBefore)
+    public CollationController(ColumnFamilyStore cfs, QueryFilter filter, int gcBefore)
     {
         this.cfs = cfs;
         this.filter = filter;
         this.gcBefore = gcBefore;
-
-        // AtomicSortedColumns doesn't work for super columns (see #3821)
-        this.factory = mutableColumns
-                     ? cfs.metadata.cfType == ColumnFamilyType.Super ? ThreadSafeSortedColumns.factory() : AtomicSortedColumns.factory()
-                     : ArrayBackedSortedColumns.factory();
     }
 
     public ColumnFamily getTopLevelColumns()
     {
         return filter.filter instanceof NamesQueryFilter
-               && (cfs.metadata.cfType == ColumnFamilyType.Standard || filter.path.superColumnName != null)
                && cfs.metadata.getDefaultValidator() != CounterColumnType.instance
                ? collectTimeOrderedData()
                : collectAllData();
@@ -77,7 +68,7 @@ public class CollationController
     private ColumnFamily collectTimeOrderedData()
     {
         logger.trace("collectTimeOrderedData");
-        ColumnFamily container = ColumnFamily.create(cfs.metadata, factory, filter.filter.isReversed());
+        final ColumnFamily container = ArrayBackedSortedColumns.factory.create(cfs.metadata, filter.filter.isReversed());
         List<OnDiskAtomIterator> iterators = new ArrayList<OnDiskAtomIterator>();
         Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.markReferenced(filter.key);
@@ -86,7 +77,7 @@ public class CollationController
         // which requires addAtom to happen in sorted order.  Then we use addAll to merge into the final collection,
         // which allows a (sorted) set of columns to be merged even if they are not uniformly sorted after the existing
         // ones.
-        ColumnFamily temp = ColumnFamily.create(cfs.metadata, ArrayBackedSortedColumns.factory(), filter.filter.isReversed());
+        ColumnFamily temp = ArrayBackedSortedColumns.factory.create(cfs.metadata, filter.filter.isReversed());
 
         try
         {
@@ -99,7 +90,11 @@ public class CollationController
                     iterators.add(iter);
                     temp.delete(iter.getColumnFamily());
                     while (iter.hasNext())
-                        temp.addAtom(iter.next());
+                    {
+                        OnDiskAtom atom = iter.next();
+                        if (atom.getLocalDeletionTime() >= gcBefore)
+                            temp.addAtom(atom);
+                    }
                 }
 
                 container.addAll(temp, HeapAllocator.instance);
@@ -110,7 +105,7 @@ public class CollationController
             // (reduceNameFilter removes columns that are known to be irrelevant)
             NamesQueryFilter namesFilter = (NamesQueryFilter) filter.filter;
             TreeSet<ByteBuffer> filterColumns = new TreeSet<ByteBuffer>(namesFilter.columns);
-            QueryFilter reducedFilter = new QueryFilter(filter.key, filter.path, namesFilter.withUpdatedColumns(filterColumns));
+            QueryFilter reducedFilter = new QueryFilter(filter.key, filter.cfName, namesFilter.withUpdatedColumns(filterColumns));
 
             /* add the SSTables on disk */
             Collections.sort(view.sstables, SSTable.maxTimestampComparator);
@@ -130,22 +125,22 @@ public class CollationController
                 if (((NamesQueryFilter) reducedFilter.filter).columns.isEmpty())
                     break;
 
+                Tracing.trace("Merging data from sstable {}", sstable.descriptor.generation);
                 OnDiskAtomIterator iter = reducedFilter.getSSTableColumnIterator(sstable);
                 iterators.add(iter);
                 if (iter.getColumnFamily() != null)
                 {
                     ColumnFamily cf = iter.getColumnFamily();
                     if (cf.isMarkedForDelete())
-                    {
-                        // track the most recent row level tombstone we encounter
                         mostRecentRowTombstone = cf.deletionInfo().getTopLevelDeletion().markedForDeleteAt;
-                    }
-
                     temp.delete(cf);
                     sstablesIterated++;
-                    Tracing.trace("Merging data from sstable {}", sstable.descriptor.generation);
                     while (iter.hasNext())
-                        temp.addAtom(iter.next());
+                    {
+                        OnDiskAtom atom = iter.next();
+                        if (atom.getLocalDeletionTime() >= gcBefore)
+                            temp.addAtom(atom);
+                    }
                 }
 
                 container.addAll(temp, HeapAllocator.instance);
@@ -157,38 +152,30 @@ public class CollationController
             if (iterators.isEmpty())
                 return null;
 
-            // do a final collate.  toCollate is boilerplate required to provide a CloseableIterator
-            final ColumnFamily c2 = container;
-            CloseableIterator<OnDiskAtom> toCollate = new SimpleAbstractColumnIterator()
+            // We may have added columns that are shadowed by range or row tombstones, since we don't know what
+            // tombstones we may encounter in older sstables (and we don't know how many older sstables we'll have
+            // to open, without processing newer ones first).  So, make one more pass if necessary to clean those out.
+            ColumnFamily returnCF;
+            if (container.isMarkedForDelete())
             {
-                final Iterator<IColumn> iter = c2.iterator();
-
-                protected OnDiskAtom computeNext()
-                {
-                    return iter.hasNext() ? iter.next() : endOfData();
-                }
-
-                public ColumnFamily getColumnFamily()
-                {
-                    return c2;
-                }
-
-                public DecoratedKey getKey()
-                {
-                    return filter.key;
-                }
-            };
-            ColumnFamily returnCF = container.cloneMeShallow();
-            Tracing.trace("Collating all results");
-            filter.collateOnDiskAtom(returnCF, Collections.singletonList(toCollate), gcBefore);
+                returnCF = container.cloneMeShallow();
+                Tracing.trace("Removing shadowed cells");
+                filter.collateOnDiskAtom(returnCF, container.iterator(), gcBefore);
+            }
+            else
+            {
+                // skipping the collate is safe because we only do this time-ordered path for NameQueryFilter;
+                // for SQF, the collate is also what limits us to the requested number of columns.
+                returnCF = container;
+            }
 
             // "hoist up" the requested data into a more recent sstable
             if (sstablesIterated > cfs.getMinimumCompactionThreshold()
-                && !cfs.isCompactionDisabled()
+                && !cfs.isAutoCompactionDisabled()
                 && cfs.getCompactionStrategy() instanceof SizeTieredCompactionStrategy)
             {
                 Tracing.trace("Defragmenting requested data");
-                RowMutation rm = new RowMutation(cfs.table.name, new Row(filter.key, returnCF.cloneMe()));
+                RowMutation rm = new RowMutation(cfs.table.getName(), filter.key.key, returnCF.cloneMe());
                 // skipping commitlog and index updates is fine since we're just de-fragmenting existing data
                 Table.open(rm.getTable()).apply(rm, false, false);
             }
@@ -205,20 +192,17 @@ public class CollationController
     }
 
     /**
-     * remove columns from @param filter where we already have data in @param returnCF newer than @param sstableTimestamp
+     * remove columns from @param filter where we already have data in @param container newer than @param sstableTimestamp
      */
-    private void reduceNameFilter(QueryFilter filter, ColumnFamily returnCF, long sstableTimestamp)
+    private void reduceNameFilter(QueryFilter filter, ColumnFamily container, long sstableTimestamp)
     {
-        AbstractColumnContainer container = filter.path.superColumnName == null
-                                          ? returnCF
-                                          : (SuperColumn) returnCF.getColumn(filter.path.superColumnName);
         if (container == null)
             return;
 
         for (Iterator<ByteBuffer> iterator = ((NamesQueryFilter) filter.filter).columns.iterator(); iterator.hasNext(); )
         {
             ByteBuffer filterColumn = iterator.next();
-            IColumn column = container.getColumn(filterColumn);
+            Column column = container.getColumn(filterColumn);
             if (column != null && column.timestamp() > sstableTimestamp)
                 iterator.remove();
         }
@@ -234,7 +218,7 @@ public class CollationController
         Tracing.trace("Acquiring sstable references");
         ColumnFamilyStore.ViewFragment view = cfs.markReferenced(filter.key);
         List<OnDiskAtomIterator> iterators = new ArrayList<OnDiskAtomIterator>(Iterables.size(view.memtables) + view.sstables.size());
-        ColumnFamily returnCF = ColumnFamily.create(cfs.metadata, factory, filter.filter.isReversed());
+        ColumnFamily returnCF = ArrayBackedSortedColumns.factory.create(cfs.metadata, filter.filter.isReversed());
 
         try
         {

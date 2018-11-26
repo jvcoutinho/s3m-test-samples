@@ -28,7 +28,9 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.db.composites.CellNameType;
 import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.UUIDGen;
 
@@ -56,15 +58,20 @@ public class BatchlogManagerTest extends SchemaLoader
 
         // Generate 1000 mutations and put them all into the batchlog.
         // Half (500) ready to be replayed, half not.
+        CellNameType comparator = Keyspace.open("Keyspace1").getColumnFamilyStore("Standard1").metadata.comparator;
         for (int i = 0; i < 1000; i++)
         {
-            RowMutation mutation = new RowMutation("Keyspace1", bytes(i));
-            mutation.add("Standard1", bytes(i), bytes(i), System.currentTimeMillis());
+            Mutation mutation = new Mutation("Keyspace1", bytes(i));
+            mutation.add("Standard1", comparator.makeCellName(bytes(i)), bytes(i), System.currentTimeMillis());
 
             long timestamp = System.currentTimeMillis();
             if (i < 500)
                 timestamp -= DatabaseDescriptor.getWriteRpcTimeout() * 2;
-            BatchlogManager.getBatchlogMutationFor(Collections.singleton(mutation), UUIDGen.getTimeUUID(), timestamp * 1000).apply();
+            BatchlogManager.getBatchlogMutationFor(Collections.singleton(mutation),
+                                                   UUIDGen.getTimeUUID(),
+                                                   MessagingService.current_version,
+                                                   timestamp * 1000)
+                           .apply();
         }
 
         // Flush the batchlog to disk (see CASSANDRA-6822).

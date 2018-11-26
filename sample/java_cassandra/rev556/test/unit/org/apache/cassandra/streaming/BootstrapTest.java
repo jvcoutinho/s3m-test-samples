@@ -37,7 +37,8 @@ public class BootstrapTest extends SchemaLoader
     public void testGetNewNames() throws IOException
     {
         Descriptor desc = Descriptor.fromFilename(new File("Keyspace1", "Standard1-500-Data.db").toString());
-        PendingFile inContext = new PendingFile(null, desc, "Data.db", Arrays.asList(new Pair<Long,Long>(0L, 1L)));
+        assert !desc.isLatestVersion; // deliberately test old version; see CASSANDRA-2283
+        PendingFile inContext = new PendingFile(null, desc, "Data.db", Arrays.asList(new Pair<Long,Long>(0L, 1L)), OperationType.BOOTSTRAP);
 
         PendingFile outContext = StreamIn.getContextMapping(inContext);
         // filename and generation are expected to have changed
@@ -45,7 +46,8 @@ public class BootstrapTest extends SchemaLoader
 
         // nothing else should
         assertEquals(inContext.component, outContext.component);
-        assertEquals(inContext.desc.ksname, outContext.desc.ksname);
-        assertEquals(inContext.desc.cfname, outContext.desc.cfname);
+        assertEquals(desc.ksname, outContext.desc.ksname);
+        assertEquals(desc.cfname, outContext.desc.cfname);
+        assertEquals(desc.version, outContext.desc.version);
     }
 }

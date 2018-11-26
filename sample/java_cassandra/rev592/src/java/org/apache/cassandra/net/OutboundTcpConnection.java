@@ -77,7 +77,7 @@ public class OutboundTcpConnection extends Thread
         return remoteDC.equals(localDC);
     }
 
-    public void enqueue(MessageOut<?> message, String id)
+    public void enqueue(MessageOut<?> message, int id)
     {
         expireMessages();
         try
@@ -95,12 +95,12 @@ public class OutboundTcpConnection extends Thread
         active.clear();
         backlog.clear();
         isStopped = destroyThread; // Exit loop to stop the thread
-        enqueue(CLOSE_SENTINEL, null);
+        enqueue(CLOSE_SENTINEL, -1);
     }
 
     void softCloseSocket()
     {
-        enqueue(CLOSE_SENTINEL, null);
+        enqueue(CLOSE_SENTINEL, -1);
     }
 
     public int getTargetVersion()
@@ -183,12 +183,11 @@ public class OutboundTcpConnection extends Thread
                 Tracing.instance().stopIfNonLocal(state);
             }
 
-            write(qm.message, qm.id, qm.timestamp, out, targetVersion);
+            writeInternal(qm.message, qm.id, qm.timestamp);
+
             completed++;
             if (active.peek() == null)
-            {
                 out.flush();
-            }
         }
         catch (Exception e)
         {
@@ -201,24 +200,28 @@ public class OutboundTcpConnection extends Thread
         }
     }
 
-    public static void write(MessageOut message, String id, long timestamp, DataOutputStream out, int version) throws IOException
+    private void writeInternal(MessageOut message, int id, long timestamp) throws IOException
     {
         out.writeInt(MessagingService.PROTOCOL_MAGIC);
-        if (version < MessagingService.VERSION_12)
+        if (targetVersion < MessagingService.VERSION_12)
         {
-            writeHeader(out, version, false);
+            writeHeader(out, targetVersion, false);
             // 0.8 included a total message size int.  1.0 doesn't need it but expects it to be there.
             out.writeInt(-1);
         }
 
-        out.writeUTF(id);
-        if (version >= MessagingService.VERSION_12)
+        if (targetVersion < MessagingService.VERSION_20)
+            out.writeUTF(String.valueOf(id));
+        else
+            out.writeInt(id);
+
+        if (targetVersion >= MessagingService.VERSION_12)
         {
             // int cast cuts off the high-order half of the timestamp, which we can assume remains
             // the same between now and when the recipient reconstructs it.
             out.writeInt((int) timestamp);
         }
-        message.serialize(out, version);
+        message.serialize(out, targetVersion);
     }
 
     private static void writeHeader(DataOutputStream out, int version, boolean compressionEnabled) throws IOException
@@ -280,7 +283,7 @@ public class OutboundTcpConnection extends Thread
                 {
                     try
                     {
-                        socket.setSendBufferSize(DatabaseDescriptor.getInternodeSendBufferSize().intValue());
+                        socket.setSendBufferSize(DatabaseDescriptor.getInternodeSendBufferSize());
                     }
                     catch (SocketException se)
                     {
@@ -369,10 +372,10 @@ public class OutboundTcpConnection extends Thread
     private static class QueuedMessage
     {
         final MessageOut<?> message;
-        final String id;
+        final int id;
         final long timestamp;
 
-        QueuedMessage(MessageOut<?> message, String id, long timestamp)
+        QueuedMessage(MessageOut<?> message, int id, long timestamp)
         {
             this.message = message;
             this.id = id;

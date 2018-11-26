@@ -1,5 +1,4 @@
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,28 +7,26 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 package org.apache.cassandra.cql;
 
 import com.google.common.collect.Sets;
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.TypeParser;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.io.compress.CompressionParameters;
 import org.apache.cassandra.io.compress.SnappyCompressor;
-import org.apache.cassandra.thrift.InvalidRequestException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,7 +36,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class CFPropDefs {
-    private static Logger logger = LoggerFactory.getLogger(CFPropDefs.class);
+    private static final Logger logger = LoggerFactory.getLogger(CFPropDefs.class);
 
     public static final String KW_COMPARATOR = "comparator";
     public static final String KW_COMMENT = "comment";
@@ -119,16 +116,7 @@ public class CFPropDefs {
 
     public void validate() throws InvalidRequestException
     {
-        String compStrategy = getPropertyString(KW_COMPACTION_STRATEGY_CLASS, CFMetaData.DEFAULT_COMPACTION_STRATEGY_CLASS);
-
-        try
-        {
-            compactionStrategyClass = CFMetaData.createCompactionStrategy(compStrategy);
-        }
-        catch (ConfigurationException e)
-        {
-            throw new InvalidRequestException(e.getMessage());
-        }
+        compactionStrategyClass = CFMetaData.DEFAULT_COMPACTION_STRATEGY_CLASS;
 
         // we need to remove parent:key = value pairs from the main properties
         Set<String> propsToRemove = new HashSet<String>();
@@ -208,14 +196,14 @@ public class CFPropDefs {
      * knows what they are doing (a custom comparator/validator for example), and pass it on as-is.
      */
 
-    public AbstractType<?> getComparator() throws ConfigurationException
+    public AbstractType<?> getComparator() throws ConfigurationException, SyntaxException
     {
         return TypeParser.parse((comparators.get(getPropertyString(KW_COMPARATOR, "text")) != null)
                                   ? comparators.get(getPropertyString(KW_COMPARATOR, "text"))
                                   : getPropertyString(KW_COMPARATOR, "text"));
     }
 
-    public AbstractType<?> getValidator() throws ConfigurationException
+    public AbstractType<?> getValidator() throws ConfigurationException, SyntaxException
     {
         return TypeParser.parse((comparators.get(getPropertyString(KW_DEFAULTVALIDATION, "text")) != null)
                                   ? comparators.get(getPropertyString(KW_DEFAULTVALIDATION, "text"))
@@ -252,7 +240,7 @@ public class CFPropDefs {
         {
             try
             {
-                result = Double.parseDouble(value);
+                result = Double.valueOf(value);
             }
             catch (NumberFormatException e)
             {
@@ -274,7 +262,7 @@ public class CFPropDefs {
         {
             try
             {
-                result = Integer.parseInt(value);
+                result = Integer.valueOf(value);
             }
             catch (NumberFormatException e)
             {

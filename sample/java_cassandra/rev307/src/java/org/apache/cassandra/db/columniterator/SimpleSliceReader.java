@@ -19,41 +19,35 @@ package org.apache.cassandra.db.columniterator;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Iterator;
 
 import com.google.common.collect.AbstractIterator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.OnDiskAtom;
-import org.apache.cassandra.db.RowIndexEntry;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.IndexHelper;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileDataInput;
-import org.apache.cassandra.io.util.FileMark;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 class SimpleSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskAtomIterator
 {
-    private final SSTableReader sstable;
+    private static final Logger logger = LoggerFactory.getLogger(SimpleSliceReader.class);
+
     private final FileDataInput file;
     private final boolean needsClosing;
     private final ByteBuffer finishColumn;
     private final AbstractType<?> comparator;
     private final ColumnFamily emptyColumnFamily;
-    private final int columns;
-    private int i;
-    private FileMark mark;
-    private final OnDiskAtom.Serializer atomSerializer;
+    private final Iterator<OnDiskAtom> atomIterator;
 
     public SimpleSliceReader(SSTableReader sstable, RowIndexEntry indexEntry, FileDataInput input, ByteBuffer finishColumn)
     {
         Tracing.trace("Seeking to partition beginning in data file");
-        this.sstable = sstable;
         this.finishColumn = finishColumn;
         this.comparator = sstable.metadata.comparator;
         try
@@ -70,22 +64,17 @@ class SimpleSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskAt
                 this.needsClosing = false;
             }
 
+            Descriptor.Version version = sstable.descriptor.version;
+
             // Skip key and data size
             ByteBufferUtil.skipShortLength(file);
-            SSTableReader.readRowSize(file, sstable.descriptor);
+            if (version.hasRowSizeAndColumnCount)
+                file.readLong();
 
-            Descriptor.Version version = sstable.descriptor.version;
-            if (!version.hasPromotedIndexes)
-            {
-                IndexHelper.skipBloomFilter(file);
-                IndexHelper.skipIndex(file);
-            }
-
-            emptyColumnFamily = ColumnFamily.create(sstable.metadata);
-            emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, version));
-            atomSerializer = emptyColumnFamily.getOnDiskSerializer();
-            columns = file.readInt();
-            mark = file.mark();
+            emptyColumnFamily = EmptyColumns.factory.create(sstable.metadata);
+            emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, sstable.descriptor.version));
+            int columnCount = version.hasRowSizeAndColumnCount ? file.readInt() : Integer.MAX_VALUE;
+            atomIterator = emptyColumnFamily.metadata().getOnDiskIterator(file, columnCount, sstable.descriptor.version);
         }
         catch (IOException e)
         {
@@ -96,23 +85,13 @@ class SimpleSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskAt
 
     protected OnDiskAtom computeNext()
     {
-        if (i++ >= columns)
+        if (!atomIterator.hasNext())
             return endOfData();
 
-        OnDiskAtom column;
-        try
-        {
-            file.reset(mark);
-            column = atomSerializer.deserializeFromSSTable(file, sstable.descriptor.version);
-        }
-        catch (IOException e)
-        {
-            throw new CorruptSSTableException(e, file.getPath());
-        }
+        OnDiskAtom column = atomIterator.next();
         if (finishColumn.remaining() > 0 && comparator.compare(column.name(), finishColumn) > 0)
             return endOfData();
 
-        mark = file.mark();
         return column;
     }
 

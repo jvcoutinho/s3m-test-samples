@@ -37,6 +37,7 @@ import javax.transaction.Transaction;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Invocation context to be used for locally originated transactions.
@@ -50,6 +51,8 @@ public class LocalTxInvocationContext extends AbstractTxInvocationContext {
    public static final BidirectionalLinkedHashMap<Object,CacheEntry> EMPTY_ENTRY_MAP = new BidirectionalLinkedHashMap<Object, CacheEntry>();
 
    private LocalTransaction localTransaction;
+
+   private boolean replayEntryWrapping;
 
    public boolean isTransactionValid() {
       Transaction t = getTransaction();
@@ -112,7 +115,7 @@ public class LocalTxInvocationContext extends AbstractTxInvocationContext {
 
    @Override
    public boolean hasLockedKey(Object key) {
-      return localTransaction != null && super.hasLockedKey(key);
+      return localTransaction != null && localTransaction.ownsLock(key);
    }
 
    public void remoteLocksAcquired(Collection<Address> nodes) {
@@ -128,4 +131,22 @@ public class LocalTxInvocationContext extends AbstractTxInvocationContext {
       return localTransaction;
    }
 
+   @Override
+   public Set<Object> getLockedKeys() {
+      return localTransaction == null ? null : localTransaction.getLockedKeys();
+   }
+
+   @Override
+   public void registerLockedKey(Object key) {
+      localTransaction.registerLockedKey(key);
+   }
+
+   @Override
+   public final boolean isReplayEntryWrapping() {
+      return replayEntryWrapping;
+   }
+
+   public final void setReplayEntryWrapping(boolean replayEntryWrapping) {
+      this.replayEntryWrapping = replayEntryWrapping;
+   }
 }

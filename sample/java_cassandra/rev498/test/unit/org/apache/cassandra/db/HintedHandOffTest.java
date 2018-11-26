@@ -32,7 +32,6 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -64,13 +63,9 @@ public class HintedHandOffTest extends SchemaLoader
 
         // insert 1 hint
         RowMutation rm = new RowMutation(TABLE4, ByteBufferUtil.bytes(1));
-        rm.add(new QueryPath(STANDARD1_CF,
-                             null,
-                             ByteBufferUtil.bytes(String.valueOf(COLUMN1))),
-               ByteBufferUtil.EMPTY_BYTE_BUFFER,
-               System.currentTimeMillis());
+        rm.add(STANDARD1_CF, ByteBufferUtil.bytes(String.valueOf(COLUMN1)), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
 
-        RowMutation.hintFor(rm, UUID.randomUUID()).apply();
+        HintedHandOffManager.hintFor(rm, UUID.randomUUID()).apply();
 
         // flush data to disk
         hintStore.forceBlockingFlush();

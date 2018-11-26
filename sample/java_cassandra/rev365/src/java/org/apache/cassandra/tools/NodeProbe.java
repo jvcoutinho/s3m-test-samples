@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.tools;
 
 import java.io.IOException;
@@ -40,8 +39,9 @@ import javax.management.remote.JMXServiceURL;
 import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutorMBean;
-import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
+import org.apache.cassandra.db.HintedHandOffManager;
+import org.apache.cassandra.db.HintedHandOffManagerMBean;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
 import org.apache.cassandra.gms.FailureDetector;
@@ -52,8 +52,6 @@ import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.service.*;
 import org.apache.cassandra.streaming.StreamingService;
 import org.apache.cassandra.streaming.StreamingServiceMBean;
-import org.apache.cassandra.thrift.InvalidRequestException;
-import org.apache.cassandra.thrift.UnavailableException;
 import org.apache.cassandra.utils.SimpleCondition;
 
 /**
@@ -79,7 +77,9 @@ public class NodeProbe
     public MessagingServiceMBean msProxy;
     private FailureDetectorMBean fdProxy;
     private CacheServiceMBean cacheService;
+    private PBSPredictorMBean PBSPredictorProxy;
     private StorageProxyMBean spProxy;
+    private HintedHandOffManagerMBean hhProxy;
 
     /**
      * Creates a NodeProbe using the specified JMX host, port, username, and password.
@@ -90,7 +90,7 @@ public class NodeProbe
      */
     public NodeProbe(String host, int port, String username, String password) throws IOException, InterruptedException
     {
-        assert username != null && !username.isEmpty() && null != password && !password.isEmpty()
+        assert username != null && !username.isEmpty() && password != null && !password.isEmpty()
                : "neither username nor password can be blank";
 
         this.host = host;
@@ -148,6 +148,8 @@ public class NodeProbe
         {
             ObjectName name = new ObjectName(ssObjName);
             ssProxy = JMX.newMBeanProxy(mbeanServerConn, name, StorageServiceMBean.class);
+            name = new ObjectName(PBSPredictor.MBEAN_NAME);
+            PBSPredictorProxy = JMX.newMBeanProxy(mbeanServerConn, name, PBSPredictorMBean.class);
             name = new ObjectName(MessagingService.MBEAN_NAME);
             msProxy = JMX.newMBeanProxy(mbeanServerConn, name, MessagingServiceMBean.class);
             name = new ObjectName(StreamingService.MBEAN_OBJECT_NAME);
@@ -160,6 +162,8 @@ public class NodeProbe
             cacheService = JMX.newMBeanProxy(mbeanServerConn, name, CacheServiceMBean.class);
             name = new ObjectName(StorageProxy.MBEAN_NAME);
             spProxy = JMX.newMBeanProxy(mbeanServerConn, name, StorageProxyMBean.class);
+            name = new ObjectName(HintedHandOffManager.MBEAN_NAME);
+            hhProxy = JMX.newMBeanProxy(mbeanServerConn, name, HintedHandOffManagerMBean.class);
         } catch (MalformedObjectNameException e)
         {
             throw new RuntimeException(
@@ -202,18 +206,18 @@ public class NodeProbe
         ssProxy.forceTableFlush(tableName, columnFamilies);
     }
 
-    public void forceTableRepair(String tableName, boolean isSequential, String... columnFamilies) throws IOException
+    public void forceTableRepair(String tableName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepair(tableName, isSequential, columnFamilies);
+        ssProxy.forceTableRepair(tableName, isSequential, isLocal, columnFamilies);
     }
 
-    public void forceRepairAsync(final PrintStream out, final String tableName, boolean isSequential, boolean primaryRange, String... columnFamilies) throws IOException
+    public void forceRepairAsync(final PrintStream out, final String tableName, boolean isSequential, boolean isLocal, boolean primaryRange, String... columnFamilies) throws IOException
     {
         RepairRunner runner = new RepairRunner(out, tableName, columnFamilies);
         try
         {
             ssProxy.addNotificationListener(runner, null, null);
-            runner.repairAndWait(ssProxy, isSequential, primaryRange);
+            runner.repairAndWait(ssProxy, isSequential, isLocal, primaryRange);
         }
         catch (Exception e)
         {
@@ -229,14 +233,14 @@ public class NodeProbe
         }
     }
 
-    public void forceTableRepairPrimaryRange(String tableName, boolean isSequential, String... columnFamilies) throws IOException
+    public void forceTableRepairPrimaryRange(String tableName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepairPrimaryRange(tableName, isSequential, columnFamilies);
+        ssProxy.forceTableRepairPrimaryRange(tableName, isSequential, isLocal, columnFamilies);
     }
 
-    public void forceTableRepairRange(String beginToken, String endToken, String tableName, boolean isSequential, String... columnFamilies) throws IOException
+    public void forceTableRepairRange(String beginToken, String endToken, String tableName, boolean isSequential, boolean isLocal, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepairRange(beginToken, endToken, tableName, isSequential, columnFamilies);
+        ssProxy.forceTableRepairRange(beginToken, endToken, tableName, isSequential, isLocal, columnFamilies);
     }
 
     public void invalidateKeyCache() throws IOException
@@ -289,12 +293,12 @@ public class NodeProbe
         return ssProxy.getLoadMap();
     }
 
-    public Map<String, Float> getOwnership()
+    public Map<InetAddress, Float> getOwnership()
     {
         return ssProxy.getOwnership();
     }
 
-    public Map<String, Float> effectiveOwnership(String keyspace) throws ConfigurationException
+    public Map<InetAddress, Float> effectiveOwnership(String keyspace) throws IllegalStateException
     {
         return ssProxy.effectiveOwnership(keyspace);
     }
@@ -334,9 +338,31 @@ public class NodeProbe
       return compactionProxy;
     }
 
-    public String getToken()
+    public List<String> getTokens()
     {
-        return ssProxy.getToken();
+        return ssProxy.getTokens();
+    }
+
+    public List<String> getTokens(String endpoint)
+    {
+        try
+        {
+            return ssProxy.getTokens(endpoint);
+        }
+        catch (UnknownHostException e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public String getLocalHostId()
+    {
+        return ssProxy.getLocalHostId();
+    }
+
+    public Map<String, String> getHostIdMap()
+    {
+        return ssProxy.getHostIdMap();
     }
 
     public String getLoadString()
@@ -398,7 +424,7 @@ public class NodeProbe
         return ssProxy.isJoined();
     }
 
-    public void joinRing() throws IOException, ConfigurationException
+    public void joinRing() throws IOException
     {
         ssProxy.joinRing();
     }
@@ -408,14 +434,14 @@ public class NodeProbe
         ssProxy.decommission();
     }
 
-    public void move(String newToken) throws IOException, InterruptedException, ConfigurationException
+    public void move(String newToken) throws IOException, InterruptedException
     {
         ssProxy.move(newToken);
     }
 
-    public void removeToken(String token)
+    public void removeNode(String token)
     {
-        ssProxy.removeToken(token);
+        ssProxy.removeNode(token);
     }
 
     public String getRemovalStatus()
@@ -526,10 +552,6 @@ public class NodeProbe
         {
             ssProxy.truncate(tableName, cfName);
         }
-        catch (UnavailableException e)
-        {
-            throw new RuntimeException("Error while executing truncate", e);
-        }
         catch (TimeoutException e)
         {
             throw new RuntimeException("Error while executing truncate", e);
@@ -587,7 +609,7 @@ public class NodeProbe
     {
         // Try to find the endpoint using the local token, doing so in a crazy manner
         // to maintain backwards compatibility with the MBean interface
-        String stringToken = ssProxy.getToken();
+        String stringToken = ssProxy.getTokens().get(0);
         Map<String, String> tokenToEndpoint = ssProxy.getTokenToEndpointMap();
 
         for (Map.Entry<String, String> pair : tokenToEndpoint.entrySet())
@@ -598,7 +620,7 @@ public class NodeProbe
             }
         }
 
-        throw new AssertionError("Could not find myself in the endpoint list, something is very wrong!");
+        throw new RuntimeException("Could not find myself in the endpoint list, something is very wrong!  Is the Cassandra node fully started?");
     }
 
     public String getDataCenter()
@@ -628,6 +650,26 @@ public class NodeProbe
     public List<String> getKeyspaces()
     {
         return ssProxy.getKeyspaces();
+    }
+
+    public void disableHintedHandoff()
+    {
+        spProxy.setHintedHandoffEnabled(false);
+    }
+
+    public void enableHintedHandoff()
+    {
+        spProxy.setHintedHandoffEnabled(true);
+    }
+
+    public void pauseHintsDelivery()
+    {
+        hhProxy.pauseHintsDelivery(true);
+    }
+
+    public void resumeHintsDelivery()
+    {
+        hhProxy.pauseHintsDelivery(false);
     }
 
     public void stopGossiping()
@@ -705,14 +747,24 @@ public class NodeProbe
         ssProxy.setStreamThroughputMbPerSec(value);
     }
 
+    public void setTraceProbability(double value)
+    {
+        ssProxy.setTraceProbability(value);
+    }
+
     public String getSchemaVersion()
     {
         return ssProxy.getSchemaVersion();
     }
 
-    public List<String> describeRing(String keyspaceName) throws InvalidRequestException
+    public List<String> describeRing(String keyspaceName) throws IOException
     {
         return ssProxy.describeRingJMX(keyspaceName);
+    }
+
+    public PBSPredictorMBean getPBSPredictorMBean()
+    {
+        return PBSPredictorProxy;
     }
 
     public void rebuild(String sourceDc)
@@ -765,8 +817,8 @@ class ColumnFamilyStoreMBeanIterator implements Iterator<Map.Entry<String, Colum
 
 class ThreadPoolProxyMBeanIterator implements Iterator<Map.Entry<String, JMXEnabledThreadPoolExecutorMBean>>
 {
-    private Iterator<ObjectName> resIter;
-    private MBeanServerConnection mbeanServerConn;
+    private final Iterator<ObjectName> resIter;
+    private final MBeanServerConnection mbeanServerConn;
 
     public ThreadPoolProxyMBeanIterator(MBeanServerConnection mbeanServerConn)
     throws MalformedObjectNameException, NullPointerException, IOException
@@ -812,9 +864,9 @@ class RepairRunner implements NotificationListener
         this.columnFamilies = columnFamilies;
     }
 
-    public void repairAndWait(StorageServiceMBean ssProxy, boolean isSequential, boolean primaryRangeOnly) throws InterruptedException
+    public void repairAndWait(StorageServiceMBean ssProxy, boolean isSequential, boolean isLocal, boolean primaryRangeOnly) throws InterruptedException
     {
-        cmd = ssProxy.forceRepairAsync(keyspace, isSequential, primaryRangeOnly, columnFamilies);
+        cmd = ssProxy.forceRepairAsync(keyspace, isSequential, isLocal, primaryRangeOnly, columnFamilies);
         if (cmd > 0)
         {
             condition.await();
@@ -830,14 +882,13 @@ class RepairRunner implements NotificationListener
     {
         if ("repair".equals(notification.getType()))
         {
-            // repair status is int array with [0] = cmd number, [1] = status
             int[] status = (int[]) notification.getUserData();
             assert status.length == 2;
-            // we only output what we invoked
             if (cmd == status[0])
             {
                 String message = String.format("[%s] %s", format.format(notification.getTimeStamp()), notification.getMessage());
                 out.println(message);
+                // repair status is int array with [0] = cmd number, [1] = status
                 if (status[1] == AntiEntropyService.Status.FINISHED.ordinal())
                     condition.signalAll();
             }

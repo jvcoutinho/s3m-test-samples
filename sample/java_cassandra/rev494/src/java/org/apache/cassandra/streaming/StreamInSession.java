@@ -18,47 +18,72 @@
 
 package org.apache.cassandra.streaming;
 
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.Table;
-import org.apache.cassandra.gms.Gossiper;
-import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.Pair;
-
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 import org.cliffc.high_scale_lib.NonBlockingHashSet;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Table;
+import org.apache.cassandra.gms.*;
+import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.OutboundTcpConnection;
+import org.apache.cassandra.utils.Pair;
+
 /** each context gets its own StreamInSession. So there may be >1 Session per host */
-public class StreamInSession
+public class StreamInSession extends AbstractStreamSession
 {
     private static final Logger logger = LoggerFactory.getLogger(StreamInSession.class);
 
     private static ConcurrentMap<Pair<InetAddress, Long>, StreamInSession> sessions = new NonBlockingHashMap<Pair<InetAddress, Long>, StreamInSession>();
 
     private final Set<PendingFile> files = new NonBlockingHashSet<PendingFile>();
-    private final Pair<InetAddress, Long> context;
-    private final Runnable callback;
-    private String table;
     private final List<SSTableReader> readers = new ArrayList<SSTableReader>();
     private PendingFile current;
+    private Socket socket;
+    private volatile int retries;
+    private final static AtomicInteger sessionIdCounter = new AtomicInteger(0);
 
-    private StreamInSession(Pair<InetAddress, Long> context, Runnable callback)
+    /**
+     * The next session id is a combination of a local integer counter and a flag used to avoid collisions
+     * between session id's generated on different machines. Nodes can may have StreamOutSessions with the
+     * following contexts:
+     *
+     * <1.1.1.1, (stream_in_flag, 6)>
+     * <1.1.1.1, (stream_out_flag, 6)>
+     *
+     * The first is an out stream created in response to a request from node 1.1.1.1. The  id (6) was created by
+     * the requesting node. The second is an out stream created by this node to push to 1.1.1.1. The  id (6) was
+     * created by this node.
+     *
+     * Note: The StreamInSession results in a StreamOutSession on the target that uses the StreamInSession sessionId.
+     *
+     * @return next StreamInSession sessionId
+     */
+    private static long nextSessionId()
     {
-        this.context = context;
-        this.callback = callback;
+        return (((long)StreamHeader.STREAM_IN_SOURCE_FLAG << 32) + sessionIdCounter.incrementAndGet());
     }
 
-    public static StreamInSession create(InetAddress host, Runnable callback)
+    private StreamInSession(Pair<InetAddress, Long> context, IStreamCallback callback)
     {
-        Pair<InetAddress, Long> context = new Pair<InetAddress, Long>(host, System.nanoTime());
+        super(null, context, callback);
+    }
+
+    public static StreamInSession create(InetAddress host, IStreamCallback callback)
+    {
+        Pair<InetAddress, Long> context = new Pair<InetAddress, Long>(host, nextSessionId());
         StreamInSession session = new StreamInSession(context, callback);
         sessions.put(context, session);
         return session;
@@ -72,9 +97,7 @@ public class StreamInSession
         {
             StreamInSession possibleNew = new StreamInSession(context, null);
             if ((session = sessions.putIfAbsent(context, possibleNew)) == null)
-            {
                 session = possibleNew;
-            }
         }
         return session;
     }
@@ -87,6 +110,11 @@ public class StreamInSession
     public void setTable(String table)
     {
         this.table = table;
+    }
+
+    public void setSocket(Socket socket)
+    {
+        this.socket = socket;
     }
 
     public void addFiles(Collection<PendingFile> files)
@@ -102,7 +130,7 @@ public class StreamInSession
     public void finished(PendingFile remoteFile, SSTableReader reader) throws IOException
     {
         if (logger.isDebugEnabled())
-            logger.debug("Finished {}. Sending ack to {}", remoteFile, this);
+            logger.debug("Finished {} (from {}). Sending ack to {}", new Object[] {remoteFile, getHost(), this});
 
         assert reader != null;
         readers.add(reader);
@@ -111,14 +139,36 @@ public class StreamInSession
             current = null;
         StreamReply reply = new StreamReply(remoteFile.getFilename(), getSessionId(), StreamReply.Status.FILE_FINISHED);
         // send a StreamStatus message telling the source node it can delete this file
-        MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
+        sendMessage(reply.getMessage(Gossiper.instance.getVersion(getHost())));
+        logger.debug("ack {} sent for {}", reply, remoteFile);
     }
 
     public void retry(PendingFile remoteFile) throws IOException
     {
+        retries++;
+        if (retries > DatabaseDescriptor.getMaxStreamingRetries())
+        {
+            logger.error(String.format("Failed streaming session %d from %s while receiving %s", getSessionId(), getHost().toString(), current),
+                         new IllegalStateException("Too many retries for " + remoteFile));
+            close(false);
+            return;
+        }
         StreamReply reply = new StreamReply(remoteFile.getFilename(), getSessionId(), StreamReply.Status.FILE_RETRY);
-        logger.info("Streaming of file {} from {} failed: requesting a retry.", remoteFile, this);
-        MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
+        logger.info("Streaming of file {} for {} failed: requesting a retry.", remoteFile, this);
+        try
+        {
+            sendMessage(reply.getMessage(Gossiper.instance.getVersion(getHost())));
+        }
+        catch (IOException e)
+        {
+            logger.error("Sending retry message failed, closing session.", e);
+            close(false);
+        }
+    }
+
+    public void sendMessage(Message message) throws IOException
+    {
+        OutboundTcpConnection.write(message, String.valueOf(getSessionId()), new DataOutputStream(socket.getOutputStream()));
     }
 
     public void closeIfFinished() throws IOException
@@ -135,20 +185,22 @@ public class StreamInSession
                     // Acquire the reference (for secondary index building) before submitting the index build,
                     // so it can't get compacted out of existence in between
                     if (!sstable.acquireReference())
-                        throw new AssertionError("We shouldn't fail acquiring a reference on a sstable that has just been transfered");
+                        throw new AssertionError("We shouldn't fail acquiring a reference on a sstable that has just been transferred");
 
                     ColumnFamilyStore cfs = Table.open(sstable.getTableName()).getColumnFamilyStore(sstable.getColumnFamilyName());
-                    cfs.addSSTable(sstable);
                     if (!cfstores.containsKey(cfs))
                         cfstores.put(cfs, new ArrayList<SSTableReader>());
                     cfstores.get(cfs).add(sstable);
                 }
 
-                // build secondary indexes
+                // add sstables and build secondary indexes
                 for (Map.Entry<ColumnFamilyStore, List<SSTableReader>> entry : cfstores.entrySet())
                 {
                     if (entry.getKey() != null)
+                    {
+                        entry.getKey().addSSTables(entry.getValue());
                         entry.getKey().indexManager.maybeBuildSecondaryIndexes(entry.getValue(), entry.getKey().indexManager.getIndexedColumns());
+                    }
                 }
             }
             finally
@@ -160,22 +212,38 @@ public class StreamInSession
             // send reply to source that we're done
             StreamReply reply = new StreamReply("", getSessionId(), StreamReply.Status.SESSION_FINISHED);
             logger.info("Finished streaming session {} from {}", getSessionId(), getHost());
-            MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
+            try
+            {
+                if (socket != null)
+                    OutboundTcpConnection.write(reply.getMessage(Gossiper.instance.getVersion(getHost())), context.right.toString(), new DataOutputStream(socket.getOutputStream()));
+                else
+                    logger.debug("No socket to reply to {} with!", getHost());
+            }
+            finally
+            {
+                if (socket != null)
+                    socket.close();
+            }
 
-            if (callback != null)
-                callback.run();
-            sessions.remove(context);
+            close(true);
         }
     }
 
-    public long getSessionId()
+    protected void closeInternal(boolean success)
     {
-        return context.right;
-    }
-
-    public InetAddress getHost()
-    {
-        return context.left;
+        sessions.remove(context);
+        if (!success && FailureDetector.instance.isAlive(getHost()))
+        {
+            try
+            {
+                StreamReply reply = new StreamReply("", getSessionId(), StreamReply.Status.SESSION_FAILURE);
+                MessagingService.instance().sendOneWay(reply.getMessage(Gossiper.instance.getVersion(getHost())), getHost());
+            }
+            catch (IOException ex)
+            {
+                logger.error("Error sending streaming session failure notification to " + getHost(), ex);
+            }
+        }
     }
 
     /** query method to determine which hosts are streaming to this node. */

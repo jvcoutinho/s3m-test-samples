@@ -43,7 +43,5 @@ public interface IResponseResolver<T> {
 
     public void preprocess(Message message);
     public Iterable<Message> getMessages();
-
-    /** Potentially called by multiple response threads, so must be threadsafe. */
     public int getMessageCount();
 }

@@ -19,6 +19,8 @@
 package org.apache.cassandra.service;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,6 +32,7 @@ import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.auth.Resources;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql.CQLStatement;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.thrift.AuthenticationException;
 import org.apache.cassandra.thrift.InvalidRequestException;
@@ -40,6 +43,7 @@ import org.apache.cassandra.thrift.InvalidRequestException;
  */
 public class ClientState
 {
+    private static final int MAX_CACHE_PREPARED = 10000;    // Enough to keep buggy clients from OOM'ing us
     private static Logger logger = LoggerFactory.getLogger(ClientState.class);
 
     // Current user for the session
@@ -47,6 +51,13 @@ public class ClientState
     private String keyspace;
     // Reusable array for authorization
     private final List<Object> resource = new ArrayList<Object>();
+
+    // An LRU map of prepared statements
+    private Map<Integer, CQLStatement> prepared = new LinkedHashMap<Integer, CQLStatement>(16, 0.75f, true) {
+        protected boolean removeEldestEntry(Map.Entry<Integer, CQLStatement> eldest) {
+            return size() > MAX_CACHE_PREPARED;
+        }
+    };
 
     private long clock;
 
@@ -58,6 +69,11 @@ public class ClientState
         reset();
     }
 
+    public Map<Integer, CQLStatement> getPrepared()
+    {
+        return prepared;
+    }
+    
     public String getRawKeyspace()
     {
         return keyspace;
@@ -114,6 +130,7 @@ public class ClientState
         user = DatabaseDescriptor.getAuthenticator().defaultUser();
         keyspace = null;
         resourceClear();
+        prepared.clear();
     }
 
     /**
@@ -123,6 +140,10 @@ public class ClientState
     {
         validateLogin();
         
+        // hardcode disallowing messing with system keyspace
+        if (keyspace != null && keyspace.equalsIgnoreCase(Table.SYSTEM_TABLE) && perm == Permission.WRITE)
+            throw new InvalidRequestException("system keyspace is not user-modifiable");
+
         resourceClear();
         Set<Permission> perms = DatabaseDescriptor.getAuthority().authorize(user, resource);
 

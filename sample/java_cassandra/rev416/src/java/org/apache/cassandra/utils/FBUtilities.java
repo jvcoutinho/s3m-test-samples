@@ -39,6 +39,7 @@ import org.apache.commons.collections.iterators.CollatingIterator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cache.IRowCacheProvider;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
@@ -179,6 +180,60 @@ public class FBUtilities
         return new Pair<BigInteger, Boolean>(midpoint, remainder);
     }
 
+    /**
+     * Copy bytes from int into bytes starting from offset.
+     * @param bytes Target array
+     * @param offset Offset into the array
+     * @param i Value to write
+     */
+    public static void copyIntoBytes(byte[] bytes, int offset, int i)
+    {
+        bytes[offset]   = (byte)( ( i >>> 24 ) & 0xFF );
+        bytes[offset+1] = (byte)( ( i >>> 16 ) & 0xFF );
+        bytes[offset+2] = (byte)( ( i >>> 8  ) & 0xFF );
+        bytes[offset+3] = (byte)(   i          & 0xFF );
+    }
+
+    /**
+     * @param i Write this int to an array
+     * @return 4-byte array containing the int
+     */
+    public static byte[] toByteArray(int i)
+    {
+        byte[] bytes = new byte[4];
+        copyIntoBytes(bytes, 0, i);
+        return bytes;
+    }
+
+    /**
+     * Copy bytes from long into bytes starting from offset.
+     * @param bytes Target array
+     * @param offset Offset into the array
+     * @param l Value to write
+     */
+    public static void copyIntoBytes(byte[] bytes, int offset, long l)
+    {
+        bytes[offset]   = (byte)( ( l >>> 56 ) & 0xFF );
+        bytes[offset+1] = (byte)( ( l >>> 48 ) & 0xFF );
+        bytes[offset+2] = (byte)( ( l >>> 40 ) & 0xFF );
+        bytes[offset+3] = (byte)( ( l >>> 32 ) & 0xFF );
+        bytes[offset+4] = (byte)( ( l >>> 24 ) & 0xFF );
+        bytes[offset+5] = (byte)( ( l >>> 16 ) & 0xFF );
+        bytes[offset+6] = (byte)( ( l >>> 8  ) & 0xFF );
+        bytes[offset+7] = (byte)(   l          & 0xFF );
+    }
+
+    /**
+     * @param l Write this long to an array
+     * @return 8-byte array containing the long
+     */
+    public static byte[] toByteArray(long l)
+    {
+        byte[] bytes = new byte[8];
+        copyIntoBytes(bytes, 0, l);
+        return bytes;
+    }
+
     public static int compareUnsigned(byte[] bytes1, byte[] bytes2, int offset1, int offset2, int len1, int len2)
     {
         if (bytes1 == null)
@@ -198,7 +253,7 @@ public class FBUtilities
         if ((len1 - offset1) == (len2 - offset2)) return 0;
         else return ((len1 - offset1) < (len2 - offset2)) ? -1 : 1;
     }
-
+  
     /**
      * @return The bitwise XOR of the inputs. The output will be the same length as the
      * longer input, but if either input is null, the output will be null.
@@ -403,12 +458,6 @@ public class FBUtilities
         return utflen;
     }
 
-    public static ByteBuffer toByteBuffer(long n)
-    {
-        byte[] bytes = new byte[8];
-        return ByteBuffer.wrap(bytes).putLong(0, n);
-    }
-
     public static String resourceToFile(String filename) throws ConfigurationException
     {
         ClassLoader loader = PropertyFileSnitch.class.getClassLoader();
@@ -424,6 +473,10 @@ public class FBUtilities
         try
         {
             InputStream in = FBUtilities.class.getClassLoader().getResourceAsStream("org/apache/cassandra/config/version.properties");
+            if (in == null)
+            {
+                return "Unknown";
+            }
             Properties props = new Properties();
             props.load(in);
             return props.getProperty("CassandraVersion");
@@ -543,6 +596,31 @@ public class FBUtilities
         }
     }
 
+    public static <T> T getInstance(String classname, String readable) throws ConfigurationException
+    {
+        Class cls = classForName(classname,  readable);
+        T rval = null;
+        try
+        {
+            rval = (T) cls.getDeclaredMethod("getInstance").invoke(null, (Object) null);
+
+        }
+        catch (NoSuchMethodException e)
+        {
+            throw new ConfigurationException("Class does not have the getInstance method with no arguments");
+        }
+        catch (InvocationTargetException e)
+        {
+            throw new ConfigurationException(String.format("Could not call method getInstance on %s class %s", readable, classname));
+        }
+        catch (IllegalAccessException e)
+        {
+            throw new ConfigurationException(String.format("Could not call method getInstance on %s class %s", readable, classname));
+        }
+
+        return rval;
+    }
+
     public static <T extends Comparable> SortedSet<T> singleton(T column)
     {
         return new TreeSet<T>(Arrays.asList(column));
@@ -576,4 +654,12 @@ public class FBUtilities
 
         return field;
     }
+
+    public static IRowCacheProvider newCacheProvider(String cache_provider) throws ConfigurationException
+    {
+        if (!cache_provider.contains("."))
+            cache_provider = "org.apache.cassandra.cache." + cache_provider;
+        return FBUtilities.construct(cache_provider, "row cache provider");
+    }
+
 }

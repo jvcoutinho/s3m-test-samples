@@ -20,12 +20,17 @@ package org.apache.cassandra.cql3;
 import java.nio.ByteBuffer;
 import java.util.List;
 
+import org.apache.cassandra.serializers.MarshalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.CounterColumnType;
+import org.apache.cassandra.db.marshal.LongType;
+import org.apache.cassandra.db.marshal.ReversedType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -77,9 +82,6 @@ public abstract class Constants
     {
         private final Type type;
         private final String text;
-
-        // For transition post-5198, see below
-        private static volatile boolean stringAsBlobWarningLogged = false;
 
         private Literal(Type type, String text)
         {
@@ -171,18 +173,6 @@ public abstract class Constants
                         case INET:
                         case VARCHAR:
                         case TIMESTAMP:
-                            return true;
-                        case BLOB:
-                            // Blobs should now be inputed as hexadecimal constants. However, to allow people to upgrade, we still allow
-                            // blob-as-strings, even though it is deprecated (see #5198).
-                            if (!stringAsBlobWarningLogged)
-                            {
-                                stringAsBlobWarningLogged = true;
-                                logger.warn("Inputing CLQ3 blobs as strings (like {} = '{}') is now deprecated and will be removed in a future version. "
-                                          + "You should convert client code to use a blob constant ({} = {}) instead (see http://cassandra.apache.org/doc/cql3/CQL.html "
-                                          + "changelog section for more info).",
-                                          new Object[]{receiver, text, receiver, "0x" + text});
-                            }
                             return true;
                     }
                     return false;
@@ -326,7 +316,7 @@ public abstract class Constants
                 throw new InvalidRequestException("Invalid null value for counter increment");
             long increment = ByteBufferUtil.toLong(bytes);
             ByteBuffer cname = columnName == null ? prefix.build() : prefix.add(columnName.key).build();
-            cf.addCounter(new QueryPath(cf.metadata().cfName, null, cname), increment);
+            cf.addCounter(cname, increment);
         }
     }
 
@@ -348,7 +338,7 @@ public abstract class Constants
                 throw new InvalidRequestException("The negation of " + increment + " overflows supported counter precision (signed 8 bytes integer)");
 
             ByteBuffer cname = columnName == null ? prefix.build() : prefix.add(columnName.key).build();
-            cf.addCounter(new QueryPath(cf.metadata().cfName, null, cname), -increment);
+            cf.addCounter(cname, -increment);
         }
     }
 

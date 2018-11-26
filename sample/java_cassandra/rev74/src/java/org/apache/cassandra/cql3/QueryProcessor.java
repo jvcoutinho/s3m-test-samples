@@ -7,14 +7,13 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.cassandra.cql3;
 
@@ -26,12 +25,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cql3.statements.*;
+import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.filter.*;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.TypeParser;
+import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.thrift.*;
+import org.apache.cassandra.thrift.SchemaDisagreementException;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SemanticVersion;
 
@@ -76,82 +77,82 @@ public class QueryProcessor
         validateColumnNames(Collections.singletonList(column));
     }
 
-    public static void validateSlicePredicate(CFMetaData metadata, SlicePredicate predicate)
+    public static void validateFilter(CFMetaData metadata, IFilter filter)
     throws InvalidRequestException
     {
-        if (predicate.slice_range != null)
-            validateSliceRange(metadata, predicate.slice_range);
+        if (filter instanceof SliceQueryFilter)
+            validateSliceFilter(metadata, (SliceQueryFilter)filter);
         else
-            validateColumnNames(predicate.column_names);
+            validateColumnNames(((NamesQueryFilter)filter).columns);
     }
 
-    public static void validateSliceRange(CFMetaData metadata, SliceRange range)
+    public static void validateSliceFilter(CFMetaData metadata, SliceQueryFilter range)
     throws InvalidRequestException
     {
-        validateSliceRange(metadata, range.start, range.finish, range.reversed);
+        try
+        {
+            AbstractType<?> comparator = metadata.getComparatorFor(null);
+            ColumnSlice.validate(range.slices, comparator, range.reversed);
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new InvalidRequestException(e.getMessage());
+        }
     }
 
-    public static void validateSliceRange(CFMetaData metadata, ByteBuffer start, ByteBuffer finish, boolean reversed)
-    throws InvalidRequestException
-    {
-        AbstractType<?> comparator = metadata.getComparatorFor(null);
-        Comparator<ByteBuffer> orderedComparator = reversed ? comparator.reverseComparator: comparator;
-        if (start.remaining() > 0 && finish.remaining() > 0 && orderedComparator.compare(start, finish) > 0)
-            throw new InvalidRequestException("Range finish must come after start in traversal order");
-    }
-
-    private static CqlResult processStatement(CQLStatement statement, ClientState clientState, List<ByteBuffer> variables)
-    throws  UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    private static ResultMessage processStatement(CQLStatement statement, ClientState clientState, List<ByteBuffer> variables)
+    throws RequestExecutionException, RequestValidationException
     {
         statement.checkAccess(clientState);
         statement.validate(clientState);
-        CqlResult result = statement.execute(clientState, variables);
-        if (result == null)
-        {
-            result = new CqlResult();
-            result.type = CqlResultType.VOID;
-        }
-        return result;
+        ResultMessage result = statement.execute(clientState, variables);
+        return result == null ? ResultMessage.Void.instance() : result;
     }
 
-    public static CqlResult process(String queryString, ClientState clientState)
-    throws RecognitionException, UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    public static ResultMessage process(String queryString, ClientState clientState)
+    throws RequestExecutionException, RequestValidationException
     {
         logger.trace("CQL QUERY: {}", queryString);
         return processStatement(getStatement(queryString, clientState).statement, clientState, Collections.<ByteBuffer>emptyList());
     }
 
-    public static UntypedResultSet resultify(String queryString, Row row)
+    public static UntypedResultSet processInternal(String query)
     {
-        SelectStatement ss;
         try
         {
-            ss = (SelectStatement) getStatement(queryString, null).statement;
+            ClientState state = new ClientState();
+            ResultMessage result = processStatement(getStatement(query, state).statement, state, Collections.<ByteBuffer>emptyList());
+            if (result instanceof ResultMessage.Rows)
+                return new UntypedResultSet(((ResultMessage.Rows)result).result);
+            else
+                return null;
         }
-        catch (InvalidRequestException e)
+        catch (RequestExecutionException e)
         {
             throw new RuntimeException(e);
         }
-        catch (RecognitionException e)
+        catch (RequestValidationException e)
         {
-            throw new RuntimeException(e);
+            throw new AssertionError(e);
         }
-
-        List<CqlRow> cqlRows;
-        try
-        {
-            cqlRows = ss.process(Collections.singletonList(row));
-        }
-        catch (InvalidRequestException e)
-        {
-            throw new RuntimeException(e);
-        }
-
-        return new UntypedResultSet(cqlRows);
     }
 
-    public static CqlPreparedResult prepare(String queryString, ClientState clientState)
-    throws RecognitionException, InvalidRequestException
+    public static UntypedResultSet resultify(String query, Row row)
+    {
+        try
+        {
+            SelectStatement ss = (SelectStatement) getStatement(query, null).statement;
+            ResultSet cqlRows = ss.process(Collections.singletonList(row));
+            return new UntypedResultSet(cqlRows);
+        }
+        catch (RequestValidationException e)
+        {
+            throw new AssertionError(e);
+        }
+    }
+
+    public static ResultMessage.Prepared prepare(String queryString, ClientState clientState)
+    throws RequestValidationException
     {
         logger.trace("CQL QUERY: {}", queryString);
 
@@ -163,22 +164,11 @@ public class QueryProcessor
                                    prepared.statement.getBoundsTerms()));
 
         assert prepared.statement.getBoundsTerms() == prepared.boundNames.size();
-        List<String> var_types = new ArrayList<String>(prepared.boundNames.size()) ;
-        List<String> var_names = new ArrayList<String>(prepared.boundNames.size());
-        for (CFDefinition.Name n : prepared.boundNames)
-        {
-            var_types.add(TypeParser.getShortName(n.type));
-            var_names.add(n.name.toString());
-        }
-
-        CqlPreparedResult result = new CqlPreparedResult(statementId, prepared.boundNames.size());
-        result.setVariable_types(var_types);
-        result.setVariable_names(var_names);
-        return result;
+        return new ResultMessage.Prepared(statementId, prepared.boundNames);
     }
 
-    public static CqlResult processPrepared(CQLStatement statement, ClientState clientState, List<ByteBuffer> variables)
-    throws UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    public static ResultMessage processPrepared(CQLStatement statement, ClientState clientState, List<ByteBuffer> variables)
+    throws RequestExecutionException, RequestValidationException
     {
         // Check to see if there are any bound variables to verify
         if (!(variables.isEmpty() && (statement.getBoundsTerms() == 0)))
@@ -204,7 +194,8 @@ public class QueryProcessor
         return cql.hashCode();
     }
 
-    private static ParsedStatement.Prepared getStatement(String queryStr, ClientState clientState) throws InvalidRequestException, RecognitionException
+    private static ParsedStatement.Prepared getStatement(String queryStr, ClientState clientState)
+    throws RequestValidationException
     {
         ParsedStatement statement = parseStatement(queryStr);
 
@@ -215,7 +206,7 @@ public class QueryProcessor
         return statement.prepare();
     }
 
-    private static ParsedStatement parseStatement(String queryStr) throws InvalidRequestException, RecognitionException
+    public static ParsedStatement parseStatement(String queryStr) throws SyntaxException
     {
         try
         {
@@ -224,23 +215,26 @@ public class QueryProcessor
             CqlLexer lexer = new CqlLexer(stream);
             TokenStream tokenStream = new CommonTokenStream(lexer);
             CqlParser parser = new CqlParser(tokenStream);
-    
+
             // Parse the query string to a statement instance
             ParsedStatement statement = parser.query();
-    
+
             // The lexer and parser queue up any errors they may have encountered
             // along the way, if necessary, we turn them into exceptions here.
             lexer.throwLastRecognitionError();
             parser.throwLastRecognitionError();
-    
+
             return statement;
         }
         catch (RuntimeException re)
         {
-            InvalidRequestException ire = new InvalidRequestException("Failed parsing statement: [" + queryStr + "] reason: " + re.getClass().getSimpleName() + " " + re.getMessage());
-            ire.initCause(re);
+            SyntaxException ire = new SyntaxException("Failed parsing statement: [" + queryStr + "] reason: " + re.getClass().getSimpleName() + " " + re.getMessage());
+            throw ire;
+        }
+        catch (RecognitionException e)
+        {
+            SyntaxException ire = new SyntaxException("Invalid or malformed CQL query string: " + e.getMessage());
             throw ire;
         }
     }
-
 }

@@ -18,6 +18,8 @@
 package org.apache.cassandra.cli;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.*;
@@ -31,6 +33,7 @@ import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.CompactionManagerMBean;
 import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.locator.SimpleSnitch;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.thrift.*;
 import org.apache.cassandra.tools.NodeProbe;
@@ -39,7 +42,6 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.thrift.TBaseHelper;
 import org.apache.thrift.TException;
-import org.safehaus.uuid.UUIDGenerator;
 
 // Cli Client Side Library
 public class CliClient extends CliUserHelp
@@ -95,7 +97,8 @@ public class CliClient extends CliUserHelp
         PLACEMENT_STRATEGY,
         STRATEGY_OPTIONS
     }
-    private static final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.SimpleStrategy";
+
+    private static final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.NetworkTopologyStrategy";
 
     private Cassandra.Client thriftClient = null;
     private CliSessionState sessionState  = null;
@@ -192,6 +195,11 @@ public class CliClient extends CliUserHelp
                     break;
                 case CliParser.NODE_CONSISTENCY_LEVEL:
                     executeConsistencyLevelStatement(tree);
+                case CliParser.NODE_THRIFT_INCR:
+                    executeIncr(tree, 1L);
+                    break;
+                case CliParser.NODE_THRIFT_DECR:
+                    executeIncr(tree, -1L);
                     break;
                 case CliParser.NODE_NO_OP:
                     // comment lines come here; they are treated as no ops.
@@ -206,6 +214,10 @@ public class CliClient extends CliUserHelp
         catch (InvalidRequestException e)
         {
             throw new RuntimeException(e.getWhy());
+        }
+        catch (SchemaDisagreementException e)
+        {
+            throw new RuntimeException("schema does not match across nodes, (try again later).");
         }
         catch (Exception e)
         {
@@ -252,7 +264,7 @@ public class CliClient extends CliUserHelp
         SliceRange range = new SliceRange(ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, Integer.MAX_VALUE);
         SlicePredicate predicate = new SlicePredicate().setColumn_names(null).setSlice_range(range);
 
-        int count = thriftClient.get_count(ByteBuffer.wrap(key.getBytes(Charsets.UTF_8)), colParent, predicate, consistencyLevel);
+        int count = thriftClient.get_count(ByteBufferUtil.bytes(key), colParent, predicate, consistencyLevel);
         sessionState.out.printf("%d columns%n", count);
     }
     
@@ -301,8 +313,15 @@ public class CliClient extends CliUserHelp
         if (columnName != null)
             path.setColumn(columnName);
 
-        thriftClient.remove(ByteBuffer.wrap(key.getBytes(Charsets.UTF_8)), path,
-                             FBUtilities.timestampMicros(), consistencyLevel);
+        if (isCounterCF(cfDef))
+        {
+            thriftClient.remove_counter(ByteBufferUtil.bytes(key), path, consistencyLevel);
+        }
+        else
+        {
+            thriftClient.remove(ByteBufferUtil.bytes(key), path,
+                    FBUtilities.timestampMicros(), consistencyLevel);
+        }
         sessionState.out.println(String.format("%s removed.", (columnSpecCnt == 0) ? "row" : "column"));
     }
 
@@ -315,11 +334,19 @@ public class CliClient extends CliUserHelp
             parent.setSuper_column(superColumnName);
 
         SliceRange range = new SliceRange(ByteBufferUtil.EMPTY_BYTE_BUFFER, ByteBufferUtil.EMPTY_BYTE_BUFFER, false, 1000000);
-        List<ColumnOrSuperColumn> columns = thriftClient.get_slice(key, parent, new SlicePredicate().setColumn_names(null).setSlice_range(range), consistencyLevel);
+        SlicePredicate predicate = new SlicePredicate().setColumn_names(null).setSlice_range(range);
 
-        AbstractType validator;
         CfDef cfDef = getCfDef(columnFamily);
         boolean isSuperCF = cfDef.column_type.equals("Super");
+
+        if (isCounterCF(cfDef))
+        {
+            doCounterSlice(keyspace, key, parent, predicate, isSuperCF);
+            return;
+        }
+
+        List<ColumnOrSuperColumn> columns = thriftClient.get_slice(key, parent, predicate, consistencyLevel);
+        AbstractType validator;
 
         // Print out super columns or columns.
         for (ColumnOrSuperColumn cosc : columns)
@@ -328,11 +355,11 @@ public class CliClient extends CliUserHelp
             {
                 SuperColumn superColumn = cosc.super_column;
 
-                sessionState.out.printf("=> (super_column=%s,", formatSuperColumnName(keyspace, columnFamily, superColumn));
+                sessionState.out.printf("=> (super_column=%s,", formatColumnName(keyspace, columnFamily, superColumn.name));
                 for (Column col : superColumn.getColumns())
                 {
                     validator = getValidatorForValue(cfDef, col.getName());
-                    sessionState.out.printf("%n     (column=%s, value=%s, timestamp=%d%s)", formatSubcolumnName(keyspace, columnFamily, col),
+                    sessionState.out.printf("%n     (column=%s, value=%s, timestamp=%d%s)", formatSubcolumnName(keyspace, columnFamily, col.name),
                                                     validator.getString(col.value), col.timestamp,
                                                     col.isSetTtl() ? String.format(", ttl=%d", col.getTtl()) : "");
                 }
@@ -345,14 +372,48 @@ public class CliClient extends CliUserHelp
                 validator = getValidatorForValue(cfDef, column.getName());
 
                 String formattedName = isSuperCF
-                                       ? formatSubcolumnName(keyspace, columnFamily, column)
-                                       : formatColumnName(keyspace, columnFamily, column);
+                                       ? formatSubcolumnName(keyspace, columnFamily, column.name)
+                                       : formatColumnName(keyspace, columnFamily, column.name);
 
                 sessionState.out.printf("=> (column=%s, value=%s, timestamp=%d%s)%n",
                                         formattedName,
                                         validator.getString(column.value),
                                         column.timestamp,
                                         column.isSetTtl() ? String.format(", ttl=%d", column.getTtl()) : "");
+            }
+        }
+        
+        sessionState.out.println("Returned " + columns.size() + " results.");
+    }
+
+    private void doCounterSlice(String keyspace, ByteBuffer key, ColumnParent parent, SlicePredicate predicate, boolean isSuperCF)
+            throws InvalidRequestException, UnavailableException, TimedOutException, TException, IllegalAccessException, NotFoundException, InstantiationException, NoSuchFieldException
+    {
+        String columnFamily = parent.column_family;
+        List<Counter> columns = thriftClient.get_counter_slice(key, parent, predicate, consistencyLevel);
+
+        // Print out super columns or columns.
+        for (Counter cosc : columns)
+        {
+            if (cosc.isSetSuper_column())
+            {
+                CounterSuperColumn superColumn = cosc.super_column;
+
+                sessionState.out.printf("=> (super_column=%s,", formatColumnName(keyspace, columnFamily, superColumn.name));
+                for (CounterColumn col : superColumn.getColumns())
+                {
+                    sessionState.out.printf("%n     (counter=%s, value=%s)", formatSubcolumnName(keyspace, columnFamily, col.name), col.value);
+                }
+                sessionState.out.println(")");
+            }
+            else
+            {
+                CounterColumn column = cosc.column;
+                String formattedName = isSuperCF
+                                       ? formatSubcolumnName(keyspace, columnFamily, column.name)
+                                       : formatColumnName(keyspace, columnFamily, column.name);
+
+                sessionState.out.printf("=> (counter=%s, value=%s)%n", formattedName, column.value);
             }
         }
         
@@ -433,11 +494,18 @@ public class CliClient extends CliUserHelp
         }
 
         AbstractType validator = getValidatorForValue(cfDef, TBaseHelper.byteBufferToByteArray(columnName));
-        
+
         // Perform a get()
         ColumnPath path = new ColumnPath(columnFamily);
         if(superColumnName != null) path.setSuper_column(superColumnName);
         path.setColumn(columnName);
+
+        if (isCounterCF(cfDef))
+        {
+            doGetCounter(key, path);
+            return;
+        }
+
         Column column;
         try
         {
@@ -475,8 +543,8 @@ public class CliClient extends CliUserHelp
         }
 
         String formattedColumnName = isSuper
-                                     ? formatSubcolumnName(keySpace, columnFamily, column)
-                                     : formatColumnName(keySpace, columnFamily, column);
+                                     ? formatSubcolumnName(keySpace, columnFamily, column.name)
+                                     : formatColumnName(keySpace, columnFamily, column.name);
 
         // print results
         sessionState.out.printf("=> (column=%s, value=%s, timestamp=%d%s)%n",
@@ -484,6 +552,32 @@ public class CliClient extends CliUserHelp
                                 valueAsString,
                                 column.timestamp,
                                 column.isSetTtl() ? String.format(", ttl=%d", column.getTtl()) : "");
+    }
+
+    private void doGetCounter(ByteBuffer key, ColumnPath path)
+            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException, IllegalAccessException, InstantiationException, ClassNotFoundException, NoSuchFieldException
+    {
+        boolean isSuper = path.super_column != null;
+
+        CounterColumn column;
+        try
+        {
+            column = thriftClient.get_counter(key, path, consistencyLevel).column;
+        }
+        catch (NotFoundException e)
+        {
+            sessionState.out.println("Value was not found");
+            return;
+        }
+
+        String formattedColumnName = isSuper
+                                     ? formatSubcolumnName(keySpace, path.column_family, column.name)
+                                     : formatColumnName(keySpace, path.column_family, column.name);
+
+        // print results
+        sessionState.out.printf("=> (counter=%s, value=%d)%n",
+                                formattedColumnName,
+                                column.value);
     }
 
     /**
@@ -668,6 +762,75 @@ public class CliClient extends CliUserHelp
         sessionState.out.println("Value inserted.");
     }
 
+    // Execute INCR statement
+    private void executeIncr(Tree statement, long multiplier)
+            throws TException, NotFoundException, InvalidRequestException, UnavailableException, TimedOutException, IllegalAccessException, InstantiationException, ClassNotFoundException, NoSuchFieldException
+    {
+        if (!CliMain.isConnected() || !hasKeySpace())
+            return;
+
+        Tree columnFamilySpec = statement.getChild(0);
+
+        String columnFamily = CliCompiler.getColumnFamily(columnFamilySpec, keyspacesMap.get(keySpace).cf_defs);
+        ByteBuffer key = getKeyAsBytes(columnFamily, columnFamilySpec.getChild(1));
+        int columnSpecCnt = CliCompiler.numColumnSpecifiers(columnFamilySpec);
+        CfDef cfDef = getCfDef(columnFamily);
+        boolean isSuper = cfDef.column_type.equals("Super");
+        
+        byte[] superColumnName = null;
+        ByteBuffer columnName;
+
+        // table.cf['key']['column'] -- incr standard
+        if (columnSpecCnt == 1)
+        {
+            columnName = getColumnName(columnFamily, columnFamilySpec.getChild(2));
+        }
+        // table.cf['key']['column']['column'] -- incr super
+        else if (columnSpecCnt == 2)
+        {
+            superColumnName = getColumnName(columnFamily, columnFamilySpec.getChild(2)).array();
+            columnName = getSubColumnName(columnFamily, columnFamilySpec.getChild(3));
+        }
+        // The parser groks an arbitrary number of these so it is possible to get here.
+        else
+        {
+            sessionState.out.println("Invalid row, super column, or column specification.");
+            return;
+        }
+
+        ColumnParent parent = new ColumnParent(columnFamily);
+        if(superColumnName != null)
+            parent.setSuper_column(superColumnName);
+
+        long value = 1L;
+
+        // children count = 3 mean that we have by in arguments
+        if (statement.getChildCount() == 2)
+        {
+            String byValue = statement.getChild(1).getText();
+
+            try
+            {
+                value = Long.parseLong(byValue);
+            }
+            catch (NumberFormatException e)
+            {
+                sessionState.err.println(String.format("'%s' is an invalid value, should be an integer.", byValue));
+                return;
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException(e.getMessage());
+            }
+        }
+
+        CounterColumn columnToInsert = new CounterColumn(columnName, multiplier * value);
+
+        // do the insert
+        thriftClient.add(key, parent, columnToInsert, consistencyLevel);
+        sessionState.out.printf("Value %s%n", multiplier < 0 ? "decremented." : "incremented.");
+    }
+
     private void executeShowClusterName() throws TException
     {
         if (!CliMain.isConnected())
@@ -835,6 +998,30 @@ public class CliClient extends CliUserHelp
             }
         }
 
+        // using default snitch options if strategy is NetworkTopologyStrategy and no options were set.
+        if (ksDef.getStrategy_class().contains(".NetworkTopologyStrategy"))
+        {
+            Map<String, String> currentStrategyOptions = ksDef.getStrategy_options();
+
+            // adding default data center from SimpleSnitch
+            if (currentStrategyOptions == null || currentStrategyOptions.isEmpty())
+            {
+                SimpleSnitch snitch = new SimpleSnitch();
+                Map<String, String> options = new HashMap<String, String>();
+
+                try
+                {
+                    options.put(snitch.getDatacenter(InetAddress.getLocalHost()), "1");
+                }
+                catch (UnknownHostException e)
+                {
+                    throw new RuntimeException(e.getMessage());
+                }
+
+                ksDef.setStrategy_options(options);
+            }
+        }
+
         return ksDef;
     }
     
@@ -915,6 +1102,9 @@ public class CliClient extends CliUserHelp
             case MAX_COMPACTION_THRESHOLD:
                 cfDef.setMax_compaction_threshold(Integer.parseInt(mValue));
                 break;
+            case REPLICATE_ON_WRITE:
+                cfDef.setReplicate_on_write(Boolean.parseBoolean(mValue));
+                break;
             default:
                 //must match one of the above or we'd throw an exception at the valueOf statement above.
                 assert(false);
@@ -931,9 +1121,10 @@ public class CliClient extends CliUserHelp
      * @throws TException - exception
      * @throws InvalidRequestException - exception
      * @throws NotFoundException - exception
+     * @throws SchemaDisagreementException 
      */
     private void executeDelKeySpace(Tree statement)
-            throws TException, InvalidRequestException, NotFoundException
+            throws TException, InvalidRequestException, NotFoundException, SchemaDisagreementException
     {
         if (!CliMain.isConnected())
             return;
@@ -950,9 +1141,10 @@ public class CliClient extends CliUserHelp
      * @throws TException - exception
      * @throws InvalidRequestException - exception
      * @throws NotFoundException - exception
+     * @throws SchemaDisagreementException 
      */
     private void executeDelColumnFamily(Tree statement) 
-            throws TException, InvalidRequestException, NotFoundException
+            throws TException, InvalidRequestException, NotFoundException, SchemaDisagreementException
     {
         if (!CliMain.isConnected() || !hasKeySpace())
             return;
@@ -1319,13 +1511,14 @@ public class CliClient extends CliUserHelp
                 }
                 
                 sessionState.out.printf("      Columns sorted by: %s%s%n", cf_def.comparator_type, cf_def.column_type.equals("Super") ? "/" + cf_def.subcomparator_type : "");
-                sessionState.out.printf("      Row cache size / save period: %s/%s%n", cf_def.row_cache_size, cf_def.row_cache_save_period_in_seconds);
-                sessionState.out.printf("      Key cache size / save period: %s/%s%n", cf_def.key_cache_size, cf_def.key_cache_save_period_in_seconds);
-                sessionState.out.printf("      Memtable thresholds: %s/%s/%s%n",
+                sessionState.out.printf("      Row cache size / save period in seconds: %s/%s%n", cf_def.row_cache_size, cf_def.row_cache_save_period_in_seconds);
+                sessionState.out.printf("      Key cache size / save period in seconds: %s/%s%n", cf_def.key_cache_size, cf_def.key_cache_save_period_in_seconds);
+                sessionState.out.printf("      Memtable thresholds: %s/%s/%s (millions of ops/minutes/MB)%n",
                                 cf_def.memtable_operations_in_millions, cf_def.memtable_throughput_in_mb, cf_def.memtable_flush_after_mins);
                 sessionState.out.printf("      GC grace seconds: %s%n", cf_def.gc_grace_seconds);
                 sessionState.out.printf("      Compaction min/max thresholds: %s/%s%n", cf_def.min_compaction_threshold, cf_def.max_compaction_threshold);
                 sessionState.out.printf("      Read repair chance: %s%n", cf_def.read_repair_chance);
+                sessionState.out.printf("      Replicate on write: %s%n", cf_def.replicate_on_write);
 
                 // if we have connection to the cfMBean established
                 if (cfMBean != null)
@@ -1639,7 +1832,14 @@ public class CliClient extends CliUserHelp
         if (comparator == null) // default comparator is BytesType
             comparator = BytesType.instance;
 
-        return comparator.fromString(object);
+        try
+        {
+            return comparator.fromString(object);
+        }
+        catch (MarshalException e)
+        {
+            throw new RuntimeException(e.toString());
+        }
     }
     
     /**
@@ -1770,7 +1970,7 @@ public class CliClient extends CliUserHelp
         }
 
         // if no validation were set returning simple .getBytes()
-        return ByteBuffer.wrap(columnValue.getBytes());
+        return ByteBufferUtil.bytes(columnValue);
     }
 
     /**
@@ -1870,7 +2070,7 @@ public class CliClient extends CliUserHelp
             {
                 if (validator instanceof TimeUUIDType)
                 {
-                    value = ByteBuffer.wrap(UUIDGenerator.getInstance().generateTimeBasedUUID().asByteArray());
+                    value = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
                 }
                 else if (validator instanceof LexicalUUIDType)
                 {
@@ -1993,7 +2193,7 @@ public class CliClient extends CliUserHelp
 
         for (KeySlice ks : slices)
         {
-            String keyName = (keyComparator == null) ? ByteBufferUtil.string(ks.key, Charsets.UTF_8) : keyComparator.getString(ks.key);
+            String keyName = (keyComparator == null) ? ByteBufferUtil.string(ks.key) : keyComparator.getString(ks.key);
 
             sessionState.out.printf("-------------------%n");
             sessionState.out.printf("RowKey: %s%n", keyName);
@@ -2009,20 +2209,20 @@ public class CliClient extends CliUserHelp
                     validator = getValidatorForValue(columnFamilyDef, col.getName());
 
                     sessionState.out.printf("=> (column=%s, value=%s, timestamp=%d%s)%n",
-                                    formatColumnName(keySpace, columnFamilyName, col), validator.getString(col.value), col.timestamp,
+                                    formatColumnName(keySpace, columnFamilyName, col.name), validator.getString(col.value), col.timestamp,
                                     col.isSetTtl() ? String.format(", ttl=%d", col.getTtl()) : "");
                 }
                 else if (columnOrSuperColumn.super_column != null)
                 {
                     SuperColumn superCol = columnOrSuperColumn.super_column;
-                    sessionState.out.printf("=> (super_column=%s,", formatSuperColumnName(keySpace, columnFamilyName, superCol));
+                    sessionState.out.printf("=> (super_column=%s,", formatColumnName(keySpace, columnFamilyName, superCol.name));
 
                     for (Column col : superCol.columns)
                     {
                         validator = getValidatorForValue(columnFamilyDef, col.getName());
 
                         sessionState.out.printf("%n     (column=%s, value=%s, timestamp=%d%s)",
-                                        formatSubcolumnName(keySpace, columnFamilyName, col), validator.getString(col.value), col.timestamp,
+                                        formatSubcolumnName(keySpace, columnFamilyName, col.name), validator.getString(col.value), col.timestamp,
                                         col.isSetTtl() ? String.format(", ttl=%d", col.getTtl()) : "");
                     }
 
@@ -2034,25 +2234,18 @@ public class CliClient extends CliUserHelp
         sessionState.out.printf("%n%d Row%s Returned.%n", slices.size(), (slices.size() > 1 ? "s" : ""));
     }
 
-    // returnsub-columnmn name in human-readable format
-    private String formatSuperColumnName(String keyspace, String columnFamily, SuperColumn column)
-            throws NotFoundException, TException, IllegalAccessException, InstantiationException, NoSuchFieldException
-    {
-        return getFormatTypeForColumn(getCfDef(keyspace,columnFamily).comparator_type).getString(column.name);
-    }
-
     // retuns sub-column name in human-readable format
-    private String formatSubcolumnName(String keyspace, String columnFamily, Column subcolumn)
+    private String formatSubcolumnName(String keyspace, String columnFamily, ByteBuffer name)
             throws NotFoundException, TException, IllegalAccessException, InstantiationException, NoSuchFieldException
     {
-        return getFormatTypeForColumn(getCfDef(keyspace,columnFamily).subcomparator_type).getString(subcolumn.name);
+        return getFormatTypeForColumn(getCfDef(keyspace,columnFamily).subcomparator_type).getString(name);
     }
 
     // retuns column name in human-readable format
-    private String formatColumnName(String keyspace, String columnFamily, Column column)
+    private String formatColumnName(String keyspace, String columnFamily, ByteBuffer name)
             throws NotFoundException, TException, IllegalAccessException, InstantiationException, NoSuchFieldException
     {
-        return getFormatTypeForColumn(getCfDef(keyspace, columnFamily).comparator_type).getString(ByteBuffer.wrap(column.getName()));
+        return getFormatTypeForColumn(getCfDef(keyspace, columnFamily).comparator_type).getString(name);
     }
 
     private ByteBuffer getColumnName(String columnFamily, Tree columnTree)
@@ -2134,5 +2327,15 @@ public class CliClient extends CliUserHelp
         {
             return a.name.compareTo(b.name);
         }
+    }
+
+    private boolean isCounterCF(CfDef cfdef)
+    {
+        String defaultValidator = cfdef.default_validation_class;
+        if (defaultValidator != null && !defaultValidator.isEmpty())
+        {
+            return (getFormatTypeForColumn(defaultValidator) instanceof CounterColumnType);
+        }
+        return false;
     }
 }

@@ -28,7 +28,10 @@ import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimap;
+import org.apache.cassandra.net.CachingMessageProducer;
+import org.apache.cassandra.net.MessageProducer;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
@@ -49,8 +52,12 @@ import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.net.IAsyncCallback;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.thrift.*;
 import org.apache.cassandra.utils.*;
+import org.apache.cassandra.thrift.ConsistencyLevel;
+import org.apache.cassandra.thrift.IndexClause;
+import org.apache.cassandra.thrift.InvalidRequestException;
+import org.apache.cassandra.thrift.SlicePredicate;
+import org.apache.cassandra.thrift.UnavailableException;
 
 import static com.google.common.base.Charsets.UTF_8;
 
@@ -62,13 +69,20 @@ public class StorageProxy implements StorageProxyMBean
     private static final LatencyTracker readStats = new LatencyTracker();
     private static final LatencyTracker rangeStats = new LatencyTracker();
     private static final LatencyTracker writeStats = new LatencyTracker();
+    // we keep counter latency appart from normal write because write with
+    // consistency > CL.ONE involves a read in the write path
+    private static final LatencyTracker counterWriteStats = new LatencyTracker();
     private static boolean hintedHandoffEnabled = DatabaseDescriptor.hintedHandoffEnabled();
     private static int maxHintWindow = DatabaseDescriptor.getMaxHintWindow();
     private static final String UNREACHABLE = "UNREACHABLE";
 
+    private static final WritePerformer standardWritePerformer;
+    private static final WritePerformer counterWritePerformer;
+
     public static final StorageProxy instance = new StorageProxy();
 
     private StorageProxy() {}
+
     static
     {
         MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
@@ -80,6 +94,23 @@ public class StorageProxy implements StorageProxyMBean
         {
             throw new RuntimeException(e);
         }
+
+        standardWritePerformer = new WritePerformer()
+        {
+            public void apply(IMutation mutation, Multimap<InetAddress, InetAddress> hintedEndpoints, IWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws IOException
+            {
+                assert mutation instanceof RowMutation;
+                sendToHintedEndpoints((RowMutation) mutation, hintedEndpoints, responseHandler, localDataCenter, true, consistency_level);
+            }
+        };
+
+        counterWritePerformer = new WritePerformer()
+        {
+            public void apply(IMutation mutation, Multimap<InetAddress, InetAddress> hintedEndpoints, IWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws IOException
+            {
+                applyCounterMutation(mutation, hintedEndpoints, responseHandler, localDataCenter, consistency_level);
+            }
+        };
     }
 
     /**
@@ -93,107 +124,136 @@ public class StorageProxy implements StorageProxyMBean
     */
     public static void mutate(List<RowMutation> mutations, ConsistencyLevel consistency_level) throws UnavailableException, TimeoutException
     {
+        write(mutations, consistency_level, standardWritePerformer, true);
+    }
+
+    /**
+     * Perform the write of a batch of mutations given a WritePerformer.
+     * For each mutation, gather the list of write endpoints, apply locally and/or
+     * forward the mutation to said write endpoint (deletaged to the actual
+     * WritePerformer) and wait for the responses based on consistency level.
+     *
+     * @param mutations the mutations to be applied
+     * @param consistency_level the consistency level for the write operation
+     * @param performer the WritePerformer in charge of appliying the mutation
+     * given the list of write endpoints (either standardWritePerformer for
+     * standard writes or counterWritePerformer for counter writes).
+     * @param updateStats whether or not to update the writeStats. This must be
+     * true for standard writes but false for counter writes as the latency of
+     * the latter is tracked in mutateCounters() by counterWriteStats.
+     */
+    public static void write(List<? extends IMutation> mutations, ConsistencyLevel consistency_level, WritePerformer performer, boolean updateStats) throws UnavailableException, TimeoutException
+    {
+        final String localDataCenter = DatabaseDescriptor.getEndpointSnitch().getDatacenter(FBUtilities.getLocalAddress());
+
         long startTime = System.nanoTime();
         List<IWriteResponseHandler> responseHandlers = new ArrayList<IWriteResponseHandler>();
 
-        RowMutation mostRecentRowMutation = null;
-        StorageService ss = StorageService.instance;
-        String localDataCenter = DatabaseDescriptor.getEndpointSnitch().getDatacenter(FBUtilities.getLocalAddress());
-        
+        IMutation mostRecentMutation = null;
         try
         {
-            for (RowMutation rm : mutations)
+            for (IMutation mutation : mutations)
             {
-                mostRecentRowMutation = rm;
-                String table = rm.getTable();
+                mostRecentMutation = mutation;
+                String table = mutation.getTable();
                 AbstractReplicationStrategy rs = Table.open(table).getReplicationStrategy();
 
-                List<InetAddress> naturalEndpoints = ss.getNaturalEndpoints(table, rm.key());
-                Collection<InetAddress> writeEndpoints = ss.getTokenMetadata().getWriteEndpoints(StorageService.getPartitioner().getToken(rm.key()), table, naturalEndpoints);
+                Collection<InetAddress> writeEndpoints = getWriteEndpoints(table, mutation.key());
                 Multimap<InetAddress, InetAddress> hintedEndpoints = rs.getHintedEndpoints(writeEndpoints);
-                
+
                 final IWriteResponseHandler responseHandler = rs.getWriteResponseHandler(writeEndpoints, hintedEndpoints, consistency_level);
-                
+
                 // exit early if we can't fulfill the CL at this time
                 responseHandler.assureSufficientLiveNodes();
-                
+
                 responseHandlers.add(responseHandler);
-                
-                // Multimap that holds onto all the messages and addresses meant for a specific datacenter
-                Map<String, Multimap<Message, InetAddress>> dcMessages = new HashMap<String, Multimap<Message, InetAddress>>(hintedEndpoints.size());
-                Message unhintedMessage = null;
-
-                for (Map.Entry<InetAddress, Collection<InetAddress>> entry : hintedEndpoints.asMap().entrySet())
-                {
-                    InetAddress destination = entry.getKey();
-                    Collection<InetAddress> targets = entry.getValue();
-
-                    String dc = DatabaseDescriptor.getEndpointSnitch().getDatacenter(destination);
-
-                    if (targets.size() == 1 && targets.iterator().next().equals(destination))
-                    {
-                        // unhinted writes
-                        if (destination.equals(FBUtilities.getLocalAddress()))
-                        {
-                            insertLocal(rm, responseHandler);
-                        }
-                        else
-                        {
-                            // belongs on a different server
-                            if (unhintedMessage == null)
-                                unhintedMessage = rm.makeRowMutationMessage();
-                            if (logger.isDebugEnabled())
-                                logger.debug("insert writing key " + ByteBufferUtil.bytesToHex(rm.key()) + " to " + destination);
-                            
-                            Multimap<Message, InetAddress> messages = dcMessages.get(dc);
-                            if (messages == null)
-                            {
-                               messages = HashMultimap.create();
-                               dcMessages.put(dc, messages);
-                            }
-                            
-                            messages.put(unhintedMessage, destination);
-                        }
-                    }
-                    else
-                    {
-                        // hinted messages are unique, so there is no point to adding a hop by forwarding via another node.
-                        // thus, we use sendRR/sendOneWay directly here.
-                        Message hintedMessage = rm.makeRowMutationMessage();
-                        for (InetAddress target : targets)
-                        {
-                            if (!target.equals(destination))
-                            {
-                                addHintHeader(hintedMessage, target);
-                                if (logger.isDebugEnabled())
-                                    logger.debug("insert writing key " + ByteBufferUtil.bytesToHex(rm.key()) + " to " + destination + " for " + target);
-                            }
-                        }
-                        // non-destination hints are part of the callback and count towards consistency only under CL.ANY
-                        if (writeEndpoints.contains(destination) || consistency_level == ConsistencyLevel.ANY)
-                            MessagingService.instance().sendRR(hintedMessage, destination, responseHandler);
-                        else
-                            MessagingService.instance().sendOneWay(hintedMessage, destination);
-                    }
-                }
-
-                sendMessages(localDataCenter, dcMessages, responseHandler);
+                performer.apply(mutation, hintedEndpoints, responseHandler, localDataCenter, consistency_level);
             }
-                        
             // wait for writes.  throws timeoutexception if necessary
             for (IWriteResponseHandler responseHandler : responseHandlers)
+            {
                 responseHandler.get();
+            }
         }
         catch (IOException e)
         {
-            if (mostRecentRowMutation == null)
-                throw new RuntimeException("no mutations were seen but found an error during write anyway", e);
-            else
-                throw new RuntimeException("error writing key " + ByteBufferUtil.bytesToHex(mostRecentRowMutation.key()), e);
+            assert mostRecentMutation != null;
+            throw new RuntimeException("error writing key " + ByteBufferUtil.bytesToHex(mostRecentMutation.key()), e);
         }
         finally
         {
-            writeStats.addNano(System.nanoTime() - startTime);
+            if (updateStats)
+                writeStats.addNano(System.nanoTime() - startTime);
+        }
+    }
+
+    private static Collection<InetAddress> getWriteEndpoints(String table, ByteBuffer key)
+    {
+        StorageService ss = StorageService.instance;
+        List<InetAddress> naturalEndpoints = ss.getNaturalEndpoints(table, key);
+        return ss.getTokenMetadata().getWriteEndpoints(StorageService.getPartitioner().getToken(key), table, naturalEndpoints);
+    }
+
+    private static void sendToHintedEndpoints(final RowMutation rm, Multimap<InetAddress, InetAddress> hintedEndpoints, IWriteResponseHandler responseHandler, String localDataCenter, boolean insertLocalMessages, ConsistencyLevel consistency_level)
+    throws IOException
+    {
+        // Multimap that holds onto all the messages and addresses meant for a specific datacenter
+        Map<String, Multimap<Message, InetAddress>> dcMessages = new HashMap<String, Multimap<Message, InetAddress>>(hintedEndpoints.size());
+        MessageProducer producer = new CachingMessageProducer(rm);
+
+        for (Map.Entry<InetAddress, Collection<InetAddress>> entry : hintedEndpoints.asMap().entrySet())
+        {
+            InetAddress destination = entry.getKey();
+            Collection<InetAddress> targets = entry.getValue();
+
+            String dc = DatabaseDescriptor.getEndpointSnitch().getDatacenter(destination);
+
+            if (targets.size() == 1 && targets.iterator().next().equals(destination))
+            {
+                // unhinted writes
+                if (destination.equals(FBUtilities.getLocalAddress()))
+                {
+                    if (insertLocalMessages)
+                        insertLocal(rm, responseHandler);
+                }
+                else
+                {
+                    // belongs on a different server
+                    if (logger.isDebugEnabled())
+                        logger.debug("insert writing key " + ByteBufferUtil.bytesToHex(rm.key()) + " to " + destination);
+
+                    Multimap<Message, InetAddress> messages = dcMessages.get(dc);
+                    if (messages == null)
+                    {
+                       messages = HashMultimap.create();
+                       dcMessages.put(dc, messages);
+                    }
+
+                    messages.put(producer.getMessage(Gossiper.instance.getVersion(destination)), destination);
+                }
+            }
+            else
+            {
+                // hinted messages are unique, so there is no point to adding a hop by forwarding via another node.
+                // thus, we use sendRR/sendOneWay directly here.
+                Message hintedMessage = rm.getMessage(Gossiper.instance.getVersion(destination));
+                for (InetAddress target : targets)
+                {
+                    if (!target.equals(destination))
+                    {
+                        addHintHeader(hintedMessage, target);
+                        if (logger.isDebugEnabled())
+                            logger.debug("insert writing key " + ByteBufferUtil.bytesToHex(rm.key()) + " to " + destination + " for " + target);
+                    }
+                }
+                // non-destination hints are part of the callback and count towards consistency only under CL.ANY
+                if (targets.contains(destination) || consistency_level == ConsistencyLevel.ANY)
+                    MessagingService.instance().sendRR(hintedMessage, destination, responseHandler);
+                else
+                    MessagingService.instance().sendOneWay(hintedMessage, destination);
+            }
+
+            sendMessages(localDataCenter, dcMessages, responseHandler);
         }
     }
 
@@ -270,8 +330,132 @@ public class StorageProxy implements StorageProxyMBean
         {
             public void runMayThrow() throws IOException
             {
-                rm.deepCopy().apply();
+                rm.localCopy().apply();
                 responseHandler.response(null);
+            }
+        };
+        StageManager.getStage(Stage.MUTATION).execute(runnable);
+    }
+
+    /**
+     * The equivalent of mutate() for counters.
+     * (Note that each CounterMutation ship the consistency level)
+     *
+     * A counter mutation needs to first be applied to a replica (that we'll call the leader for the mutation) before being
+     * replicated to the other endpoint. To achieve so, there is two case:
+     *   1) the coordinator host is a replica: we proceed to applying the update locally and replicate throug
+     *   applyCounterMutationOnLeader
+     *   2) the coordinator is not a replica: we forward the (counter)mutation to a chosen replica (that will proceed through
+     *   applyCounterMutationOnLeader upon receive) and wait for its acknowledgment.
+     *
+     * Implementation note: We check if we can fulfill the CL on the coordinator host even if he is not a replica to allow
+     * quicker response and because the WriteResponseHandlers don't make it easy to send back an error. We also always gather
+     * the write latencies at the coordinator node to make gathering point similar to the case of standard writes.
+     */
+    public static void mutateCounters(List<CounterMutation> mutations) throws UnavailableException, TimeoutException
+    {
+        long startTime = System.nanoTime();
+        ArrayList<IWriteResponseHandler> responseHandlers = new ArrayList<IWriteResponseHandler>();
+
+        CounterMutation mostRecentMutation = null;
+        StorageService ss = StorageService.instance;
+
+        try
+        {
+            for (CounterMutation cm : mutations)
+            {
+                mostRecentMutation = cm;
+                InetAddress endpoint = findSuitableEndpoint(cm.getTable(), cm.key());
+
+                if (endpoint.equals(FBUtilities.getLocalAddress()))
+                {
+                    applyCounterMutationOnLeader(cm);
+                }
+                else
+                {
+                    // Exit now if we can't fulfill the CL here instead of forwarding to the leader replica
+                    String table = cm.getTable();
+                    AbstractReplicationStrategy rs = Table.open(table).getReplicationStrategy();
+                    Collection<InetAddress> writeEndpoints = getWriteEndpoints(table, cm.key());
+                    Multimap<InetAddress, InetAddress> hintedEndpoints = rs.getHintedEndpoints(writeEndpoints);
+                    rs.getWriteResponseHandler(writeEndpoints, hintedEndpoints, cm.consistency()).assureSufficientLiveNodes();
+
+                    // Forward the actual update to the chosen leader replica
+                    IWriteResponseHandler responseHandler = WriteResponseHandler.create(endpoint);
+                    responseHandlers.add(responseHandler);
+
+                    Message message = cm.makeMutationMessage(Gossiper.instance.getVersion(endpoint));
+                    if (logger.isDebugEnabled())
+                        logger.debug("forwarding counter update of key " + ByteBufferUtil.bytesToHex(cm.key()) + " to " + endpoint);
+                    MessagingService.instance().sendRR(message, endpoint, responseHandler);
+                }
+            }
+            // wait for writes.  throws timeoutexception if necessary
+            for (IWriteResponseHandler responseHandler : responseHandlers)
+            {
+                responseHandler.get();
+            }
+        }
+        catch (IOException e)
+        {
+            if (mostRecentMutation == null)
+                throw new RuntimeException("no mutations were seen but found an error during write anyway", e);
+            else
+                throw new RuntimeException("error writing key " + ByteBufferUtil.bytesToHex(mostRecentMutation.key()), e);
+        }
+        finally
+        {
+            counterWriteStats.addNano(System.nanoTime() - startTime);
+        }
+    }
+
+    private static InetAddress findSuitableEndpoint(String table, ByteBuffer key) throws UnavailableException
+    {
+        List<InetAddress> endpoints = StorageService.instance.getLiveNaturalEndpoints(table, key);
+        DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getLocalAddress(), endpoints);
+        if (endpoints.isEmpty())
+            throw new UnavailableException();
+        return endpoints.get(0);
+    }
+
+    // Must be called on a replica of the mutation. This replica becomes the
+    // leader of this mutation.
+    public static void applyCounterMutationOnLeader(CounterMutation cm) throws UnavailableException, TimeoutException, IOException
+    {
+        write(Collections.singletonList(cm), cm.consistency(), counterWritePerformer, false);
+    }
+
+    private static void applyCounterMutation(final IMutation mutation, final Multimap<InetAddress, InetAddress> hintedEndpoints, final IWriteResponseHandler responseHandler, final String localDataCenter, final ConsistencyLevel consistency_level)
+    {
+        // we apply locally first, then send it to other replica
+        if (logger.isDebugEnabled())
+            logger.debug("insert writing local & replicate " + mutation.toString(true));
+
+        Runnable runnable = new WrappedRunnable()
+        {
+            public void runMayThrow() throws IOException
+            {
+                assert mutation instanceof CounterMutation;
+                final CounterMutation cm = (CounterMutation) mutation;
+
+                // apply mutation
+                cm.apply();
+
+                responseHandler.response(null);
+
+                if (cm.shouldReplicateOnWrite())
+                {
+                    // We do the replication on another stage because it involves a read (see CM.makeReplicationMutation)
+                    // and we want to avoid blocking too much the MUTATION stage
+                    StageManager.getStage(Stage.REPLICATE_ON_WRITE).execute(new WrappedRunnable()
+                    {
+                        public void runMayThrow() throws IOException
+                        {
+                            // send mutation to other replica
+                            sendToHintedEndpoints(cm.makeReplicationMutation(), hintedEndpoints, responseHandler, localDataCenter, false, consistency_level);
+                        }
+                    });
+                }
             }
         };
         StageManager.getStage(Stage.MUTATION).execute(runnable);
@@ -347,15 +531,14 @@ public class StorageProxy implements StorageProxyMBean
             }
             else
             {
-                Message message = command.makeReadMessage();
                 if (logger.isDebugEnabled())
                     logger.debug("reading data from " + dataPoint);
-                MessagingService.instance().sendRR(message, dataPoint, handler);
+                MessagingService.instance().sendRR(command, dataPoint, handler);
             }
 
             // We lazy-construct the digest Message object since it may not be necessary if we
             // are doing a local digest read, or no digest reads at all.
-            Message digestMessage = null;
+            MessageProducer producer = new CachingMessageProducer(digestCommand);
             for (InetAddress digestPoint : handler.endpoints.subList(1, handler.endpoints.size()))
             {
                 if (digestPoint.equals(FBUtilities.getLocalAddress()))
@@ -366,11 +549,9 @@ public class StorageProxy implements StorageProxyMBean
                 }
                 else
                 {
-                    if (digestMessage == null)
-                        digestMessage = digestCommand.makeReadMessage();
                     if (logger.isDebugEnabled())
                         logger.debug("reading digest for from " + digestPoint);
-                    MessagingService.instance().sendRR(digestMessage, digestPoint, handler);
+                    MessagingService.instance().sendRR(producer, digestPoint, handler);
                 }
             }
 
@@ -401,9 +582,8 @@ public class StorageProxy implements StorageProxyMBean
 
                 RowRepairResolver resolver = new RowRepairResolver(command.table, command.key);
                 RepairCallback<Row> repairHandler = new RepairCallback<Row>(resolver, handler.endpoints);
-                Message messageRepair = command.makeReadMessage();
                 for (InetAddress endpoint : handler.endpoints)
-                    MessagingService.instance().sendRR(messageRepair, endpoint, repairHandler);
+                    MessagingService.instance().sendRR(command, endpoint, repairHandler);
 
                 if (repairResponseHandlers == null)
                     repairResponseHandlers = new ArrayList<RepairCallback<Row>>();
@@ -455,7 +635,7 @@ public class StorageProxy implements StorageProxyMBean
             handler.response(result);
         }
     }
-    
+
     static <T> ReadCallback<T> getReadCallback(IResponseResolver<T> resolver, IReadCommand command, ConsistencyLevel consistencyLevel, List<InetAddress> endpoints)
     {
         if (consistencyLevel.equals(ConsistencyLevel.LOCAL_QUORUM) || consistencyLevel.equals(ConsistencyLevel.EACH_QUORUM))
@@ -485,32 +665,31 @@ public class StorageProxy implements StorageProxyMBean
             {
                 List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(command.keyspace, range.right);
 
-                if (consistency_level == ConsistencyLevel.ONE && liveEndpoints.contains(FBUtilities.getLocalAddress())) 
+                if (consistency_level == ConsistencyLevel.ONE && liveEndpoints.contains(FBUtilities.getLocalAddress()))
                 {
                     if (logger.isDebugEnabled())
                         logger.debug("local range slice");
                     ColumnFamilyStore cfs = Table.open(command.keyspace).getColumnFamilyStore(command.column_family);
-                    try 
+                    try
                     {
                         rows.addAll(cfs.getRangeSlice(command.super_column,
                                                     range,
                                                     command.max_keys,
                                                     QueryFilter.getFilter(command.predicate, cfs.getComparator())));
-                    } 
-                    catch (ExecutionException e) 
+                    }
+                    catch (ExecutionException e)
                     {
                         throw new RuntimeException(e.getCause());
-                    } 
-                    catch (InterruptedException e) 
+                    }
+                    catch (InterruptedException e)
                     {
                         throw new AssertionError(e);
-                    }           
+                    }
                 }
-                else 
+                else
                 {
                     DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getLocalAddress(), liveEndpoints);
                     RangeSliceCommand c2 = new RangeSliceCommand(command.keyspace, command.column_family, command.super_column, command.predicate, range, command.max_keys);
-                    Message message = c2.getMessage();
 
                     // collect replies and resolve according to consistency level
                     RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(command.keyspace, liveEndpoints);
@@ -518,29 +697,29 @@ public class StorageProxy implements StorageProxyMBean
                     handler.assureSufficientLiveNodes();
                     for (InetAddress endpoint : liveEndpoints)
                     {
-                        MessagingService.instance().sendRR(message, endpoint, handler);
+                        MessagingService.instance().sendRR(c2, endpoint, handler);
                         if (logger.isDebugEnabled())
                             logger.debug("reading " + c2 + " from " + endpoint);
                     }
 
                     // if we're done, great, otherwise, move to the next range
-                    try 
+                    try
                     {
-                        if (logger.isDebugEnabled()) 
+                        if (logger.isDebugEnabled())
                         {
-                            for (Row row : handler.get()) 
+                            for (Row row : handler.get())
                             {
                                 logger.debug("range slices read " + row.key);
                             }
                         }
                         rows.addAll(handler.get());
-                    } 
-                    catch (DigestMismatchException e) 
+                    }
+                    catch (DigestMismatchException e)
                     {
                         throw new AssertionError(e); // no digests in range slices yet
                     }
                 }
-            
+
                 if (rows.size() >= command.max_keys)
                     break;
             }
@@ -553,7 +732,7 @@ public class StorageProxy implements StorageProxyMBean
     }
 
     /**
-     * initiate a request/response session with each live node to check whether or not everybody is using the same 
+     * initiate a request/response session with each live node to check whether or not everybody is using the same
      * migration id. This is useful for determining if a schema change has propagated through the cluster. Disagreement
      * is assumed if any node fails to respond.
      */
@@ -583,7 +762,10 @@ public class StorageProxy implements StorageProxyMBean
         // an empty message acts as a request to the SchemaCheckVerbHandler.
         for (InetAddress endpoint : liveHosts)
         {
-            Message message = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.SCHEMA_CHECK, ArrayUtils.EMPTY_BYTE_ARRAY);
+            Message message = new Message(FBUtilities.getLocalAddress(), 
+                                          StorageService.Verb.SCHEMA_CHECK, 
+                                          ArrayUtils.EMPTY_BYTE_ARRAY, 
+                                          Gossiper.instance.getVersion(endpoint));
             MessagingService.instance().sendRR(message, endpoint, cb);
         }
 
@@ -591,19 +773,17 @@ public class StorageProxy implements StorageProxyMBean
         {
             // wait for as long as possible. timeout-1s if possible.
             latch.await(DatabaseDescriptor.getRpcTimeout(), TimeUnit.MILLISECONDS);
-        } 
-        catch (InterruptedException ex) 
+        }
+        catch (InterruptedException ex)
         {
             throw new AssertionError("This latch shouldn't have been interrupted.");
         }
-        
+
         logger.debug("My version is " + myVersion);
-        
+
         // maps versions to hosts that are on that version.
         Map<String, List<String>> results = new HashMap<String, List<String>>();
-        Set<InetAddress> allHosts = new HashSet<InetAddress>();
-        allHosts.addAll(Gossiper.instance.getLiveMembers());
-        allHosts.addAll(Gossiper.instance.getUnreachableMembers());
+        Iterable<InetAddress> allHosts = Iterables.concat(Gossiper.instance.getLiveMembers(), Gossiper.instance.getUnreachableMembers());
         for (InetAddress host : allHosts)
         {
             UUID version = versions.get(host);
@@ -626,10 +806,10 @@ public class StorageProxy implements StorageProxyMBean
             for (String host : entry.getValue())
                 logger.debug("%s disagrees (%s)", host, entry.getKey());
         }
-        
+
         if (results.size() == 1)
             logger.debug("Schemas are in agreement.");
-        
+
         return results;
     }
 
@@ -747,6 +927,31 @@ public class StorageProxy implements StorageProxyMBean
         return writeStats.getRecentLatencyHistogramMicros();
     }
 
+    public long getCounterWriteOperations()
+    {
+        return counterWriteStats.getOpCount();
+    }
+
+    public long getTotalCounterWriteLatencyMicros()
+    {
+        return counterWriteStats.getTotalLatencyMicros();
+    }
+
+    public double getRecentCounterWriteLatencyMicros()
+    {
+        return counterWriteStats.getRecentLatencyMicros();
+    }
+
+    public long[] getTotalCounterWriteLatencyHistogramMicros()
+    {
+        return counterWriteStats.getTotalLatencyHistogramMicros();
+    }
+
+    public long[] getRecentCounterWriteLatencyHistogramMicros()
+    {
+        return counterWriteStats.getRecentLatencyHistogramMicros();
+    }
+
     public static List<Row> scan(final String keyspace, String column_family, IndexClause index_clause, SlicePredicate column_predicate, ConsistencyLevel consistency_level)
     throws IOException, TimeoutException, UnavailableException
     {
@@ -776,10 +981,10 @@ public class StorageProxy implements StorageProxyMBean
             handler.assureSufficientLiveNodes();
 
             IndexScanCommand command = new IndexScanCommand(keyspace, column_family, index_clause, column_predicate, range);
-            Message message = command.getMessage();
+            MessageProducer producer = new CachingMessageProducer(command);
             for (InetAddress endpoint : liveEndpoints)
             {
-                MessagingService.instance().sendRR(message, endpoint, handler);
+                MessagingService.instance().sendRR(producer, endpoint, handler);
                 if (logger.isDebugEnabled())
                     logger.debug("reading " + command + " from " + endpoint);
             }
@@ -863,10 +1068,10 @@ public class StorageProxy implements StorageProxyMBean
 
         // Send out the truncate calls and track the responses with the callbacks.
         logger.debug("Starting to send truncate messages to hosts {}", allEndpoints);
-        Truncation truncation = new Truncation(keyspace, cfname);
-        Message message = truncation.makeTruncationMessage();
+        final Truncation truncation = new Truncation(keyspace, cfname);
+        MessageProducer producer = new CachingMessageProducer(truncation);
         for (InetAddress endpoint : allEndpoints)
-            MessagingService.instance().sendRR(message, endpoint, responseHandler);
+            MessagingService.instance().sendRR(producer, endpoint, responseHandler);
 
         // Wait for all
         logger.debug("Sent all truncate messages, now waiting for {} responses", blockFor);
@@ -881,5 +1086,10 @@ public class StorageProxy implements StorageProxyMBean
     private static boolean isAnyHostDown()
     {
         return !Gossiper.instance.getUnreachableMembers().isEmpty();
+    }
+
+    private interface WritePerformer
+    {
+        public void apply(IMutation mutation, Multimap<InetAddress, InetAddress> hintedEndpoints, IWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws IOException;
     }
 }

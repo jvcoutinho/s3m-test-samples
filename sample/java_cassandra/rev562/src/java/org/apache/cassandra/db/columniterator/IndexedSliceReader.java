@@ -21,15 +21,12 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 
 import com.google.common.collect.AbstractIterator;
 
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.OnDiskAtom;
-import org.apache.cassandra.db.RowIndexEntry;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
@@ -82,13 +79,13 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
                 if (indexes.isEmpty())
                 {
                     setToRowStart(sstable, indexEntry, input);
-                    this.emptyColumnFamily = ColumnFamily.create(sstable.metadata);
+                    this.emptyColumnFamily = EmptyColumns.factory.create(sstable.metadata);
                     emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, version));
                     fetcher = new SimpleBlockFetcher();
                 }
                 else
                 {
-                    this.emptyColumnFamily = ColumnFamily.create(sstable.metadata);
+                    this.emptyColumnFamily = EmptyColumns.factory.create(sstable.metadata);
                     emptyColumnFamily.delete(indexEntry.deletionInfo());
                     fetcher = new IndexedBlockFetcher(indexEntry.position);
                 }
@@ -98,7 +95,7 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
                 setToRowStart(sstable, indexEntry, input);
                 IndexHelper.skipSSTableBloomFilter(file, version);
                 this.indexes = IndexHelper.deserializeIndex(file);
-                this.emptyColumnFamily = ColumnFamily.create(sstable.metadata);
+                this.emptyColumnFamily = EmptyColumns.factory.create(sstable.metadata);
                 emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, version));
                 fetcher = indexes.isEmpty()
                         ? new SimpleBlockFetcher()
@@ -354,7 +351,9 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
             if (file == null)
                 file = originalInput == null ? sstable.getFileDataInput(positionToSeek) : originalInput;
 
-            OnDiskAtom.Serializer atomSerializer = emptyColumnFamily.getOnDiskSerializer();
+            // Give a bogus atom count since we'll deserialize as long as we're
+            // within the index block but we don't know how much atom is there
+            Iterator<OnDiskAtom> atomIterator = emptyColumnFamily.metadata().getOnDiskIterator(file, Integer.MAX_VALUE, sstable.descriptor.version);
             file.seek(positionToSeek);
             FileMark mark = file.mark();
 
@@ -367,7 +366,7 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
             {
                 // Only fetch a new column if we haven't dealt with the previous one.
                 if (column == null)
-                    column = atomSerializer.deserializeFromSSTable(file, sstable.descriptor.version);
+                    column = atomIterator.next();
 
                 // col is before slice
                 // (If in slice, don't bother checking that until we change slice)
@@ -436,12 +435,10 @@ class IndexedSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskA
             // We remenber when we are whithin a slice to avoid some comparison
             boolean inSlice = false;
 
-            OnDiskAtom.Serializer atomSerializer = emptyColumnFamily.getOnDiskSerializer();
-            int columns = file.readInt();
-
-            for (int i = 0; i < columns; i++)
+            Iterator<OnDiskAtom> atomIterator = emptyColumnFamily.metadata().getOnDiskIterator(file, file.readInt(), sstable.descriptor.version);
+            while (atomIterator.hasNext())
             {
-                OnDiskAtom column = atomSerializer.deserializeFromSSTable(file, sstable.descriptor.version);
+                OnDiskAtom column = atomIterator.next();
 
                 // col is before slice
                 // (If in slice, don't bother checking that until we change slice)

@@ -40,7 +40,6 @@ import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.IDiskAtomFilter;
 import org.apache.cassandra.db.filter.NamesQueryFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.UUIDType;
@@ -135,25 +134,23 @@ public class BatchlogManager implements BatchlogManagerMBean
         ByteBuffer writtenAt = LongType.instance.decompose(timestamp / 1000);
         ByteBuffer data = serializeRowMutations(mutations);
 
-        ColumnFamily cf = ColumnFamily.create(CFMetaData.BatchlogCf);
-        cf.addColumn(new Column(WRITTEN_AT, writtenAt, timestamp));
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(CFMetaData.BatchlogCf);
         cf.addColumn(new Column(DATA, data, timestamp));
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, UUIDType.instance.decompose(uuid));
-        rm.add(cf);
+        cf.addColumn(new Column(WRITTEN_AT, writtenAt, timestamp));
 
-        return rm;
+        return new RowMutation(Table.SYSTEM_KS, UUIDType.instance.decompose(uuid), cf);
     }
 
     private static ByteBuffer serializeRowMutations(Collection<RowMutation> mutations)
     {
         FastByteArrayOutputStream bos = new FastByteArrayOutputStream();
-        DataOutputStream dos = new DataOutputStream(bos);
+        DataOutputStream out = new DataOutputStream(bos);
 
         try
         {
-            dos.writeInt(mutations.size());
+            out.writeInt(mutations.size());
             for (RowMutation rm : mutations)
-                RowMutation.serializer.serialize(rm, dos, VERSION);
+                RowMutation.serializer.serialize(rm, out, VERSION);
         }
         catch (IOException e)
         {
@@ -177,7 +174,7 @@ public class BatchlogManager implements BatchlogManagerMBean
                 if (row.cf == null || row.cf.isMarkedForDelete())
                     continue;
 
-                IColumn writtenAt = row.cf.getColumn(WRITTEN_AT);
+                Column writtenAt = row.cf.getColumn(WRITTEN_AT);
                 if (writtenAt == null || System.currentTimeMillis() > LongType.instance.compose(writtenAt.value()) + TIMEOUT)
                     replayBatch(row.key);
             }
@@ -199,13 +196,13 @@ public class BatchlogManager implements BatchlogManagerMBean
         logger.debug("Replaying batch {}", uuid);
 
         ColumnFamilyStore store = Table.open(Table.SYSTEM_KS).getColumnFamilyStore(SystemTable.BATCHLOG_CF);
-        QueryFilter filter = QueryFilter.getIdentityFilter(key, new QueryPath(SystemTable.BATCHLOG_CF));
+        QueryFilter filter = QueryFilter.getIdentityFilter(key, SystemTable.BATCHLOG_CF);
         ColumnFamily batch = store.getColumnFamily(filter);
 
         if (batch == null || batch.isMarkedForDelete())
             return;
 
-        IColumn dataColumn = batch.getColumn(DATA);
+        Column dataColumn = batch.getColumn(DATA);
         try
         {
             if (dataColumn != null)
@@ -228,7 +225,7 @@ public class BatchlogManager implements BatchlogManagerMBean
             writeHintsForMutation(RowMutation.serializer.deserialize(in, VERSION));
     }
 
-    private static void writeHintsForMutation(RowMutation mutation) throws IOException
+    private static void writeHintsForMutation(RowMutation mutation)
     {
         String table = mutation.getTable();
         Token tk = StorageService.getPartitioner().getToken(mutation.key());
@@ -246,7 +243,7 @@ public class BatchlogManager implements BatchlogManagerMBean
     private static void deleteBatch(DecoratedKey key)
     {
         RowMutation rm = new RowMutation(Table.SYSTEM_KS, key.key);
-        rm.delete(new QueryPath(SystemTable.BATCHLOG_CF), FBUtilities.timestampMicros());
+        rm.delete(SystemTable.BATCHLOG_CF, FBUtilities.timestampMicros());
         rm.apply();
     }
 
@@ -262,7 +259,7 @@ public class BatchlogManager implements BatchlogManagerMBean
         IPartitioner partitioner = StorageService.getPartitioner();
         RowPosition minPosition = partitioner.getMinimumToken().minKeyBound();
         AbstractBounds<RowPosition> range = new Range<RowPosition>(minPosition, minPosition, partitioner);
-        return store.getRangeSlice(null, range, Integer.MAX_VALUE, columnFilter, null);
+        return store.getRangeSlice(range, Integer.MAX_VALUE, columnFilter, null);
     }
 
     /** force flush + compaction to reclaim space from replayed batches */

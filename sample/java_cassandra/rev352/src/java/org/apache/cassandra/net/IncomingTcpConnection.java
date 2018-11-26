@@ -1,6 +1,4 @@
-package org.apache.cassandra.net;
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -9,17 +7,15 @@ package org.apache.cassandra.net;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
+package org.apache.cassandra.net;
 
 import java.io.*;
 import java.net.InetAddress;
@@ -35,18 +31,17 @@ import org.apache.cassandra.streaming.StreamHeader;
 
 public class IncomingTcpConnection extends Thread
 {
-    private static Logger logger = LoggerFactory.getLogger(IncomingTcpConnection.class);
+    private static final Logger logger = LoggerFactory.getLogger(IncomingTcpConnection.class);
 
     private static final int CHUNK_SIZE = 1024 * 1024;
 
-    private Socket socket;
+    private final Socket socket;
     public InetAddress from;
 
     public IncomingTcpConnection(Socket socket)
     {
         assert socket != null;
         this.socket = socket;
-        from = socket.getInetAddress(); // maximize chance of this not being nulled by disconnect
     }
 
     /**
@@ -71,7 +66,7 @@ public class IncomingTcpConnection extends Thread
             logger.debug("Version for {} is {}", from, version);
             if (isStream)
             {
-                if (version == MessagingService.version_)
+                if (version == MessagingService.current_version)
                 {
                     int size = input.readInt();
                     byte[] headerBytes = new byte[size];
@@ -82,7 +77,7 @@ public class IncomingTcpConnection extends Thread
                 {
                     // streaming connections are per-session and have a fixed version.  we can't do anything with a wrong-version stream connection, so drop it.
                     logger.error("Received stream using protocol version {} (my version {}). Terminating connection",
-                                 version, MessagingService.version_);
+                                 version, MessagingService.current_version);
                 }
                 // We are done with this connection....
                 return;
@@ -92,7 +87,8 @@ public class IncomingTcpConnection extends Thread
             input = new DataInputStream(new BufferedInputStream(socket.getInputStream(), 4096));
             // Receive the first message to set the version.
             Message msg = receiveMessage(input, version);
-            if (version > MessagingService.version_)
+            from = msg.getFrom(); // why? see => CASSANDRA-4099
+            if (version > MessagingService.current_version)
             {
                 // save the endpoint so gossip will reconnect to it
                 Gossiper.instance.addSavedEndpoint(from);
@@ -100,7 +96,7 @@ public class IncomingTcpConnection extends Thread
             }
             else if (msg != null)
             {
-                Gossiper.instance.setVersion(msg.getFrom(), version);
+                Gossiper.instance.setVersion(from, version);
                 logger.debug("set version for {} to {}", from, version);
             }
 
@@ -152,7 +148,7 @@ public class IncomingTcpConnection extends Thread
 
         // for non-streaming connections, continue to read the messages (and ignore them) until sender
         // starts sending correct-version messages (which it can do without reconnecting -- version is per-Message)
-        if (version <= MessagingService.version_)
+        if (version <= MessagingService.current_version)
         {
             Message message = new Message(header, body, version);
             MessagingService.instance().receive(message, id);

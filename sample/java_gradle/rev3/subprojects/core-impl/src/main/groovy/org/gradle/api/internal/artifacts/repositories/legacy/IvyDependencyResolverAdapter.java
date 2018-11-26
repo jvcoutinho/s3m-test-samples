@@ -148,14 +148,14 @@ public class IvyDependencyResolverAdapter implements ConfiguredModuleVersionRepo
         } else {
             Class<? extends SoftwareArtifact> artifactType = ((ArtifactTypeResolveContext) context).getArtifactType();
             try {
-                result.resolved(doGetCandidateArtifacts(moduleVersion, artifactType));
+                result.resolved(getCandidateArtifacts(moduleVersion, artifactType));
             } catch (Exception e) {
                 result.failed(new ArtifactResolveException(component.getComponentId(), e));
             }
         }
     }
 
-    public Set<ModuleVersionArtifactMetaData> doGetCandidateArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
+    private Set<ModuleVersionArtifactMetaData> getCandidateArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
         if (artifactType == ComponentMetaDataArtifact.class) {
             Artifact metadataArtifact = module.getDescriptor().getMetadataArtifact();
             return ImmutableSet.of(module.artifact(metadataArtifact));

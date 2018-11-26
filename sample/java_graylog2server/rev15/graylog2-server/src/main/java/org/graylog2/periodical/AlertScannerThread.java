@@ -19,10 +19,13 @@
  */
 package org.graylog2.periodical;
 
+import org.graylog2.ConfigurationException;
 import org.graylog2.Core;
 import org.graylog2.alerts.Alert;
 import org.graylog2.alerts.AlertCondition;
 import org.graylog2.alerts.AlertSender;
+import org.graylog2.notifications.Notification;
+import org.graylog2.plugin.alarms.transports.TransportConfigurationException;
 import org.graylog2.plugin.streams.Stream;
 import org.graylog2.streams.StreamImpl;
 import org.slf4j.Logger;
@@ -73,8 +76,28 @@ public class AlertScannerThread implements Runnable {
                         alert.save();
 
                         // Send alerts.
-                        AlertSender sender = new AlertSender(server);
-                        sender.sendEmails(stream, result);
+                        if (stream.getAlertReceivers().size() > 0) {
+                            try {
+                                AlertSender sender = new AlertSender(server);
+                                sender.sendEmails(stream, result);
+                            } catch (TransportConfigurationException e) {
+                                Notification notification = Notification.buildNow(server)
+                                        .addThisNode()
+                                        .addType(Notification.Type.EMAIL_TRANSPORT_CONFIGURATION_INVALID)
+                                        .addDetail("stream_id", stream.getId())
+                                        .addDetail("exception", e);
+                                notification.publishIfFirst();
+                                LOG.warn("Stream [{}] has alert receivers and is triggered, but email transport is not configured.", stream);
+                            } catch (Exception e) {
+                                Notification notification = Notification.buildNow(server)
+                                        .addThisNode()
+                                        .addType(Notification.Type.EMAIL_TRANSPORT_FAILED)
+                                        .addDetail("stream_id", stream.getId())
+                                        .addDetail("exception", e);
+                                notification.publishIfFirst();
+                                LOG.error("Stream [{}] has alert receivers and is triggered, but sending emails failed", stream, e);
+                            }
+                        }
                     } else {
                         // Alert not triggered.
                         LOG.debug("Alert condition [{}] is triggered.", alertCondition);

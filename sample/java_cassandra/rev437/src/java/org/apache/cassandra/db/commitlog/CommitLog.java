@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db.commitlog;
 
 import java.io.*;
@@ -267,7 +266,7 @@ public class CommitLog implements CommitLogMBean
                     {
                         // assuming version here. We've gone to lengths to make sure what gets written to the CL is in
                         // the current version.  so do make sure the CL is drained prior to upgrading a node.
-                        rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn), MessagingService.version_, IColumnSerializer.Flag.LOCAL);
+                        rm = RowMutation.serializer().deserialize(new DataInputStream(bufIn), MessagingService.current_version, IColumnSerializer.Flag.LOCAL);
                     }
                     catch (UnknownColumnFamilyException ex)
                     {
@@ -399,7 +398,7 @@ public class CommitLog implements CommitLogMBean
      */
     public void add(RowMutation rm) throws IOException
     {
-        long totalSize = RowMutation.serializer().serializedSize(rm, MessagingService.version_) + CommitLogSegment.ENTRY_OVERHEAD_SIZE;
+        long totalSize = RowMutation.serializer().serializedSize(rm, MessagingService.current_version) + CommitLogSegment.ENTRY_OVERHEAD_SIZE;
         if (totalSize > CommitLog.SEGMENT_SIZE)
         {
             logger.warn("Skipping commitlog append of extremely large mutation ({} bytes)", totalSize);

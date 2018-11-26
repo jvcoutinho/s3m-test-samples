@@ -62,7 +62,6 @@ import org.apache.cassandra.net.IAsyncResult;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ResponseVerbHandler;
-import org.apache.cassandra.service.AntiEntropyService.RepairFuture;
 import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
 import org.apache.cassandra.streaming.*;
 import org.apache.cassandra.thrift.Constants;
@@ -475,7 +474,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 List<Future<?>> flushes = new ArrayList<Future<?>>();
                 for (Table table : Table.all())
                 {
-                    KSMetaData ksm = Schema.instance.getKSMetaData(table.name);
+                    KSMetaData ksm = Schema.instance.getKSMetaData(table.getName());
                     if (!ksm.durableWrites)
                     {
                         for (ColumnFamilyStore cfs : table.getColumnFamilyStores())
@@ -528,8 +527,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // gossip snitch infos (local DC and rack)
         gossipSnitchInfo();
         // gossip Schema.emptyVersion forcing immediate check for schema updates (see MigrationManager#maybeScheduleSchemaPull)
-        Schema.instance.updateVersion(); // Ensure we know our own actual Schema UUID in preparation for updates
-        MigrationManager.passiveAnnounce(Schema.emptyVersion);
+        Schema.instance.updateVersionAndAnnounce(); // Ensure we know our own actual Schema UUID in preparation for updates
+
         // add rpc listening info
         Gossiper.instance.addLocalApplicationState(ApplicationState.RPC_ADDRESS, valueFactory.rpcaddress(DatabaseDescriptor.getRpcAddress()));
         if (0 != DatabaseDescriptor.getReplaceTokens().size())
@@ -537,7 +536,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
         LoadBroadcaster.instance.startBroadcasting();
-        MigrationManager.passiveAnnounce(Schema.instance.getVersion());
         Gossiper.instance.addLocalApplicationState(ApplicationState.RELEASE_VERSION, valueFactory.releaseVersion());
 
         HintedHandOffManager.instance.start();
@@ -2226,7 +2224,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(tableName, columnFamilies))
         {
-            logger.debug("Forcing flush on keyspace " + tableName + ", CF " + cfStore.getColumnFamilyName());
+            logger.debug("Forcing flush on keyspace " + tableName + ", CF " + cfStore.name);
             cfStore.forceBlockingFlush();
         }
     }
@@ -2315,7 +2313,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         ArrayList<String> names = new ArrayList<String>();
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(tableName, columnFamilies))
         {
-            names.add(cfStore.getColumnFamilyName());
+            names.add(cfStore.name);
         }
 
         if (names.isEmpty())
@@ -2419,7 +2417,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public List<InetAddress> getNaturalEndpoints(String table, String cf, String key)
     {
-        CFMetaData cfMetaData = Schema.instance.getTableDefinition(table).cfMetaData().get(cf);
+        CFMetaData cfMetaData = Schema.instance.getKSMetaData(table).cfMetaData().get(cf);
         return getNaturalEndpoints(table, getPartitioner().getToken(cfMetaData.getKeyValidator().fromString(key)));
     }
 
@@ -2479,13 +2477,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * @return list of Token ranges (_not_ keys!) together with estimated key count,
      *      breaking up the data this node is responsible for into pieces of roughly keysPerSplit
      */
-    public List<Pair<Range<Token>, Long>> getSplits(String table, String cfName, Range<Token> range, int keysPerSplit)
+    public List<Pair<Range<Token>, Long>> getSplits(String table, String cfName, Range<Token> range, int keysPerSplit, CFMetaData metadata)
     {
         Table t = Table.open(table);
         ColumnFamilyStore cfs = t.getColumnFamilyStore(cfName);
         List<DecoratedKey> keys = keySamples(Collections.singleton(cfs), range);
 
-        final long totalRowCountEstimate = (keys.size() + 1) * DatabaseDescriptor.getIndexInterval();
+        final long totalRowCountEstimate = (keys.size() + 1) * metadata.getIndexInterval();
 
         // splitCount should be much smaller than number of key samples, to avoid huge sampling error
         final int minSamplesPerSplit = 4;
@@ -2493,10 +2491,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         final int splitCount = Math.max(1, Math.min(maxSplitCount, (int)(totalRowCountEstimate / keysPerSplit)));
 
         List<Token> tokens = keysToTokens(range, keys);
-        return getSplits(tokens, splitCount);
+        return getSplits(tokens, splitCount, metadata);
     }
 
-    private List<Pair<Range<Token>, Long>> getSplits(List<Token> tokens, int splitCount)
+    private List<Pair<Range<Token>, Long>> getSplits(List<Token> tokens, int splitCount, CFMetaData metadata)
     {
         final double step = (double) (tokens.size() - 1) / splitCount;
         int prevIndex = 0;
@@ -2506,7 +2504,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             int index = (int) Math.round(i * step);
             Token token = tokens.get(index);
-            long rowCountEstimate = (index - prevIndex) * DatabaseDescriptor.getIndexInterval();
+            long rowCountEstimate = (index - prevIndex) * metadata.getIndexInterval();
             splits.add(Pair.create(new Range<Token>(prevToken, token), rowCountEstimate));
             prevIndex = index;
             prevToken = token;

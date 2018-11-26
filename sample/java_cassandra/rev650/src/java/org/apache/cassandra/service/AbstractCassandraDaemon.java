@@ -24,15 +24,12 @@ import java.net.InetAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Arrays;
-import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.gms.Gossiper;
 import org.apache.log4j.PropertyConfigurator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,14 +38,16 @@ import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Directories;
 import org.apache.cassandra.db.SystemTable;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.migration.Migration;
 import org.apache.cassandra.utils.CLibrary;
 import org.apache.cassandra.utils.Mx4jTool;
-import org.apache.commons.lang.ArrayUtils;
 
 import com.google.common.collect.Iterables;
 
@@ -158,6 +157,13 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
                     : String.format("Directory %s is not accessible.", dataDir);
         }
 
+        // Migrate sstables from pre-#2749 to the correct location
+        if (Directories.sstablesNeedsMigration())
+            Directories.migrateSSTables();
+
+        if (CacheService.instance == null) // should never happen
+            throw new RuntimeException("Failed to initialize Cache Service.");
+
         // check the system table to keep user from shooting self in foot by changing partitioner, cluster name, etc.
         // we do a one-off scrub of the system table first; we can't load the list of the rest of the tables,
         // until system table is opened.
@@ -201,6 +207,12 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
             Table.open(table);
         }
 
+        if (CacheService.instance.keyCache.size() > 0)
+            logger.info("completed pre-loading ({} keys) key cache.", CacheService.instance.keyCache.size());
+
+        if (CacheService.instance.rowCache.size() > 0)
+            logger.info("completed pre-loading ({} keys) row cache.", CacheService.instance.rowCache.size());
+
         try
         {
             GCInspector.instance.start();
@@ -211,7 +223,7 @@ public abstract class AbstractCassandraDaemon implements CassandraDaemon
         }
 
         // replay the log if necessary
-        CommitLog.recover();
+        CommitLog.instance.recover();
 
         // check to see if CL.recovery modified the lastMigrationId. if it did, we need to re apply migrations. this isn't
         // the same as merely reloading the schema (which wouldn't perform file deletion after a DROP). The solution

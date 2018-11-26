@@ -202,14 +202,14 @@ public class NodeProbe
         ssProxy.forceTableFlush(tableName, columnFamilies);
     }
 
-    public void forceTableRepair(String tableName, String... columnFamilies) throws IOException
+    public void forceTableRepair(String tableName, boolean isSequential, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepair(tableName, columnFamilies);
+        ssProxy.forceTableRepair(tableName, isSequential, columnFamilies);
     }
 
-    public void forceTableRepairPrimaryRange(String tableName, String... columnFamilies) throws IOException
+    public void forceTableRepairPrimaryRange(String tableName, boolean isSequential, String... columnFamilies) throws IOException
     {
-        ssProxy.forceTableRepairPrimaryRange(tableName, columnFamilies);
+        ssProxy.forceTableRepairPrimaryRange(tableName, isSequential, columnFamilies);
     }
 
     public void invalidateKeyCache() throws IOException
@@ -266,7 +266,12 @@ public class NodeProbe
     {
         return ssProxy.getOwnership();
     }
-
+    
+    public Map<String, Float> effectiveOwnership(String keyspace) throws ConfigurationException
+    {
+        return ssProxy.effectiveOwnership(keyspace);
+    }
+    
     public CacheServiceMBean getCacheServiceMBean()
     {
         String cachePath = "org.apache.cassandra.db:type=Caches";

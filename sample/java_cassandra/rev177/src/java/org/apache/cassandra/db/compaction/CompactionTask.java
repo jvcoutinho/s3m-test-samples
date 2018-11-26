@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db.compaction;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.Map.Entry;
@@ -41,7 +42,6 @@ import org.apache.cassandra.utils.FBUtilities;
 public class CompactionTask extends AbstractCompactionTask
 {
     protected static final Logger logger = LoggerFactory.getLogger(CompactionTask.class);
-    protected String compactionFileLocation;
     protected final int gcBefore;
     protected boolean isUserDefined;
     protected OperationType compactionType;
@@ -50,7 +50,6 @@ public class CompactionTask extends AbstractCompactionTask
     public CompactionTask(ColumnFamilyStore cfs, Collection<SSTableReader> sstables, final int gcBefore)
     {
         super(cfs, sstables);
-        compactionFileLocation = null;
         this.gcBefore = gcBefore;
         this.isUserDefined = false;
         this.compactionType = OperationType.COMPACTION;
@@ -76,8 +75,8 @@ public class CompactionTask extends AbstractCompactionTask
         if (!isCompactionInteresting(toCompact))
             return 0;
 
-        if (compactionFileLocation == null)
-            compactionFileLocation = cfs.table.getDataFileLocation(cfs.getExpectedCompactedFileSize(toCompact), ensureFreeSpace());
+        File compactionFileLocation = cfs.directories.getDirectoryForNewSSTables(cfs.getExpectedCompactedFileSize(toCompact),
+                                                                                 ensureFreeSpace());
 
         if (compactionFileLocation == null && partialCompactionsAcceptable())
         {
@@ -89,15 +88,15 @@ public class CompactionTask extends AbstractCompactionTask
                 // Note that we have removed files that are still marked as compacting.
                 // This suboptimal but ok since the caller will unmark all the sstables at the end.
                 toCompact.remove(cfs.getMaxSizeFile(toCompact));
-                compactionFileLocation = cfs.table.getDataFileLocation(cfs.getExpectedCompactedFileSize(toCompact),
-                                                                       ensureFreeSpace());
+                compactionFileLocation = cfs.directories.getDirectoryForNewSSTables(cfs.getExpectedCompactedFileSize(toCompact),
+                                                                                    ensureFreeSpace());
             }
+        }
 
-            if (compactionFileLocation == null)
-            {
-                logger.warn("insufficient space to compact even the two smallest files, aborting");
-                return 0;
-            }
+        if (compactionFileLocation == null)
+        {
+            logger.warn("insufficient space to compact even the two smallest files, aborting");
+            return 0;
         }
         assert compactionFileLocation != null;
 
@@ -117,15 +116,16 @@ public class CompactionTask extends AbstractCompactionTask
         long startTime = System.currentTimeMillis();
         long totalkeysWritten = 0;
 
+        AbstractCompactionStrategy strategy = cfs.getCompactionStrategy();
         long estimatedTotalKeys = Math.max(DatabaseDescriptor.getIndexInterval(), SSTableReader.getApproximateKeyCount(toCompact));
-        long estimatedSSTables = Math.max(1, SSTable.getTotalBytes(toCompact) / cfs.getCompactionStrategy().getMaxSSTableSize());
+        long estimatedSSTables = Math.max(1, SSTable.getTotalBytes(toCompact) / strategy.getMaxSSTableSize());
         long keysPerSSTable = (long) Math.ceil((double) estimatedTotalKeys / estimatedSSTables);
         if (logger.isDebugEnabled())
             logger.debug("Expected bloom filter size : " + keysPerSSTable);
 
         AbstractCompactionIterable ci = DatabaseDescriptor.isMultithreadedCompaction()
-                                      ? new ParallelCompactionIterable(compactionType, toCompact, controller)
-                                      : new CompactionIterable(compactionType, toCompact, controller);
+                                      ? new ParallelCompactionIterable(compactionType, strategy.getScanners(toCompact), controller)
+                                      : new CompactionIterable(compactionType, strategy.getScanners(toCompact), controller);
         CloseableIterator<AbstractCompactedRow> iter = ci.iterator();
         Iterator<AbstractCompactedRow> nni = Iterators.filter(iter, Predicates.notNull());
         Map<DecoratedKey, Long> cachedKeys = new HashMap<DecoratedKey, Long>();
@@ -154,6 +154,9 @@ public class CompactionTask extends AbstractCompactionTask
             writers.add(writer);
             while (nni.hasNext())
             {
+                if (ci.isStopped())
+                    throw new CompactionInterruptedException(ci.getCompactionInfo());
+
                 AbstractCompactedRow row = nni.next();
                 if (row.isEmpty())
                     continue;
@@ -264,12 +267,6 @@ public class CompactionTask extends AbstractCompactionTask
                 max = sstable.maxDataAge;
         }
         return max;
-    }
-
-    public CompactionTask compactionFileLocation(String compactionFileLocation)
-    {
-        this.compactionFileLocation = compactionFileLocation;
-        return this;
     }
 
     public CompactionTask isUserDefined(boolean isUserDefined)

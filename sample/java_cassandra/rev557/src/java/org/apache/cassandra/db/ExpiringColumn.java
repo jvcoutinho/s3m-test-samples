@@ -22,9 +22,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 
-import org.apache.log4j.Logger;
-
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -40,8 +40,6 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public class ExpiringColumn extends Column
 {
-    private static Logger logger = Logger.getLogger(ExpiringColumn.class);
-
     private final int localExpirationTime;
     private final int timeToLive;
 
@@ -91,7 +89,7 @@ public class ExpiringColumn extends Column
         try
         {
             buffer.writeLong(timestamp);
-            buffer.writeByte(ColumnSerializer.EXPIRATION_MASK);
+            buffer.writeByte(serializationFlags());
             buffer.writeInt(timeToLive);
         }
         catch (IOException e)
@@ -108,9 +106,9 @@ public class ExpiringColumn extends Column
     }
 
     @Override
-    public IColumn deepCopy()
+    public IColumn localCopy(ColumnFamilyStore cfs)
     {
-        return new ExpiringColumn(ByteBufferUtil.clone(name), ByteBufferUtil.clone(value), timestamp, timeToLive, localExpirationTime);
+        return new ExpiringColumn(cfs.internOrCopy(name), ByteBufferUtil.clone(value), timestamp, timeToLive, localExpirationTime);
     }
     
     @Override
@@ -134,5 +132,21 @@ public class ExpiringColumn extends Column
         {
             throw new IllegalStateException("column is not marked for delete");
         }
+    }
+
+    @Override
+    public int serializationFlags()
+    {
+        return ColumnSerializer.EXPIRATION_MASK;
+    }
+
+    @Override
+    public void validateFields(CFMetaData metadata) throws MarshalException
+    {
+        super.validateFields(metadata);
+        if (timeToLive <= 0)
+            throw new MarshalException("A column TTL should be > 0");
+        if (localExpirationTime < 0)
+            throw new MarshalException("The local expiration time should not be negative");
     }
 }

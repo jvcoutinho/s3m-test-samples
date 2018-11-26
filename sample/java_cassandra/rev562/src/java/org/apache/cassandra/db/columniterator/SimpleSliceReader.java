@@ -19,14 +19,11 @@ package org.apache.cassandra.db.columniterator;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Iterator;
 
 import com.google.common.collect.AbstractIterator;
 
-import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.DeletionInfo;
-import org.apache.cassandra.db.OnDiskAtom;
-import org.apache.cassandra.db.RowIndexEntry;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.sstable.Descriptor;
@@ -38,20 +35,16 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 class SimpleSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskAtomIterator
 {
-    private final SSTableReader sstable;
     private final FileDataInput file;
     private final boolean needsClosing;
     private final ByteBuffer finishColumn;
     private final AbstractType<?> comparator;
     private final ColumnFamily emptyColumnFamily;
-    private final int columns;
-    private int i;
     private FileMark mark;
-    private final OnDiskAtom.Serializer atomSerializer;
+    private final Iterator<OnDiskAtom> atomIterator;
 
     public SimpleSliceReader(SSTableReader sstable, RowIndexEntry indexEntry, FileDataInput input, ByteBuffer finishColumn)
     {
-        this.sstable = sstable;
         this.finishColumn = finishColumn;
         this.comparator = sstable.metadata.comparator;
         try
@@ -75,14 +68,14 @@ class SimpleSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskAt
             Descriptor.Version version = sstable.descriptor.version;
             if (!version.hasPromotedIndexes)
             {
-                IndexHelper.skipSSTableBloomFilter(file, version);
+                if(sstable.descriptor.version.hasRowLevelBF)
+                    IndexHelper.skipSSTableBloomFilter(file, version);
                 IndexHelper.skipIndex(file);
             }
 
-            emptyColumnFamily = ColumnFamily.create(sstable.metadata);
+            emptyColumnFamily = EmptyColumns.factory.create(sstable.metadata);
             emptyColumnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(file, version));
-            atomSerializer = emptyColumnFamily.getOnDiskSerializer();
-            columns = file.readInt();
+            atomIterator = emptyColumnFamily.metadata().getOnDiskIterator(file, file.readInt(), version);
             mark = file.mark();
         }
         catch (IOException e)
@@ -94,14 +87,14 @@ class SimpleSliceReader extends AbstractIterator<OnDiskAtom> implements OnDiskAt
 
     protected OnDiskAtom computeNext()
     {
-        if (i++ >= columns)
+        if (!atomIterator.hasNext())
             return endOfData();
 
         OnDiskAtom column;
         try
         {
             file.reset(mark);
-            column = atomSerializer.deserializeFromSSTable(file, sstable.descriptor.version);
+            column = atomIterator.next();
         }
         catch (IOException e)
         {

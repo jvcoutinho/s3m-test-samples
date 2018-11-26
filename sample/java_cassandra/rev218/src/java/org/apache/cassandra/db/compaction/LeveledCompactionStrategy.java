@@ -1,6 +1,4 @@
-package org.apache.cassandra.db.compaction;
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -9,17 +7,15 @@ package org.apache.cassandra.db.compaction;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
+package org.apache.cassandra.db.compaction;
 
 import java.io.IOException;
 import java.util.*;
@@ -31,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.columniterator.IColumnIterator;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -171,11 +168,42 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
     {
         Multimap<Integer, SSTableReader> byLevel = ArrayListMultimap.create();
         for (SSTableReader sstable : sstables)
-            byLevel.get(manifest.levelOf(sstable)).add(sstable);
+        {
+            int level = manifest.levelOf(sstable);
+            assert level >= 0;
+            byLevel.get(level).add(sstable);
+        }
 
         List<ICompactionScanner> scanners = new ArrayList<ICompactionScanner>(sstables.size());
-        for (Integer level : ImmutableSortedSet.copyOf(byLevel.keySet()))
-            scanners.add(new LeveledScanner(new ArrayList<SSTableReader>(byLevel.get(level)), range));
+        for (Integer level : byLevel.keySet())
+        {
+            if (level == 0)
+            {
+                // L0 makes no guarantees about overlapping-ness.  Just create a direct scanner for each.
+                for (SSTableReader sstable : byLevel.get(level))
+                    scanners.add(sstable.getDirectScanner(range));
+            }
+            else
+            {
+                // Create a LeveledScanner that only opens one sstable at a time, in sorted order
+                ArrayList<SSTableReader> sstables1 = new ArrayList<SSTableReader>(byLevel.get(level));
+                scanners.add(new LeveledScanner(sstables1, range));
+
+                Collections.sort(sstables1, SSTable.sstableComparator);
+                SSTableReader previous = null;
+                for (SSTableReader sstable : sstables1)
+                {
+                    assert previous == null || sstable.first.compareTo(previous.last) > 0 : String.format("%s >= %s in %s and %s for %s in %s",
+                                                                                                          previous.last,
+                                                                                                          sstable.first,
+                                                                                                          previous,
+                                                                                                          sstable,
+                                                                                                          sstable.getColumnFamilyName(),
+                                                                                                          manifest.getLevel(level));
+                    previous = sstable;
+                }
+            }
+        }
 
         return scanners;
     }
@@ -192,14 +220,12 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
         private SSTableScanner currentScanner;
         private long positionOffset;
 
-        public LeveledScanner(List<SSTableReader> sstables, Range<Token> range)
+        public LeveledScanner(Collection<SSTableReader> sstables, Range<Token> range)
         {
             this.range = range;
-            this.sstables = sstables;
-
-            // Sorting a list we got in argument is bad but it's all private to this class so let's not bother
-            Collections.sort(sstables, SSTable.sstableComparator);
-            this.sstableIterator = sstables.iterator();
+            this.sstables = new ArrayList<SSTableReader>(sstables);
+            Collections.sort(this.sstables, SSTable.sstableComparator);
+            this.sstableIterator = this.sstables.iterator();
 
             long length = 0;
             for (SSTableReader sstable : sstables)
@@ -229,8 +255,7 @@ public class LeveledCompactionStrategy extends AbstractCompactionStrategy implem
                 if (!sstableIterator.hasNext())
                     return endOfData();
 
-                SSTableReader reader = sstableIterator.next();
-                currentScanner = reader.getDirectScanner(range);
+                currentScanner = sstableIterator.next().getDirectScanner(range);
                 return computeNext();
             }
             catch (IOException e)

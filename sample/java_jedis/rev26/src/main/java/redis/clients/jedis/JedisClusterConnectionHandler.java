@@ -1,5 +1,7 @@
 package redis.clients.jedis;
 
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
+
 import java.util.*;
 
 import redis.clients.jedis.exceptions.JedisConnectionException;
@@ -11,6 +13,7 @@ public abstract class JedisClusterConnectionHandler {
 
     protected Map<String, JedisPool> nodes = new HashMap<String, JedisPool>();
     protected Map<Integer, JedisPool> slots = new HashMap<Integer, JedisPool>();
+    final protected GenericObjectPoolConfig poolConfig;
 
     abstract Jedis getConnection();
 
@@ -26,7 +29,8 @@ public abstract class JedisClusterConnectionHandler {
 
     abstract Jedis getConnectionFromSlot(int slot);
 
-    public JedisClusterConnectionHandler(Set<HostAndPort> nodes) {
+    public JedisClusterConnectionHandler(Set<HostAndPort> nodes, final GenericObjectPoolConfig poolConfig) {
+    this.poolConfig = poolConfig;
 	initializeSlotsCache(nodes);
     }
 
@@ -36,7 +40,7 @@ public abstract class JedisClusterConnectionHandler {
 
     private void initializeSlotsCache(Set<HostAndPort> startNodes) {
 	for (HostAndPort hostAndPort : startNodes) {
-	    JedisPool jp = new JedisPool(hostAndPort.getHost(),
+	    JedisPool jp = new JedisPool(poolConfig, hostAndPort.getHost(),
 		    hostAndPort.getPort());
 
 	    this.nodes.clear();
@@ -67,16 +71,16 @@ public abstract class JedisClusterConnectionHandler {
     }
 
     private void discoverClusterNodesAndSlots(Jedis jedis) {
-	String localNodes = jedis.clusterNodes();
-	for (String nodeInfo : localNodes.split("\n")) {
-	    ClusterNodeInformation clusterNodeInfo = nodeInfoParser.parse(
-		    nodeInfo, new HostAndPort(jedis.getClient().getHost(),
-			    jedis.getClient().getPort()));
+        String localNodes = jedis.clusterNodes();
+        for (String nodeInfo : localNodes.split("\n")) {
+            ClusterNodeInformation clusterNodeInfo = nodeInfoParser.parse(
+                    nodeInfo, new HostAndPort(jedis.getClient().getHost(),
+                    jedis.getClient().getPort()));
 
-	    HostAndPort targetNode = clusterNodeInfo.getNode();
-	    setNodeIfNotExist(targetNode);
-	    assignSlotsToNode(clusterNodeInfo.getAvailableSlots(), targetNode);
-	}
+            HostAndPort targetNode = clusterNodeInfo.getNode();
+            setNodeIfNotExist(targetNode);
+            assignSlotsToNode(clusterNodeInfo.getAvailableSlots(), targetNode);
+        }
     }
 
     public void assignSlotToNode(int slot, HostAndPort targetNode) {
@@ -121,7 +125,7 @@ public abstract class JedisClusterConnectionHandler {
 	if (nodes.containsKey(nodeKey))
 	    return;
 
-	JedisPool nodePool = new JedisPool(node.getHost(), node.getPort());
+	JedisPool nodePool = new JedisPool(poolConfig, node.getHost(), node.getPort());
 	nodes.put(nodeKey, nodePool);
     }
 }

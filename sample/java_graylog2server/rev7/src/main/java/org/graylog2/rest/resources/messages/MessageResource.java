@@ -20,6 +20,9 @@
 
 package org.graylog2.rest.resources.messages;
 
+import java.util.List;
+import java.util.Map;
+
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
@@ -33,18 +36,18 @@ import org.elasticsearch.indices.IndexMissingException;
 import org.graylog2.Core;
 import org.graylog2.indexer.messages.DocumentNotFoundException;
 import org.graylog2.indexer.results.ResultMessage;
+import org.graylog2.rest.RestResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
+import com.google.common.collect.Maps;
 import com.sun.jersey.api.core.ResourceConfig;
 
 /**
  * @author Lennart Koopmann <lennart@torch.sh>
  */
 @Path("/messages/{index}")
-public class MessageResource {
+public class MessageResource extends RestResource {
     private static final Logger LOG = LoggerFactory.getLogger(MessageResource.class);
 	
     @Context ResourceConfig rc;
@@ -70,12 +73,30 @@ public class MessageResource {
         	throw new WebApplicationException(404);
 		}
         
-        Gson gson = new Gson();
-        
-        if (prettyPrint) {
-            gson = new GsonBuilder().setPrettyPrinting().create();
+        return json(m, prettyPrint);
+    }
+    
+    @GET @Path("/analyze")
+    @Produces(MediaType.APPLICATION_JSON)
+    public String analyze(@PathParam("index") String index, @QueryParam("string") String string, @QueryParam("pretty") boolean prettyPrint) {
+        Core core = (Core) rc.getProperty("core");
+
+        if (string == null || string.isEmpty()) {
+        	LOG.error("Missing parameters. Returning HTTP 400.");
+        	throw new WebApplicationException(400);
         }
         
-        return gson.toJson(m);
+        List<String> tokens;
+        try {
+        	tokens = core.getIndexer().messages().analyze(string, index);
+		} catch (IndexMissingException e) {
+        	LOG.error("Index does not exist. Returning HTTP 404.");
+        	throw new WebApplicationException(404);
+		}
+        
+        Map<String, Object> result = Maps.newHashMap();
+        result.put("tokens", tokens);
+
+        return json(result, prettyPrint);
     }
 }

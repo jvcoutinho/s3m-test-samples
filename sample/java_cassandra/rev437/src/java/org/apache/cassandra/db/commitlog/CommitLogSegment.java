@@ -7,17 +7,14 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 package org.apache.cassandra.db.commitlog;
 
 import java.io.File;
@@ -55,7 +52,7 @@ public class CommitLogSegment
 
     private static final String FILENAME_PREFIX = "CommitLog-";
     private static final String FILENAME_EXTENSION = ".log";
-    private static Pattern COMMIT_LOG_FILE_PATTERN = Pattern.compile(FILENAME_PREFIX + "(\\d+)" + FILENAME_EXTENSION);
+    private static final Pattern COMMIT_LOG_FILE_PATTERN = Pattern.compile(FILENAME_PREFIX + "(\\d+)" + FILENAME_EXTENSION);
 
     // The commit log entry overhead in bytes (int: length + long: head checksum + long: tail checksum)
     static final int ENTRY_OVERHEAD_SIZE = 4 + 8 + 8;
@@ -66,7 +63,7 @@ public class CommitLogSegment
     public final long id;
 
     private final File logFile;
-    private RandomAccessFile logFileAccessor;
+    private final RandomAccessFile logFileAccessor;
 
     private boolean needsSync = false;
 
@@ -208,7 +205,7 @@ public class CommitLogSegment
      */
     public boolean hasCapacityFor(RowMutation mutation)
     {
-        long totalSize = RowMutation.serializer().serializedSize(mutation, MessagingService.version_) + ENTRY_OVERHEAD_SIZE;
+        long totalSize = RowMutation.serializer().serializedSize(mutation, MessagingService.current_version) + ENTRY_OVERHEAD_SIZE;
         return totalSize <= buffer.remaining();
     }
 
@@ -246,7 +243,7 @@ public class CommitLogSegment
         markDirty(rowMutation, repPos);
 
         Checksum checksum = new PureJavaCrc32();
-        byte[] serializedRow = rowMutation.getSerializedBuffer(MessagingService.version_);
+        byte[] serializedRow = rowMutation.getSerializedBuffer(MessagingService.current_version);
 
         checksum.update(serializedRow.length);
         buffer.putInt(serializedRow.length);

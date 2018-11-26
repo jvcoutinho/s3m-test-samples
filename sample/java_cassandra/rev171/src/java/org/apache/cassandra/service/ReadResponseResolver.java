@@ -32,8 +32,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.marshal.AbstractCommutativeType;
+import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.utils.FBUtilities;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 /**
@@ -52,7 +55,7 @@ public class ReadResponseResolver implements IResponseResolver<Row>
         this.table = table;
         this.key = StorageService.getPartitioner().decorateKey(key);
     }
-    
+
     /*
       * This method for resolving read data should look at the timestamps of each
       * of the columns that are read and should pick up columns with the latest
@@ -95,8 +98,20 @@ public class ReadResponseResolver implements IResponseResolver<Row>
             }
             else
             {
-                versions.add(result.row().cf);
-                endpoints.add(message.getFrom());
+                ColumnFamily cf = result.row().cf;
+                InetAddress from = message.getFrom();
+
+                if (cf != null)
+                {
+                    AbstractType defaultValidator = cf.metadata().getDefaultValidator();
+                    if (!FBUtilities.getLocalAddress().equals(from) && defaultValidator.isCommutative())
+                    {
+                        cf = cf.cloneMe();
+                        ((AbstractCommutativeType) defaultValidator).cleanContext(cf, FBUtilities.getLocalAddress());
+                    }
+                }
+                versions.add(cf);
+                endpoints.add(from);
             }
         }
 
@@ -108,7 +123,7 @@ public class ReadResponseResolver implements IResponseResolver<Row>
             for (ColumnFamily cf : versions)
             {
                 ByteBuffer digest2 = ColumnFamily.digest(cf);
-                if (!digest.equals(digest2))
+                if (!digest2.equals(digest))
                     throw new DigestMismatchException(key, digest, digest2);
             }
             if (logger_.isDebugEnabled())
@@ -147,6 +162,14 @@ public class ReadResponseResolver implements IResponseResolver<Row>
 
             // create and send the row mutation message based on the diff
             RowMutation rowMutation = new RowMutation(table, key.key);
+
+            AbstractType defaultValidator = diffCf.metadata().getDefaultValidator();
+            if (defaultValidator.isCommutative())
+                ((AbstractCommutativeType)defaultValidator).cleanContext(diffCf, endpoints.get(i));
+
+            if (diffCf.getColumnsMap().isEmpty() && !diffCf.isMarkedForDelete())
+                continue;
+
             rowMutation.add(diffCf);
             RowMutationMessage rowMutationMessage = new RowMutationMessage(rowMutation);
             Message repairMessage;
@@ -170,7 +193,7 @@ public class ReadResponseResolver implements IResponseResolver<Row>
         {
             if (cf != null)
             {
-                resolved = cf.cloneMe();
+                resolved = cf.cloneMeShallow();
                 break;
             }
         }

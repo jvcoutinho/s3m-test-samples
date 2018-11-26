@@ -49,7 +49,7 @@ public class DefaultColorMap implements ColorMap {
         addDefault(Identifier, GREEN);
         addDefault(UserInput, GREEN);
         addDefault(Failure, RED);
-//        addDefault(Error, RED);
+        addDefault(Error, RED);
         defaults.put(STATUSBAR, BOLD);
     }
 

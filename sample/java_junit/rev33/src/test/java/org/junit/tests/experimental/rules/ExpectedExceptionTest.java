@@ -2,6 +2,7 @@ package org.junit.tests.experimental.rules;
 
 import static java.util.Arrays.asList;
 import static org.hamcrest.CoreMatchers.any;
+import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.core.IsEqual.equalTo;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
@@ -12,15 +13,12 @@ import static org.junit.tests.experimental.rules.EventCollector.hasSingleAssumpt
 import static org.junit.tests.experimental.rules.EventCollector.hasSingleFailure;
 import static org.junit.tests.experimental.rules.EventCollector.hasSingleFailureWithMessage;
 
-import java.io.IOException;
 import java.util.Collection;
 
-import org.hamcrest.Description;
 import org.hamcrest.Matcher;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.internal.AssumptionViolatedException;
-import org.junit.internal.matchers.TypeSafeMatcher;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.JUnitCore;
 import org.junit.runner.RunWith;
@@ -45,7 +43,7 @@ public class ExpectedExceptionTest {
 				{
 						HasWrongMessage.class,
 						hasSingleFailureWithMessage("\nExpected: exception with message a string containing \"expectedMessage\"\n"
-								+ "     got: <java.lang.IllegalArgumentException: actualMessage>\n") },
+								+ "     but: was <java.lang.IllegalArgumentException: actualMessage>") },
 				{
 						ThrowNoExceptionButExpectExceptionWithType.class,
 						hasSingleFailureWithMessage("Expected test to throw an instance of java.lang.NullPointerException") },
@@ -73,7 +71,7 @@ public class ExpectedExceptionTest {
 						hasSingleFailureWithMessage(ARBITRARY_MESSAGE) },
 				{
 						ExpectsMultipleMatchers.class,
-						hasSingleFailureWithMessage(startsWith("\nExpected: (exception with message a string containing \"Ack!\" and an instance of java.lang.IllegalArgumentException)")) } });
+						hasSingleFailureWithMessage(startsWith("\nExpected: (an instance of java.lang.IllegalArgumentException and exception with message a string containing \"Ack!\")")) } });
 	}
 
 	private final Class<?> classUnderTest;
@@ -220,7 +218,7 @@ public class ExpectedExceptionTest {
 
 		@Test
 		public void throwsMore() {
-			thrown.expect(any(IOException.class));
+			thrown.expect(any(Exception.class));
 			throw new NullPointerException("Ack!");
 		}
 	}
@@ -306,19 +304,5 @@ public class ExpectedExceptionTest {
 			thrown.expect(AssumptionViolatedException.class);
 			throw new AssumptionViolatedException("");
 		}
-	}
-
-	private static Matcher<String> startsWith(final String prefix) {
-		return new TypeSafeMatcher<String>() {
-			public void describeTo(Description description) {
-				description.appendText("starts with ");
-				description.appendText(prefix);
-			}
-
-			@Override
-			public boolean matchesSafely(String item) {
-				return item.startsWith(prefix);
-			}
-		};
 	}
 }

@@ -32,18 +32,18 @@ import org.apache.cassandra.db.Keyspace;
  */
 public class KeyspaceMetrics
 {
-    /** Total amount of live data stored in the memtable, excluding any data structure overhead */
+    /** Total amount of data stored in the memtable, including column related overhead. */
     public final Gauge<Long> memtableLiveDataSize;
     /** Total amount of data stored in the memtable that resides on-heap, including column related overhead and overwritten rows. */
     public final Gauge<Long> memtableOnHeapDataSize;
     /** Total amount of data stored in the memtable that resides off-heap, including column related overhead and overwritten rows. */
     public final Gauge<Long> memtableOffHeapDataSize;
-    /** Total amount of live data stored in the memtables (2i and pending flush memtables included) that resides off-heap, excluding any data structure overhead */
-    public final Gauge<Long> allMemtablesLiveDataSize;
     /** Total amount of data stored in the memtables (2i and pending flush memtables included) that resides on-heap. */
     public final Gauge<Long> allMemtablesOnHeapDataSize;
     /** Total amount of data stored in the memtables (2i and pending flush memtables included) that resides off-heap. */
     public final Gauge<Long> allMemtablesOffHeapDataSize;
+    /** Total amount of live data stored in the memtables (2i and pending flush memtables included) that resides off-heap, excluding any data structure overhead */
+    public final Gauge<Long> allMemtablesLiveDataSize;
     /** Total number of columns present in the memtable. */
     public final Gauge<Long> memtableColumnsCount;
     /** Number of times flush has resulted in the memtable being switched out. */
@@ -82,18 +82,6 @@ public class KeyspaceMetrics
                 return total;
             }
         });
-        memtableLiveDataSize = Metrics.newGauge(factory.createMetricName("MemtableLiveDataSize"), new Gauge<Long>()
-        {
-            public Long value()
-            {
-                long total = 0;
-                for (ColumnFamilyStore cf : ks.getColumnFamilyStores())
-                {
-                    total += cf.metric.memtableLiveDataSize.value();
-                }
-                return total;
-            }
-        });
         memtableOnHeapDataSize = Metrics.newGauge(factory.createMetricName("MemtableOnHeapDataSize"), new Gauge<Long>()
         {
             public Long value()
@@ -118,14 +106,14 @@ public class KeyspaceMetrics
                 return total;
             }
         });
-        allMemtablesLiveDataSize = Metrics.newGauge(factory.createMetricName("AllMemtablesLiveDataSize"), new Gauge<Long>()
+        memtableLiveDataSize = Metrics.newGauge(factory.createMetricName("MemtableLiveDataSize"), new Gauge<Long>()
         {
             public Long value()
             {
                 long total = 0;
                 for (ColumnFamilyStore cf : ks.getColumnFamilyStores())
                 {
-                    total += cf.metric.allMemtablesLiveDataSize.value();
+                    total += cf.metric.memtableLiveDataSize.value();
                 }
                 return total;
             }
@@ -150,6 +138,18 @@ public class KeyspaceMetrics
                 for (ColumnFamilyStore cf : ks.getColumnFamilyStores())
                 {
                     total += cf.metric.allMemtablesOffHeapSize.value();
+                }
+                return total;
+            }
+        });
+        allMemtablesLiveDataSize = Metrics.newGauge(factory.createMetricName("AllMemtablesLiveDataSize"), new Gauge<Long>()
+        {
+            public Long value()
+            {
+                long total = 0;
+                for (ColumnFamilyStore cf : ks.getColumnFamilyStores())
+                {
+                    total += cf.metric.allMemtablesLiveDataSize.value();
                 }
                 return total;
             }
@@ -238,7 +238,6 @@ public class KeyspaceMetrics
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("MemtableColumnsCount"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("MemtableSwitchCount"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("PendingFlushes"));
-        Metrics.defaultRegistry().removeMetric(factory.createMetricName("PendingCompactions"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("LiveDiskSpaceUsed"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("TotalDiskSpaceUsed"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("BloomFilterDiskSpaceUsed"));

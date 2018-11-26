@@ -15,9 +15,10 @@
  */
 package org.gradle.launcher.daemon.server.exec;
 
-import org.gradle.api.internal.project.ServiceRegistry;
 import org.gradle.initialization.DefaultGradleLauncherFactory;
 import org.gradle.initialization.GradleLauncherFactory;
+import org.gradle.internal.nativeplatform.ProcessEnvironment;
+import org.gradle.internal.service.ServiceRegistry;
 import org.gradle.launcher.daemon.context.DaemonContext;
 import org.gradle.launcher.daemon.protocol.Command;
 import org.gradle.launcher.daemon.server.DaemonStateCoordinator;
@@ -26,17 +27,23 @@ import org.gradle.messaging.concurrent.ExecutorFactory;
 import org.gradle.messaging.remote.internal.Connection;
 import org.gradle.messaging.remote.internal.DisconnectAwareConnectionDecorator;
 
+import java.util.Arrays;
+import java.util.LinkedList;
+import java.util.List;
+
 /**
  * The default implementation of how to execute commands that the daemon receives.
  */
 public class DefaultDaemonCommandExecuter implements DaemonCommandExecuter {
 
     private final ExecutorFactory executorFactory;
-    final private LoggingManagerInternal loggingManager;
-    final private GradleLauncherFactory launcherFactory;
+    private final LoggingManagerInternal loggingManager;
+    private final GradleLauncherFactory launcherFactory;
+    private final ProcessEnvironment processEnvironment;
 
-    public DefaultDaemonCommandExecuter(ServiceRegistry loggingServices, ExecutorFactory executorFactory) {
+    public DefaultDaemonCommandExecuter(ServiceRegistry loggingServices, ExecutorFactory executorFactory, ProcessEnvironment processEnvironment) {
         this.executorFactory = executorFactory;
+        this.processEnvironment = processEnvironment;
         this.loggingManager = loggingServices.getFactory(LoggingManagerInternal.class).create();
         this.launcherFactory = new DefaultGradleLauncherFactory(loggingServices);
     }
@@ -47,20 +54,24 @@ public class DefaultDaemonCommandExecuter implements DaemonCommandExecuter {
             command,
             daemonContext,
             daemonStateCoordinator,
+            createActions()
+        ).proceed();
+    }
+
+    protected List<DaemonCommandAction> createActions() {
+        return new LinkedList<DaemonCommandAction>(Arrays.asList(
             new StopConnectionAfterExecution(),
             new HandleClientDisconnectBeforeSendingCommand(),
             new CatchAndForwardDaemonFailure(),
             new HandleStop(),
             new StartBuildOrRespondWithBusy(),
-            new EstablishBuildEnvironment(),
+            new EstablishBuildEnvironment(processEnvironment),
             new LogToClient(loggingManager), // from this point down, logging is sent back to the client
             new ForwardClientInput(executorFactory),
             new ReturnResult(),
             new ResetDeprecationLogger(),
-            new CatchAndForwardDaemonFailureAsResult(),
             new WatchForDisconnection(),
             new ExecuteBuild(launcherFactory)
-        ).proceed();
+        ));
     }
-
 }

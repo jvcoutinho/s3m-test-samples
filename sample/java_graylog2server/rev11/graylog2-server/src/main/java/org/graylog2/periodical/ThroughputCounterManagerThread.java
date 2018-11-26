@@ -1,5 +1,5 @@
-/**
- * Copyright 2013 Lennart Koopmann <lennart@torch.sh>
+/*
+ * Copyright 2013-2014 TORCH GmbH
  *
  * This file is part of Graylog2.
  *
@@ -19,26 +19,54 @@
  */
 package org.graylog2.periodical;
 
-import org.graylog2.Core;
+import com.google.inject.Inject;
+import org.graylog2.shared.stats.ThroughputStats;
 
 /**
  * @author Lennart Koopmann <lennart@torch.sh>
  */
-public class ThroughputCounterManagerThread implements Runnable {
-
-    public static final int INITIAL_DELAY = 0;
-    public static final int PERIOD = 1;
-
-    private final Core core;
-
-    public ThroughputCounterManagerThread(Core core) {
-        this.core = core;
-    }
+public class ThroughputCounterManagerThread extends Periodical {
+    @Inject
+    private ThroughputStats throughputStats;
 
     @Override
     public void run() {
-        core.setCurrentThroughput(core.getThroughputCounter().get());
-        core.getThroughputCounter().set(0);
+        throughputStats.setCurrentThroughput(throughputStats.getThroughputCounter().get());
+        throughputStats.getThroughputCounter().set(0);
     }
 
+    @Override
+    public boolean runsForever() {
+        return false;
+    }
+
+    @Override
+    public boolean stopOnGracefulShutdown() {
+        return false;
+    }
+
+    @Override
+    public boolean masterOnly() {
+        return false;
+    }
+
+    @Override
+    public boolean startOnThisNode() {
+        return true;
+    }
+
+    @Override
+    public boolean isDaemon() {
+        return true;
+    }
+
+    @Override
+    public int getInitialDelaySeconds() {
+        return 0;
+    }
+
+    @Override
+    public int getPeriodSeconds() {
+        return 1;
+    }
 }

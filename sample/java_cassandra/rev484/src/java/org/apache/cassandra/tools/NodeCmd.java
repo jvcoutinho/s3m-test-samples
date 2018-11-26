@@ -1,6 +1,4 @@
-package org.apache.cassandra.tools;
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -9,17 +7,15 @@ package org.apache.cassandra.tools;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
+package org.apache.cassandra.tools;
 
 import java.io.IOException;
 import java.io.PrintStream;
@@ -32,6 +28,7 @@ import java.util.Map.Entry;
 import java.util.concurrent.ExecutionException;
 
 import org.apache.cassandra.service.CacheServiceMBean;
+import org.apache.cassandra.service.StorageProxyMBean;
 import org.apache.commons.cli.*;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutorMBean;
@@ -56,14 +53,12 @@ public class NodeCmd
     private static final String DEFAULT_HOST = "127.0.0.1";
     private static final int DEFAULT_PORT = 7199;
 
-    private static ToolOptions options = null;
+    private static final ToolOptions options = new ToolOptions();
 
-    private NodeProbe probe;
+    private final NodeProbe probe;
 
     static
     {
-        options = new ToolOptions();
-
         options.addOption(HOST_OPT,     true, "node hostname or ip address");
         options.addOption(PORT_OPT,     true, "remote jmx agent port number");
         options.addOption(USERNAME_OPT, true, "remote jmx agent username");
@@ -102,6 +97,7 @@ public class NodeCmd
         JOIN,
         MOVE,
         NETSTATS,
+        PROXYHISTOGRAMS,
         REBUILD,
         REFRESH,
         REMOVETOKEN,
@@ -140,6 +136,7 @@ public class NodeCmd
         addCmdHelp(header, "cfstats", "Print statistics on column families");
         addCmdHelp(header, "version", "Print cassandra version");
         addCmdHelp(header, "tpstats", "Print usage statistics of thread pools");
+        addCmdHelp(header, "proxyhistograms", "Print statistic histograms for network operations");
         addCmdHelp(header, "drain", "Drain the node (stop accepting writes and flush all column families)");
         addCmdHelp(header, "decommission", "Decommission the node");
         addCmdHelp(header, "compactionstats", "Print statistics on compactions");
@@ -588,6 +585,27 @@ public class NodeCmd
                                          (i < ecch.length ? ecch[i] : "")));
         }
     }
+    
+    private void printProxyHistograms(PrintStream output)
+    {
+        StorageProxyMBean sp = this.probe.getSpProxy();
+        long[] offsets = new EstimatedHistogram().getBucketOffsets();
+        long[] rrlh = sp.getRecentReadLatencyHistogramMicros();
+        long[] rwlh = sp.getRecentWriteLatencyHistogramMicros();
+        long[] rrnglh = sp.getRecentRangeLatencyHistogramMicros();
+
+        output.println("proxy histograms");
+        output.println(String.format("%-10s%18s%18s%18s",
+                                    "Offset", "Read Latency", "Write Latency", "Range Latency"));
+        for (int i = 0; i < offsets.length; i++)
+        {
+            output.println(String.format("%-10d%18s%18s%18s",
+                                        offsets[i],
+                                        (i < rrlh.length ? rrlh[i] : ""),
+                                        (i < rwlh.length ? rwlh[i] : ""),
+                                        (i < rrnglh.length ? rrnglh[i] : "")));
+        }
+    }
 
     private void printEndPoints(String keySpace, String cf, String key, PrintStream output)
     {
@@ -784,6 +802,11 @@ public class NodeCmd
                 case GETENDPOINTS :
                     if (arguments.length != 3) { badUse("getendpoints requires ks, cf and key args"); }
                     nodeCmd.printEndPoints(arguments[0], arguments[1], arguments[2], System.out);
+                    break;
+
+                case PROXYHISTOGRAMS :
+                    if (arguments.length != 0) { badUse("proxyhistograms does not take arguments"); }
+                    nodeCmd.printProxyHistograms(System.out);
                     break;
 
                 case REFRESH:

@@ -18,8 +18,8 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
+import java.util.Iterator;
 
-import org.apache.cassandra.utils.FilterFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,7 +27,6 @@ import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.ICountableColumnIterator;
 import org.apache.cassandra.db.marshal.MarshalException;
-import org.apache.cassandra.io.IColumnSerializer;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.utils.BytesReadTracker;
 
@@ -39,13 +38,13 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
     private final DataInput input;
     private final long dataStart;
     public final long dataSize;
-    public final IColumnSerializer.Flag flag;
+    public final ColumnSerializer.Flag flag;
 
     private final ColumnFamily columnFamily;
     private final int columnCount;
     private final long columnPosition;
 
-    private final OnDiskAtom.Serializer atomSerializer;
+    private final Iterator<OnDiskAtom> atomIterator;
     private final Descriptor.Version dataVersion;
 
     private final BytesReadTracker inputWithTracker; // tracks bytes read
@@ -81,11 +80,11 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
      */
     public SSTableIdentityIterator(SSTableReader sstable, RandomAccessReader file, DecoratedKey key, long dataStart, long dataSize, boolean checkData)
     {
-        this(sstable.metadata, file, file.getPath(), key, dataStart, dataSize, checkData, sstable, IColumnSerializer.Flag.LOCAL);
+        this(sstable.metadata, file, file.getPath(), key, dataStart, dataSize, checkData, sstable, ColumnSerializer.Flag.LOCAL);
     }
 
     // Must only be used against current file format
-    public SSTableIdentityIterator(CFMetaData metadata, DataInput file, String filename, DecoratedKey key, long dataStart, long dataSize, IColumnSerializer.Flag flag)
+    public SSTableIdentityIterator(CFMetaData metadata, DataInput file, String filename, DecoratedKey key, long dataStart, long dataSize, ColumnSerializer.Flag flag)
     {
         this(metadata, file, filename, key, dataStart, dataSize, false, null, flag);
     }
@@ -100,7 +99,7 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
                                     long dataSize,
                                     boolean checkData,
                                     SSTableReader sstable,
-                                    IColumnSerializer.Flag flag)
+                                    ColumnSerializer.Flag flag)
     {
         assert !checkData || (sstable != null);
         this.input = input;
@@ -127,7 +126,7 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
                 {
                     try
                     {
-                        IndexHelper.defreezeBloomFilter(file, dataSize, dataVersion.filterType);
+                        IndexHelper.skipSSTableBloomFilter(file, dataVersion);
                     }
                     catch (Exception e)
                     {
@@ -136,10 +135,9 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
 
                         logger.debug("Invalid bloom filter in {}; will rebuild it", sstable);
                     }
-
                     try
                     {
-                        // deFreeze should have left the file position ready to deserialize index
+                        // skipping the old row-level BF should have left the file position ready to deserialize index
                         IndexHelper.deserializeIndex(file);
                     }
                     catch (Exception e)
@@ -153,13 +151,14 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
 
             if (sstable != null && !dataVersion.hasPromotedIndexes)
             {
-                IndexHelper.skipBloomFilter(inputWithTracker, dataVersion.filterType);
+                IndexHelper.skipSSTableBloomFilter(inputWithTracker, dataVersion);
                 IndexHelper.skipIndex(inputWithTracker);
             }
-            columnFamily = ColumnFamily.create(metadata);
+            columnFamily = EmptyColumns.factory.create(metadata);
             columnFamily.delete(DeletionInfo.serializer().deserializeFromSSTable(inputWithTracker, dataVersion));
-            atomSerializer = columnFamily.getOnDiskSerializer();
+
             columnCount = inputWithTracker.readInt();
+            atomIterator = columnFamily.metadata().getOnDiskIterator(inputWithTracker, columnCount, dataVersion);
             columnPosition = dataStart + inputWithTracker.getBytesRead();
         }
         catch (IOException e)
@@ -189,14 +188,17 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
     {
         try
         {
-            OnDiskAtom atom = atomSerializer.deserializeFromSSTable(inputWithTracker, flag, expireBefore, dataVersion);
+            OnDiskAtom atom = atomIterator.next();
             if (validateColumns)
                 atom.validateFields(columnFamily.metadata());
             return atom;
         }
-        catch (IOException e)
+        catch (IOError e)
         {
-            throw new CorruptSSTableException(e, filename);
+            if (e.getCause() instanceof IOException)
+                throw new CorruptSSTableException((IOException)e.getCause(), filename);
+            else
+                throw e;
         }
         catch (MarshalException me)
         {
@@ -228,7 +230,7 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
         }
     }
 
-    public ColumnFamily getColumnFamilyWithColumns(ISortedColumns.Factory containerFactory) throws IOException
+    public ColumnFamily getColumnFamilyWithColumns(ColumnFamily.Factory containerFactory) throws IOException
     {
         assert inputWithTracker.getBytesRead() == headerSize();
         ColumnFamily cf = columnFamily.cloneMeShallow(containerFactory, false);
@@ -238,7 +240,7 @@ public class SSTableIdentityIterator implements Comparable<SSTableIdentityIterat
         {
             try
             {
-                cf.validateColumnFields();
+                cf.metadata().validateColumns(cf);
             }
             catch (MarshalException e)
             {

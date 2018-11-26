@@ -40,10 +40,9 @@ public class CqlInserter extends CqlOperation<Integer>
     @Override
     protected String buildQuery()
     {
-        StringBuilder query = new StringBuilder("UPDATE ").append(wrapInQuotesIfRequired(state.type.table));
-
-        if (state.isCql2())
-            query.append(" USING CONSISTENCY ").append(state.settings.command.consistencyLevel);
+        StringBuilder query = new StringBuilder("UPDATE ").append(wrapInQuotes(state.type.table));
+        if (state.settings.columns.timestamp != null)
+            query.append(" USING TIMESTAMP ").append(state.settings.columns.timestamp);
 
         query.append(" SET ");
 
@@ -57,12 +56,12 @@ public class CqlInserter extends CqlOperation<Integer>
                 if (state.isCql3())
                     throw new UnsupportedOperationException("Cannot use UUIDs in column names with CQL3");
 
-                query.append(wrapInQuotesIfRequired(UUIDGen.getTimeUUID().toString()))
+                query.append(wrapInQuotes(UUIDGen.getTimeUUID().toString()))
                         .append(" = ?");
             }
             else
             {
-                query.append(wrapInQuotesIfRequired("C" + i)).append(" = ?");
+                query.append(wrapInQuotes("C" + i)).append(" = ?");
             }
         }
 

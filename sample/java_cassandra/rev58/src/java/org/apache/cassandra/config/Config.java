@@ -17,9 +17,9 @@
  */
 package org.apache.cassandra.config;
 
-import org.apache.cassandra.cache.SerializingCacheProvider;
 import org.apache.cassandra.config.EncryptionOptions.ClientEncryptionOptions;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
+import org.apache.cassandra.io.util.NativeAllocator;
 import org.apache.cassandra.utils.FBUtilities;
 
 /**
@@ -31,7 +31,6 @@ public class Config
 {
     public String cluster_name = "Test Cluster";
     public String authenticator;
-    public String authority; // for backwards compatibility - will log a warning.
     public String authorizer;
     public int permissions_validity_in_ms = 2000;
 
@@ -58,6 +57,8 @@ public class Config
     public Long range_request_timeout_in_ms = new Long(10000);
 
     public Long write_request_timeout_in_ms = new Long(10000);
+
+    public Long cas_contention_timeout_in_ms = new Long(1000);
 
     public Long truncate_request_timeout_in_ms = new Long(60000);
 
@@ -94,7 +95,6 @@ public class Config
 
     public Boolean start_native_transport = false;
     public Integer native_transport_port = 9042;
-    public Integer native_transport_min_threads = 16;
     public Integer native_transport_max_threads = 128;
 
     @Deprecated
@@ -145,11 +145,9 @@ public class Config
 
     public InternodeCompression internode_compression = InternodeCompression.none;
 
-    public Integer index_interval = 128;
+    @Deprecated
+    public Integer index_interval = null;
 
-    public Double flush_largest_memtables_at = 1.0;
-    public Double reduce_cache_sizes_at = 1.0;
-    public double reduce_cache_capacity_to = 0.6;
     public int hinted_handoff_throttle_in_kb = 1024;
     public int max_hints_delivery_threads = 1;
     public boolean compaction_preheat_key_cache = true;
@@ -166,14 +164,17 @@ public class Config
     public long row_cache_size_in_mb = 0;
     public volatile int row_cache_save_period = 0;
     public int row_cache_keys_to_save = Integer.MAX_VALUE;
-    public String row_cache_provider = SerializingCacheProvider.class.getSimpleName();
+    public String memory_allocator = NativeAllocator.class.getSimpleName();
     public boolean populate_io_cache_on_flush = false;
 
-    public boolean inter_dc_tcp_nodelay = true;
+    public boolean inter_dc_tcp_nodelay = false;
+
+    private static boolean isClientMode = false;
+
+    public boolean preheat_kernel_page_cache = false;
 
     public String memtable_allocator = "SlabAllocator";
 
-    private static boolean loadYaml = true;
     private static boolean outboundBindAny = false;
 
     public static boolean getOutboundBindAny()
@@ -186,14 +187,14 @@ public class Config
         outboundBindAny = value;
     }
 
-    public static boolean getLoadYaml()
+    public static boolean isClientMode()
     {
-       return loadYaml;
+       return isClientMode;
     }
 
-    public static void setLoadYaml(boolean value)
+    public static void setClientMode(boolean clientMode)
     {
-        loadYaml = value;
+        isClientMode = clientMode;
     }
 
     public static enum CommitLogSync

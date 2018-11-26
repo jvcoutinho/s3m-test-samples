@@ -44,21 +44,23 @@ public class Message
     
     final Header header_;
     private final byte[] body_;
+    private final transient int version;
 
-    Message(Header header, byte[] body)
+    private Message(Header header, byte[] body, int version)
     {
         assert header != null;
         assert body != null;
 
         header_ = header;
         body_ = body;
+        this.version = version;
     }
-
-    public Message(InetAddress from, StorageService.Verb verb, byte[] body)
-    {
-        this(new Header(from, verb), body);
-    }    
     
+    public Message(InetAddress from, StorageService.Verb verb, byte[] body, int version)
+    {
+        this(new Header(from, verb), body, version);
+    } 
+        
     public byte[] getHeader(String key)
     {
         return header_.getDetail(key);
@@ -78,6 +80,11 @@ public class Message
     {
         return body_;
     }
+    
+    public int getVersion()
+    {
+        return version;
+    }
 
     public InetAddress getFrom()
     {
@@ -94,31 +101,25 @@ public class Message
         return header_.getVerb();
     }
 
-    public String getMessageId()
-    {
-        return header_.getMessageId();
-    }
-
     // TODO should take byte[] + length so we don't have to copy to a byte[] of exactly the right len
-    public Message getReply(InetAddress from, byte[] args)
+    // TODO make static
+    public Message getReply(InetAddress from, byte[] body, int version)
     {
-        Header header = new Header(getMessageId(), from, StorageService.Verb.REQUEST_RESPONSE);
-        return new Message(header, args);
+        Header header = new Header(from, StorageService.Verb.REQUEST_RESPONSE);
+        return new Message(header, body, version);
     }
 
-    public Message getInternalReply(byte[] body)
+    public Message getInternalReply(byte[] body, int version)
     {
-        Header header = new Header(getMessageId(), FBUtilities.getLocalAddress(), StorageService.Verb.INTERNAL_RESPONSE);
-        return new Message(header, body);
+        Header header = new Header(FBUtilities.getLocalAddress(), StorageService.Verb.INTERNAL_RESPONSE);
+        return new Message(header, body, version);
     }
 
     public String toString()
     {
         StringBuilder sbuf = new StringBuilder("");
         String separator = System.getProperty("line.separator");
-        sbuf.append("ID:" + getMessageId())
-        	.append(separator)
-        	.append("FROM:" + getFrom())
+        sbuf.append("FROM:" + getFrom())
         	.append(separator)
         	.append("TYPE:" + getMessageType())
         	.append(separator)
@@ -129,22 +130,22 @@ public class Message
     
     private static class MessageSerializer implements ICompactSerializer<Message>
     {
-        public void serialize(Message t, DataOutputStream dos) throws IOException
+        public void serialize(Message t, DataOutputStream dos, int version) throws IOException
         {
-            Header.serializer().serialize( t.header_, dos);
+            assert t.getVersion() == version : "internode protocol version mismatch"; // indicates programmer error.
+            Header.serializer().serialize( t.header_, dos, version);
             byte[] bytes = t.getMessageBody();
             dos.writeInt(bytes.length);
             dos.write(bytes);
         }
     
-        public Message deserialize(DataInputStream dis) throws IOException
+        public Message deserialize(DataInputStream dis, int version) throws IOException
         {
-            Header header = Header.serializer().deserialize(dis);
+            Header header = Header.serializer().deserialize(dis, version);
             int size = dis.readInt();
             byte[] bytes = new byte[size];
             dis.readFully(bytes);
-            // return new Message(header.getMessageId(), header.getFrom(), header.getMessageType(), header.getVerb(), new Object[]{bytes});
-            return new Message(header, bytes);
+            return new Message(header, bytes, version);
         }
     }
 }

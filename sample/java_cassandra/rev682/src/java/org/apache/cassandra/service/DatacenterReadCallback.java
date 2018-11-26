@@ -59,7 +59,6 @@ public class DatacenterReadCallback<T> extends ReadCallback<T>
         if (n == blockfor && resolver.isDataPresent())
         {
             condition.signal();
-            maybeResolveForRepair();
         }
     }
     
@@ -71,8 +70,9 @@ public class DatacenterReadCallback<T> extends ReadCallback<T>
         if (received.incrementAndGet() == blockfor && resolver.isDataPresent())
         {
             condition.signal();
-            maybeResolveForRepair();
         }
+
+        maybeResolveForRepair();
     }
     
     @Override

@@ -24,7 +24,7 @@ import com.yammer.metrics.core.Histogram;
 import com.yammer.metrics.core.MetricName;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.io.sstable.SSTableMetadata;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.utils.EstimatedHistogram;
@@ -78,6 +78,8 @@ public class ColumnFamilyMetrics
     public final Gauge<Long> bloomFilterDiskSpaceUsed;
 
     private final MetricNameFactory factory;
+
+    public final Counter speculativeRetry;
 
     // for backward compatibility
     @Deprecated public final EstimatedHistogram sstablesPerRead = new EstimatedHistogram(35);
@@ -160,7 +162,7 @@ public class ColumnFamilyMetrics
             public Integer value()
             {
                 // TODO this actually isn't a good measure of pending tasks
-                return Table.switchLock.getQueueLength();
+                return Keyspace.switchLock.getQueueLength();
             }
         });
         liveSSTableCount = Metrics.newGauge(factory.createMetricName("LiveSSTableCount"), new Gauge<Integer>()
@@ -274,6 +276,7 @@ public class ColumnFamilyMetrics
                 return total;
             }
         });
+        speculativeRetry = Metrics.newCounter(factory.createMetricName("SpeculativeRetry"));
     }
 
     public void updateSSTableIterated(int count)
@@ -319,8 +322,8 @@ public class ColumnFamilyMetrics
 
         ColumnFamilyMetricNameFactory(ColumnFamilyStore cfs)
         {
-            this.keyspaceName = cfs.table.name;
-            this.columnFamilyName = cfs.getColumnFamilyName();
+            this.keyspaceName = cfs.keyspace.getName();
+            this.columnFamilyName = cfs.name;
             isIndex = cfs.isIndex();
         }
 

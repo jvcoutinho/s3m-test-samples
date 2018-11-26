@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db.compaction;
 
 import java.util.*;
@@ -25,6 +24,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.utils.Pair;
@@ -33,9 +34,12 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
 {
     private static final Logger logger = LoggerFactory.getLogger(SizeTieredCompactionStrategy.class);
     protected static final long DEFAULT_MIN_SSTABLE_SIZE = 50L * 1024L * 1024L;
+    protected static final float DEFAULT_TOMBSTONE_THRESHOLD = 0.2f;
     protected static final String MIN_SSTABLE_SIZE_KEY = "min_sstable_size";
+    protected static final String TOMBSTONE_THRESHOLD_KEY = "tombstone_threshold";
     protected long minSSTableSize;
     protected volatile int estimatedRemainingTasks;
+    protected float tombstoneThreshold;
 
     public SizeTieredCompactionStrategy(ColumnFamilyStore cfs, Map<String, String> options)
     {
@@ -45,6 +49,8 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
         minSSTableSize = (null != optionValue) ? Long.parseLong(optionValue) : DEFAULT_MIN_SSTABLE_SIZE;
         cfs.setMaximumCompactionThreshold(cfs.metadata.getMaxCompactionThreshold());
         cfs.setMinimumCompactionThreshold(cfs.metadata.getMinCompactionThreshold());
+        optionValue = options.get(TOMBSTONE_THRESHOLD_KEY);
+        tombstoneThreshold = (null != optionValue) ? Float.parseFloat(optionValue) : DEFAULT_TOMBSTONE_THRESHOLD;
     }
 
     public AbstractCompactionTask getNextBackgroundTask(final int gcBefore)
@@ -76,7 +82,47 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
         }
 
         if (prunedBuckets.isEmpty())
-            return null;
+        {
+            // if there is no sstable to compact in standard way, try compacting single sstable whose droppable tombstone
+            // ratio is greater than threshold.
+            for (List<SSTableReader> bucket : buckets)
+            {
+                for (SSTableReader table : bucket)
+                {
+                    double droppableRatio = table.getEstimatedDroppableTombstoneRatio(gcBefore);
+                    if (droppableRatio <= tombstoneThreshold)
+                        continue;
+
+                    Set<SSTableReader> overlaps = cfs.getOverlappingSSTables(Collections.singleton(table));
+                    if (overlaps.isEmpty())
+                    {
+                        // there is no overlap, tombstones are safely droppable
+                        prunedBuckets.add(Collections.singletonList(table));
+                    }
+                    else
+                    {
+                        // what percentage of columns do we expect to compact outside of overlap?
+                        // first, calculate estimated keys that do not overlap
+                        long keys = table.estimatedKeys();
+                        Set<Range<Token>> ranges = new HashSet<Range<Token>>();
+                        for (SSTableReader overlap : overlaps)
+                            ranges.add(new Range<Token>(overlap.first.token, overlap.last.token));
+                        long remainingKeys = keys - table.estimatedKeysForRanges(ranges);
+                        // next, calculate what percentage of columns we have within those keys
+                        double remainingKeysRatio = ((double) remainingKeys) / keys;
+                        long columns = table.getEstimatedColumnCount().percentile(remainingKeysRatio) * remainingKeys;
+                        double remainingColumnsRatio = ((double) columns) / (table.getEstimatedColumnCount().count() * table.getEstimatedColumnCount().mean());
+
+                        // if we still expect to have droppable tombstones in rest of columns, then try compacting it
+                        if (remainingColumnsRatio * droppableRatio > tombstoneThreshold)
+                            prunedBuckets.add(Collections.singletonList(table));
+                    }
+                }
+            }
+
+            if (prunedBuckets.isEmpty())
+                return null;
+        }
 
         List<SSTableReader> smallestBucket = Collections.min(prunedBuckets, new Comparator<List<SSTableReader>>()
         {
@@ -98,7 +144,8 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
                 return n / sstables.size();
             }
         });
-        return new CompactionTask(cfs, smallestBucket, gcBefore);
+        // when bucket only contains just one sstable, set userDefined to true to force single sstable compaction
+        return new CompactionTask(cfs, smallestBucket, gcBefore).isUserDefined(smallestBucket.size() == 1);
     }
 
     public AbstractCompactionTask getMaximalTask(final int gcBefore)
@@ -108,8 +155,7 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
 
     public AbstractCompactionTask getUserDefinedTask(Collection<SSTableReader> sstables, final int gcBefore)
     {
-        return new CompactionTask(cfs, sstables, gcBefore)
-                .isUserDefined(true);
+        return new CompactionTask(cfs, sstables, gcBefore).isUserDefined(true);
     }
 
     public int getEstimatedRemainingTasks()
@@ -175,7 +221,6 @@ public class SizeTieredCompactionStrategy extends AbstractCompactionStrategy
                 buckets.put(bucket, size);
             }
         }
-
         return new LinkedList<List<T>>(buckets.keySet());
     }
 

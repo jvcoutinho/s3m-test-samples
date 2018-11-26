@@ -41,13 +41,7 @@ public class CqlRangeSlicer extends CqlOperation<Integer>
     @Override
     protected String buildQuery()
     {
-        StringBuilder query = new StringBuilder("SELECT FIRST ").append(state.settings.columns.maxColumnsPerKey)
-                .append(" ''..'' FROM ").append(wrapInQuotesIfRequired(state.type.table));
-
-        if (state.isCql2())
-            query.append(" USING CONSISTENCY ").append(state.settings.command.consistencyLevel);
-
-        return query.append(" WHERE KEY > ?").toString();
+        return "SELECT FIRST " + state.settings.columns.maxColumnsPerKey + " ''..'' FROM " + wrapInQuotes(state.type.table) + " WHERE KEY > ?";
     }
 
     @Override

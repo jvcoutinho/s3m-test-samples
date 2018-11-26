@@ -20,17 +20,14 @@ import org.gradle.api.Transformer;
 import org.gradle.api.internal.file.FileResolver;
 import org.gradle.api.internal.tasks.compile.Compiler;
 import org.gradle.internal.os.OperatingSystem;
-import org.gradle.nativebinaries.Platform;
+import org.gradle.nativebinaries.platform.Platform;
 import org.gradle.nativebinaries.internal.*;
 import org.gradle.nativebinaries.language.assembler.internal.AssembleSpec;
 import org.gradle.nativebinaries.language.c.internal.CCompileSpec;
 import org.gradle.nativebinaries.language.cpp.internal.CppCompileSpec;
 import org.gradle.nativebinaries.language.rc.internal.WindowsResourceCompileSpec;
 import org.gradle.nativebinaries.toolchain.VisualCpp;
-import org.gradle.nativebinaries.toolchain.internal.AbstractToolChain;
-import org.gradle.nativebinaries.toolchain.internal.CommandLineTool;
-import org.gradle.nativebinaries.toolchain.internal.NativeCompileSpec;
-import org.gradle.nativebinaries.toolchain.internal.OutputCleaningCompiler;
+import org.gradle.nativebinaries.toolchain.internal.*;
 import org.gradle.process.internal.ExecActionFactory;
 
 import java.io.File;
@@ -53,7 +50,7 @@ public class VisualCppToolChain extends AbstractToolChain implements VisualCpp {
 
     @Override
     protected String getTypeName() {
-        return "Visual C++";
+        return "Visual Studio";
     }
 
     @Override
@@ -62,14 +59,8 @@ public class VisualCppToolChain extends AbstractToolChain implements VisualCpp {
             availability.unavailable("Visual Studio is not available on this operating system.");
             return;
         }
-        checkFound("Visual Studio installation", locateVisualStudio(), availability);
-        checkFound("Windows SDK", locateWindowsSdk(), availability);
-    }
-
-    private void checkFound(String name, VisualStudioLocator.SearchResult visualStudio, ToolChainAvailability availability) {
-        if (!visualStudio.isFound()) {
-            availability.unavailable(String.format("%s cannot be located. Searched in %s.", name, visualStudio.getSearchLocations()));
-        }
+        availability.mustBeAvailable(locateVisualStudio());
+        availability.mustBeAvailable(locateWindowsSdk());
     }
 
     private VisualStudioInstall locateVisualStudioInstall() {
@@ -108,7 +99,7 @@ public class VisualCppToolChain extends AbstractToolChain implements VisualCpp {
     }
 
     public PlatformToolChain target(Platform targetPlatform) {
-        checkAvailable();
+        assertAvailable();
         checkPlatform(targetPlatform);
         VisualStudioInstall visualStudioInstall = locateVisualStudioInstall();
         WindowsSdk windowsSdk = new WindowsSdk(locateWindowsSdk().getResult());

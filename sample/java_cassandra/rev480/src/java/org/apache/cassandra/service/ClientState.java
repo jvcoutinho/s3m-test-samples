@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,28 +15,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service;
 
 import java.util.*;
 
+import org.apache.cassandra.auth.*;
+import org.apache.cassandra.cql3.CFName;
+import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.auth.AuthenticatedUser;
-import org.apache.cassandra.auth.Permission;
-import org.apache.cassandra.auth.PermissionDenied;
-import org.apache.cassandra.auth.Resources;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql.CQLStatement;
-import org.apache.cassandra.cql3.CFName;
 import org.apache.cassandra.db.Table;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.UnauthorizedException;
 import org.apache.cassandra.thrift.AuthenticationException;
-import org.apache.cassandra.thrift.CqlResult;
-import org.apache.cassandra.thrift.InvalidRequestException;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SemanticVersion;
+
+import static org.apache.cassandra.tracing.Tracing.instance;
 
 /**
  * A container for per-client, thread-local state that Avro/Thrift threads must hold.
@@ -45,47 +45,51 @@ import org.apache.cassandra.utils.SemanticVersion;
 public class ClientState
 {
     private static final int MAX_CACHE_PREPARED = 10000;    // Enough to keep buggy clients from OOM'ing us
-    private static Logger logger = LoggerFactory.getLogger(ClientState.class);
-    public static final SemanticVersion DEFAULT_CQL_VERSION = org.apache.cassandra.cql.QueryProcessor.CQL_VERSION;
+    private static final Logger logger = LoggerFactory.getLogger(ClientState.class);
+    public static final SemanticVersion DEFAULT_CQL_VERSION = org.apache.cassandra.cql3.QueryProcessor.CQL_VERSION;
 
     // Current user for the session
     private AuthenticatedUser user;
     private String keyspace;
+    private UUID preparedTracingSession;
+
     // Reusable array for authorization
     private final List<Object> resource = new ArrayList<Object>();
     private SemanticVersion cqlVersion = DEFAULT_CQL_VERSION;
 
     // An LRU map of prepared statements
-    private Map<Integer, CQLStatement> prepared = new LinkedHashMap<Integer, CQLStatement>(16, 0.75f, true) {
+    private final Map<Integer, CQLStatement> prepared = new LinkedHashMap<Integer, CQLStatement>(16, 0.75f, true) {
         protected boolean removeEldestEntry(Map.Entry<Integer, CQLStatement> eldest) {
-            return size() > MAX_CACHE_PREPARED;
-        }
-    };
-
-    private Map<Integer, org.apache.cassandra.cql3.CQLStatement> cql3Prepared = new LinkedHashMap<Integer, org.apache.cassandra.cql3.CQLStatement>(16, 0.75f, true) {
-        protected boolean removeEldestEntry(Map.Entry<Integer, org.apache.cassandra.cql3.CQLStatement> eldest) {
             return size() > MAX_CACHE_PREPARED;
         }
     };
 
     private long clock;
 
-    /**
-     * Construct a new, empty ClientState: can be reused after logout() or reset().
-     */
+    // internalCall is used to mark ClientState as used by some internal component
+    // that should have an ability to modify system keyspace
+    private final boolean internalCall;
+
     public ClientState()
     {
-        reset();
+        this(false);
+    }
+
+    /**
+     * Construct a new, empty ClientState
+     */
+    public ClientState(boolean internalCall)
+    {
+        this.internalCall = internalCall;
+
+        user = DatabaseDescriptor.getAuthenticator().defaultUser();
+        resourceClear();
+        prepared.clear();
     }
 
     public Map<Integer, CQLStatement> getPrepared()
     {
         return prepared;
-    }
-
-    public Map<Integer, org.apache.cassandra.cql3.CQLStatement> getCQL3Prepared()
-    {
-        return cql3Prepared;
     }
 
     public String getRawKeyspace()
@@ -107,6 +111,36 @@ public class ClientState
         keyspace = ks;
     }
 
+    public boolean traceNextQuery()
+    {
+        if (preparedTracingSession != null)
+        {
+            return true;
+        }
+
+        double tracingProbability = StorageService.instance.getTracingProbability();
+        return tracingProbability != 0 && FBUtilities.threadLocalRandom().nextDouble() < tracingProbability;
+    }
+
+    public void prepareTracingSession(UUID sessionId)
+    {
+        this.preparedTracingSession = sessionId;
+    }
+
+    public void createSession()
+    {
+        if (this.preparedTracingSession == null)
+        {
+            instance().newSession();
+        }
+        else
+        {
+            UUID session = this.preparedTracingSession;
+            this.preparedTracingSession = null;
+            instance().newSession(session);
+        }
+    }
+
     public String getSchedulingValue()
     {
         switch(DatabaseDescriptor.getRequestSchedulerId())
@@ -121,17 +155,7 @@ public class ClientState
      */
     public void login(Map<? extends CharSequence,? extends CharSequence> credentials) throws AuthenticationException
     {
-        AuthenticatedUser user = DatabaseDescriptor.getAuthenticator().authenticate(credentials);
-        if (logger.isDebugEnabled())
-            logger.debug("logged in: {}", user);
-        this.user = user;
-    }
-
-    public void logout()
-    {
-        if (logger.isDebugEnabled())
-            logger.debug("logged out: {}", user);
-        reset();
+        this.user = DatabaseDescriptor.getAuthenticator().authenticate(credentials);
     }
 
     private void resourceClear()
@@ -141,17 +165,7 @@ public class ClientState
         resource.add(Resources.KEYSPACES);
     }
 
-    public void reset()
-    {
-        user = DatabaseDescriptor.getAuthenticator().defaultUser();
-        keyspace = null;
-        resourceClear();
-        prepared.clear();
-        cql3Prepared.clear();
-        cqlVersion = DEFAULT_CQL_VERSION;
-    }
-
-    public void hasKeyspaceAccess(String keyspace, Permission perm) throws InvalidRequestException
+    public void hasKeyspaceAccess(String keyspace, Permission perm) throws UnauthorizedException, InvalidRequestException
     {
         hasColumnFamilySchemaAccess(keyspace, perm);
     }
@@ -160,12 +174,12 @@ public class ClientState
      * Confirms that the client thread has the given Permission for the ColumnFamily list of
      * the provided keyspace.
      */
-    public void hasColumnFamilySchemaAccess(String keyspace, Permission perm) throws InvalidRequestException
+    public void hasColumnFamilySchemaAccess(String keyspace, Permission perm) throws UnauthorizedException, InvalidRequestException
     {
         validateLogin();
         validateKeyspace(keyspace);
 
-        preventSystemKSModification(keyspace, perm);
+        preventSystemKSSchemaModification(keyspace, perm);
 
         resourceClear();
         resource.add(keyspace);
@@ -174,9 +188,9 @@ public class ClientState
         hasAccess(user, perms, perm, resource);
     }
 
-    private void preventSystemKSModification(String keyspace, Permission perm) throws InvalidRequestException
+    private void preventSystemKSSchemaModification(String keyspace, Permission perm) throws InvalidRequestException
     {
-        if (keyspace.equalsIgnoreCase(Table.SYSTEM_TABLE) && perm != Permission.SELECT && perm != Permission.DESCRIBE)
+        if (keyspace.equalsIgnoreCase(Table.SYSTEM_KS) && !Permission.ALLOWED_SYSTEM_ACTIONS.contains(perm))
             throw new InvalidRequestException("system keyspace is not user-modifiable.");
     }
 
@@ -184,12 +198,12 @@ public class ClientState
      * Confirms that the client thread has the given Permission in the context of the given
      * ColumnFamily and the current keyspace.
      */
-    public void hasColumnFamilyAccess(String columnFamily, Permission perm) throws InvalidRequestException
+    public void hasColumnFamilyAccess(String columnFamily, Permission perm) throws UnauthorizedException, InvalidRequestException
     {
         hasColumnFamilyAccess(keyspace, columnFamily, perm);
     }
 
-    public void hasColumnFamilyAccess(String keyspace, String columnFamily, Permission perm) throws InvalidRequestException
+    public void hasColumnFamilyAccess(String keyspace, String columnFamily, Permission perm) throws UnauthorizedException, InvalidRequestException
     {
         validateLogin();
         validateKeyspace(keyspace);
@@ -197,7 +211,8 @@ public class ClientState
         resourceClear();
         resource.add(keyspace);
 
-        preventSystemKSModification(keyspace, perm);
+        if (!internalCall)
+            preventSystemKSSchemaModification(keyspace, perm);
 
         // check if keyspace access is set to Permission.FULL_ACCESS
         // (which means that user has all access on keyspace and it's underlying elements)
@@ -208,6 +223,11 @@ public class ClientState
         Set<Permission> perms = DatabaseDescriptor.getAuthority().authorize(user, resource);
 
         hasAccess(user, perms, perm, resource);
+    }
+
+    public boolean isLogged()
+    {
+        return user != null;
     }
 
     private void validateLogin() throws InvalidRequestException
@@ -224,16 +244,17 @@ public class ClientState
         }
     }
 
-    private static void hasAccess(AuthenticatedUser user, Set<Permission> perms, Permission perm, List<Object> resource) throws PermissionDenied
+    private static void hasAccess(AuthenticatedUser user, Set<Permission> perms, Permission perm, List<Object> resource) throws UnauthorizedException
     {
         if (perms.contains(Permission.FULL_ACCESS))
             return; // full access
 
         if (perms.contains(Permission.NO_ACCESS))
-            throw new PermissionDenied(String.format("%s does not have permission %s for %s",
-                                                     user,
-                                                     perm,
-                                                     Resources.toString(resource)));
+            throw new UnauthorizedException(String.format("%s does not have permission %s for %s",
+                                                          user,
+                                                          perm,
+                                                          Resources.toString(resource)));
+
 
         boolean granular = false;
 
@@ -263,10 +284,10 @@ public class ClientState
             }
         }
 
-        throw new PermissionDenied(String.format("%s does not have permission %s for %s",
-                                                  user,
-                                                  perm,
-                                                  Resources.toString(resource)));
+        throw new UnauthorizedException(String.format("%s does not have permission %s for %s",
+                                                      user,
+                                                      perm,
+                                                      Resources.toString(resource)));
     }
 
     /**
@@ -296,6 +317,13 @@ public class ClientState
         SemanticVersion cql = org.apache.cassandra.cql.QueryProcessor.CQL_VERSION;
         SemanticVersion cql3 = org.apache.cassandra.cql3.QueryProcessor.CQL_VERSION;
 
+        // We've made some backward incompatible changes between CQL3 beta1 and the final.
+        // It's ok because it was a beta, but it still mean we don't support 3.0.0-beta1 so reject it.
+        SemanticVersion cql3Beta = new SemanticVersion("3.0.0-beta1");
+        if (version.equals(cql3Beta))
+            throw new InvalidRequestException(String.format("There has been a few syntax breaking changes between 3.0.0-beta1 and 3.0.0 "
+                                                           + "(mainly the syntax for options of CREATE KEYSPACE and CREATE TABLE). 3.0.0-beta1 "
+                                                           + " is not supported; please upgrade to 3.0.0"));
         if (version.isSupportedBy(cql))
             cqlVersion = cql;
         else if (version.isSupportedBy(cql3))
@@ -319,17 +347,17 @@ public class ClientState
         return new SemanticVersion[]{ cql, cql3 };
     }
 
-    public void grantPermission(Permission permission, String to, CFName on, boolean grantOption) throws InvalidRequestException
+    public void grantPermission(Permission permission, String to, CFName on, boolean grantOption) throws UnauthorizedException, InvalidRequestException
     {
         DatabaseDescriptor.getAuthorityContainer().grant(user, permission, to, on, grantOption);
     }
 
-    public void revokePermission(Permission permission, String from, CFName resource) throws InvalidRequestException
+    public void revokePermission(Permission permission, String from, CFName resource) throws UnauthorizedException, InvalidRequestException
     {
         DatabaseDescriptor.getAuthorityContainer().revoke(user, permission, from, resource);
     }
 
-    public CqlResult listPermissions(String username) throws InvalidRequestException
+    public ResultMessage listPermissions(String username) throws UnauthorizedException, InvalidRequestException
     {
         return DatabaseDescriptor.getAuthorityContainer().listPermissions(username);
     }

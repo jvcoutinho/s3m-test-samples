@@ -40,7 +40,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.FBUtilities;
 
-import static org.apache.cassandra.avro.ErrorFactory.newInvalidRequestException;
+import static org.apache.cassandra.avro.AvroErrorFactory.newInvalidRequestException;
 import static org.apache.cassandra.avro.AvroRecordFactory.newColumnPath;
 
 /**
@@ -48,7 +48,7 @@ import static org.apache.cassandra.avro.AvroRecordFactory.newColumnPath;
  */
 public class AvroValidation
 {    
-    static void validateKey(ByteBuffer key) throws InvalidRequestException
+    public static void validateKey(ByteBuffer key) throws InvalidRequestException
     {
         if (key == null || key.remaining() == 0)
             throw newInvalidRequestException("Key may not be empty");
@@ -68,7 +68,7 @@ public class AvroValidation
     }
     
     // FIXME: could use method in ThriftValidation
-    static ColumnFamilyType validateColumnFamily(String keyspace, String columnFamily) throws InvalidRequestException
+    public static ColumnFamilyType validateColumnFamily(String keyspace, String columnFamily) throws InvalidRequestException
     {
         if (columnFamily.isEmpty())
             throw newInvalidRequestException("non-empty columnfamily is required");

@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 
@@ -104,7 +105,7 @@ public class RowRepairResolver extends AbstractRowResolver
             Message repairMessage;
             try
             {
-                repairMessage = rowMutation.makeRowMutationMessage(StorageService.Verb.READ_REPAIR);
+                repairMessage = rowMutation.getMessage(Gossiper.instance.getVersion(endpoints.get(i)));
             }
             catch (IOException e)
             {

@@ -65,8 +65,11 @@ public class Keyspace
 
     public final KeyspaceMetrics metric;
 
+<<<<<<< HEAD
+=======
     public final KeyspaceMetrics metric;
 
+>>>>>>> cassandra-2.1
     // It is possible to call Keyspace.open without a running daemon, so it makes sense to ensure
     // proper directories here as well as in CassandraDaemon.
     static

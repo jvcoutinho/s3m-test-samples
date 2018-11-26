@@ -23,7 +23,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.cassandra.db.ColumnFamily;
-import org.apache.cassandra.db.IColumn;
+import org.apache.cassandra.db.Column;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.ListType;
@@ -259,7 +259,7 @@ public abstract class Lists
             Term.Terminal value = t.bind(params.variables);
             assert index instanceof Constants.Value && value instanceof Constants.Value;
 
-            List<Pair<ByteBuffer, IColumn>> existingList = params.getPrefetchedList(rowKey, columnName.key);
+            List<Pair<ByteBuffer, Column>> existingList = params.getPrefetchedList(rowKey, columnName.key);
             int idx = ByteBufferUtil.toInt(((Constants.Value)index).bytes);
             if (idx < 0 || idx >= existingList.size())
                 throw new InvalidRequestException(String.format("List index %d out of bound, list has size %d", idx, existingList.size()));
@@ -352,7 +352,7 @@ public abstract class Lists
 
         public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
         {
-            List<Pair<ByteBuffer, IColumn>> existingList = params.getPrefetchedList(rowKey, columnName.key);
+            List<Pair<ByteBuffer, Column>> existingList = params.getPrefetchedList(rowKey, columnName.key);
             if (existingList.isEmpty())
                 return;
 
@@ -367,9 +367,9 @@ public abstract class Lists
             // the read-before-write this operation requires limits its usefulness on big lists, so in practice
             // toDiscard will be small and keeping a list will be more efficient.
             List<ByteBuffer> toDiscard = ((Lists.Value)value).elements;
-            for (Pair<ByteBuffer, IColumn> p : existingList)
+            for (Pair<ByteBuffer, Column> p : existingList)
             {
-                IColumn element = p.right;
+                Column element = p.right;
                 if (toDiscard.contains(element.value()))
                     cf.addColumn(params.makeTombstone(element.name()));
             }
@@ -397,7 +397,7 @@ public abstract class Lists
 
             assert index instanceof Constants.Value;
 
-            List<Pair<ByteBuffer, IColumn>> existingList = params.getPrefetchedList(rowKey, columnName.key);
+            List<Pair<ByteBuffer, Column>> existingList = params.getPrefetchedList(rowKey, columnName.key);
             int idx = ByteBufferUtil.toInt(((Constants.Value)index).bytes);
             if (idx < 0 || idx >= existingList.size())
                 throw new InvalidRequestException(String.format("List index %d out of bound, list has size %d", idx, existingList.size()));

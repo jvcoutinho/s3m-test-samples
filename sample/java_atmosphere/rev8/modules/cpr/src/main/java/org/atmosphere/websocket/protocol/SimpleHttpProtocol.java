@@ -18,10 +18,9 @@ package org.atmosphere.websocket.protocol;
 import org.atmosphere.cpr.ApplicationConfig;
 import org.atmosphere.cpr.AtmosphereRequest;
 import org.atmosphere.cpr.AtmosphereResource;
+import org.atmosphere.cpr.AtmosphereResponse;
 import org.atmosphere.cpr.AtmosphereServlet;
-import org.atmosphere.cpr.HeaderConfig;
 import org.atmosphere.websocket.WebSocket;
-import org.atmosphere.websocket.WebSocketHttpServletResponse;
 import org.atmosphere.websocket.WebSocketProcessor;
 import org.atmosphere.websocket.WebSocketProtocol;
 import org.slf4j.Logger;
@@ -29,11 +28,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import java.io.IOException;
 import java.io.Serializable;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.Map;
 
 /**
  * Like the {@link org.atmosphere.cpr.AsynchronousProcessor} class, this class is responsible for dispatching WebSocket messages to the
@@ -48,11 +43,15 @@ import java.util.Map;
  */
 public class SimpleHttpProtocol implements WebSocketProtocol, Serializable {
 
-    private static final Logger logger = LoggerFactory.getLogger(AtmosphereServlet.class);
+    private static final Logger logger = LoggerFactory.getLogger(SimpleHttpProtocol.class);
     private String contentType;
     private String methodType;
     private String delimiter;
+    private AtmosphereResource<HttpServletRequest, HttpServletResponse> resource;
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
     public void configure(AtmosphereServlet.AtmosphereConfig config) {
         String contentType = config.getInitParameter(ApplicationConfig.WEBSOCKET_CONTENT_TYPE);
@@ -74,8 +73,15 @@ public class SimpleHttpProtocol implements WebSocketProtocol, Serializable {
         this.delimiter = delimiter;
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public HttpServletRequest parseMessage(AtmosphereResource<HttpServletRequest, HttpServletResponse> resource, String d) {
+    public AtmosphereRequest onMessage(WebSocket webSocket, String d) {
+        if (resource == null) {
+            logger.error("Invalid state. No AtmosphereResource has been suspended");
+            return null;
+        }
         String pathInfo = resource.getRequest().getPathInfo();
         if (d.startsWith(delimiter)) {
             String[] token = d.split(delimiter);
@@ -93,9 +99,59 @@ public class SimpleHttpProtocol implements WebSocketProtocol, Serializable {
                 .build();
     }
 
+    /**
+     * {@inheritDoc}
+     */
     @Override
-    public HttpServletRequest parseMessage(AtmosphereResource<HttpServletRequest, HttpServletResponse> resource, byte[] d, final int offset, final int length) {
-        return parseMessage(resource, new String(d,offset,length));
+    public AtmosphereRequest onMessage(WebSocket webSocket, byte[] d, final int offset, final int length) {
+        return onMessage(webSocket, new String(d, offset, length));
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void onOpen(WebSocket webSocket) {
+        // eurk!!
+        this.resource = (AtmosphereResource<HttpServletRequest, HttpServletResponse>) webSocket.resource();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void onClose(WebSocket webSocket) {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void onError(WebSocket webSocket, WebSocketProcessor.WebSocketException t) {
+        logger.error(t.getMessage() + " Status {} Message {}", t.response().getStatus(), t.response().getStatusMessage());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean inspectResponse() {
+        return false;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String handleResponse(AtmosphereResponse<?> res, String message) {
+        // Should never be called
+        return message;
+    }
+
+    @Override
+    public byte[] handleResponse(AtmosphereResponse<?> res, byte[] message, int offset, int length) {
+        // Should never be called
+        return message;
     }
 
 }

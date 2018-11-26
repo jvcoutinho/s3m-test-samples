@@ -32,7 +32,6 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -40,13 +39,13 @@ import org.apache.cassandra.utils.FBUtilities;
 
 import com.google.common.collect.Iterators;
 
-import static junit.framework.Assert.assertEquals;
+import static org.junit.Assert.assertEquals;
 import static org.apache.cassandra.cql3.QueryProcessor.processInternal;
 
 public class HintedHandOffTest extends SchemaLoader
 {
 
-    public static final String TABLE4 = "Keyspace4";
+    public static final String KEYSPACE4 = "Keyspace4";
     public static final String STANDARD1_CF = "Standard1";
     public static final String COLUMN1 = "column1";
 
@@ -55,22 +54,18 @@ public class HintedHandOffTest extends SchemaLoader
     public void testCompactionOfHintsCF() throws Exception
     {
         // prepare hints column family
-        Table systemTable = Table.open("system");
-        ColumnFamilyStore hintStore = systemTable.getColumnFamilyStore(SystemTable.HINTS_CF);
+        Keyspace systemKeyspace = Keyspace.open("system");
+        ColumnFamilyStore hintStore = systemKeyspace.getColumnFamilyStore(SystemKeyspace.HINTS_CF);
         hintStore.clearUnsafe();
         hintStore.metadata.gcGraceSeconds(36000); // 10 hours
         hintStore.setCompactionStrategyClass(SizeTieredCompactionStrategy.class.getCanonicalName());
         hintStore.disableAutoCompaction();
 
         // insert 1 hint
-        RowMutation rm = new RowMutation(TABLE4, ByteBufferUtil.bytes(1));
-        rm.add(new QueryPath(STANDARD1_CF,
-                             null,
-                             ByteBufferUtil.bytes(String.valueOf(COLUMN1))),
-               ByteBufferUtil.EMPTY_BYTE_BUFFER,
-               System.currentTimeMillis());
+        RowMutation rm = new RowMutation(KEYSPACE4, ByteBufferUtil.bytes(1));
+        rm.add(STANDARD1_CF, ByteBufferUtil.bytes(String.valueOf(COLUMN1)), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
 
-        rm.toHint(rm.calculateHintTTL(), UUID.randomUUID()).apply();
+        HintedHandOffManager.instance.hintFor(rm, HintedHandOffManager.calculateHintTTL(rm), UUID.randomUUID()).apply();
 
         // flush data to disk
         hintStore.forceBlockingFlush();
@@ -93,8 +88,40 @@ public class HintedHandOffTest extends SchemaLoader
             HintedHandOffManager.instance.metrics.incrPastWindow(InetAddress.getLocalHost());
         HintedHandOffManager.instance.metrics.log();
 
-        UntypedResultSet rows = processInternal("SELECT hints_dropped FROM system." + SystemTable.PEER_EVENTS_CF);
+        UntypedResultSet rows = processInternal("SELECT hints_dropped FROM system." + SystemKeyspace.PEER_EVENTS_CF);
         Map<UUID, Integer> returned = rows.one().getMap("hints_dropped", UUIDType.instance, Int32Type.instance);
         assertEquals(Iterators.getLast(returned.values().iterator()).intValue(), 99);
+    }
+
+    @Test(timeout = 5000)
+    public void testTruncateHints() throws Exception
+    {
+        Keyspace systemKeyspace = Keyspace.open("system");
+        ColumnFamilyStore hintStore = systemKeyspace.getColumnFamilyStore(SystemKeyspace.HINTS_CF);
+        hintStore.clearUnsafe();
+
+        // insert 1 hint
+        RowMutation rm = new RowMutation(KEYSPACE4, ByteBufferUtil.bytes(1));
+        rm.add(STANDARD1_CF, ByteBufferUtil.bytes(String.valueOf(COLUMN1)), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
+
+        HintedHandOffManager.instance.hintFor(rm, HintedHandOffManager.calculateHintTTL(rm), UUID.randomUUID()).apply();
+
+        assert getNoOfHints() == 1;
+
+        HintedHandOffManager.instance.truncateAllHints();
+
+        while(getNoOfHints() > 0)
+        {
+            Thread.sleep(100);
+        }
+
+        assert getNoOfHints() == 0;
+    }
+
+    private int getNoOfHints()
+    {
+        String req = "SELECT * FROM system.%s";
+        UntypedResultSet resultSet = processInternal(String.format(req, SystemKeyspace.HINTS_CF));
+        return resultSet.size();
     }
 }

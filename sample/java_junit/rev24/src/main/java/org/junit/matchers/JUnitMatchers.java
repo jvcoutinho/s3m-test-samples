@@ -1,5 +1,11 @@
 package org.junit.matchers;
 
+import static org.hamcrest.CoreMatchers.anyOf;
+import static org.hamcrest.CoreMatchers.equalTo;
+
+import java.util.ArrayList;
+import java.util.List;
+
 import org.hamcrest.CoreMatchers;
 import org.hamcrest.Matcher;
 import org.hamcrest.core.CombinableMatcher;
@@ -7,12 +13,8 @@ import org.hamcrest.core.CombinableMatcher;
 /**
  * Convenience import class: these are useful matchers for use with the assertThat method, but they are
  * not currently included in the basic CoreMatchers class from hamcrest.
- * @deprecated as of JUnit 4.7, all of these matchers are found in the org.hamcrest.CoreMatchers
- *             class instead.
  */
-@Deprecated
 public class JUnitMatchers {
-	// TODO (May 27, 2009 11:46:27 AM): deprecate all?
 	/**
 	 * @param element
 	 * @return A matcher matching any collection containing element
@@ -20,7 +22,7 @@ public class JUnitMatchers {
 	 */
 	@Deprecated
 	public static <T> Matcher<Iterable<? super T>> hasItem(T element) {
-		return CoreMatchers.hasItem(element);
+		return CoreMatchers.<T>hasItem(element);
 	}
 
 	/**
@@ -30,7 +32,7 @@ public class JUnitMatchers {
 	 */
 	@Deprecated
     public static <T> Matcher<Iterable<? super T>> hasItem(Matcher<? super T> elementMatcher) {
-		return CoreMatchers.hasItem(elementMatcher);
+		return CoreMatchers.<T>hasItem(elementMatcher);
 	}
 
 	/**
@@ -61,7 +63,7 @@ public class JUnitMatchers {
 	 * @deprecated use CoreMatchers.everyItem directly
 	 */
 	@Deprecated
-	public static <T> Matcher<Iterable<T>> everyItem(final Matcher<T> elementMatcher) {
+	public static <T> Matcher<Iterable<T>> each(final Matcher<T> elementMatcher) {
 		return CoreMatchers.everyItem(elementMatcher);
 	}
 
@@ -80,22 +82,59 @@ public class JUnitMatchers {
 	 * <pre>
 	 *   assertThat(string, both(containsString("a")).and(containsString("b")));
 	 * </pre>
-	 * @deprecated Use org.hamcrest.CoreMatchers.both
 	 */
-	@Deprecated
-	public static <T> CombinableMatcher<T> both(Matcher<? super T> matcher) {
+	public static <T> CombinableMatcher<T> both(Matcher<T> matcher) {
 		return CoreMatchers.both(matcher);
 	}
 	
 	/**
 	 * This is useful for fluently combining matchers where either may pass, for example:
 	 * <pre>
-	 *   assertThat(string, both(containsString("a")).and(containsString("b")));
+	 *   assertThat(string, either(containsString("a")).or(containsString("b")));
 	 * </pre>
-	 * @deprecated Use org.hamcrest.CoreMatchers.either
+	 * 
+	 * If you want to say either(is(3)).or(is(4)), and are prevented,
+	 * please see isOneOf(...) below.
 	 */
-	@Deprecated
-	public static <T> CombinableMatcher<T> either(Matcher<? super T> matcher) {
+	public static <T> CombinableMatcher<T> either(Matcher<T> matcher) {
 		return CoreMatchers.either(matcher);
-	}	
+	}
+	
+	/**
+	 * This is sugar for the situation where you want to specify
+	 * a finite list of concrete objects that can match.
+	 * For example:
+	 * <pre>
+	 *   assertThat(string, isOneOf("a", "b", "c"));
+	 *   // is equivalent to
+	 *   assertThat(string, anyOf(is("a"), is("b"), is("c")))
+	 * </pre>
+	 */
+	public static <T> Matcher<T> isOneOf(T... objects) {
+		List<Matcher<? super T>> matchers = new ArrayList<Matcher<? super T>>();
+		for (T each : objects) {
+			matchers.add(equalTo(each));
+		}
+		return anyOf(matchers);
+	}
+	
+	/**
+	 * Loosens type parameter, in order to use a Matcher 
+	 * in a place where Java doesn't want to type-check:
+	 *
+	 * Goofy example:
+	 * <pre>
+	 *   assertThat(3, matches(containsString("a")));
+	 * </pre>
+	 * 
+	 * Real example:
+	 * <pre>
+	 *   assertThat(3, either(matches(is(String.class))).or(
+	 *		                  matches(is(Integer.class))));
+	 * </pre>
+	 */
+	@SuppressWarnings("unchecked")
+	public static <T> Matcher<T> matches(Matcher<?> matcher) {
+		return (Matcher<T>)matcher;
+	}
 }

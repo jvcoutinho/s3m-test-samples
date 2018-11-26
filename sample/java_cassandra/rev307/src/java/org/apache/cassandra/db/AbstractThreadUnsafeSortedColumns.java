@@ -17,20 +17,24 @@
  */
 package org.apache.cassandra.db;
 
-import java.util.Iterator;
+import org.apache.cassandra.config.CFMetaData;
 
-import org.apache.cassandra.db.marshal.AbstractType;
-
-public abstract class AbstractThreadUnsafeSortedColumns implements ISortedColumns
+public abstract class AbstractThreadUnsafeSortedColumns extends ColumnFamily
 {
-    private DeletionInfo deletionInfo;
+    protected DeletionInfo deletionInfo;
 
-    public AbstractThreadUnsafeSortedColumns()
+    public AbstractThreadUnsafeSortedColumns(CFMetaData metadata)
     {
-        deletionInfo = DeletionInfo.LIVE;
+        this(metadata, DeletionInfo.LIVE);
     }
 
-    public DeletionInfo getDeletionInfo()
+    protected AbstractThreadUnsafeSortedColumns(CFMetaData metadata, DeletionInfo deletionInfo)
+    {
+        super(metadata);
+        this.deletionInfo = deletionInfo;
+    }
+
+    public DeletionInfo deletionInfo()
     {
         return deletionInfo;
     }
@@ -48,52 +52,5 @@ public abstract class AbstractThreadUnsafeSortedColumns implements ISortedColumn
     public void maybeResetDeletionTimes(int gcBefore)
     {
         deletionInfo = deletionInfo.purge(gcBefore);
-    }
-
-    public void retainAll(ISortedColumns columns)
-    {
-        Iterator<IColumn> iter = iterator();
-        Iterator<IColumn> toRetain = columns.iterator();
-        IColumn current = iter.hasNext() ? iter.next() : null;
-        IColumn retain = toRetain.hasNext() ? toRetain.next() : null;
-        AbstractType<?> comparator = getComparator();
-        while (current != null && retain != null)
-        {
-            int c = comparator.compare(current.name(), retain.name());
-            if (c == 0)
-            {
-                if (current instanceof SuperColumn)
-                {
-                    assert retain instanceof SuperColumn;
-                    ((SuperColumn)current).retainAll((SuperColumn)retain);
-                }
-                current = iter.hasNext() ? iter.next() : null;
-                retain = toRetain.hasNext() ? toRetain.next() : null;
-            }
-            else if (c < 0)
-            {
-                iter.remove();
-                current = iter.hasNext() ? iter.next() : null;
-            }
-            else // c > 0
-            {
-                retain = toRetain.hasNext() ? toRetain.next() : null;
-            }
-        }
-        while (current != null)
-        {
-            iter.remove();
-            current = iter.hasNext() ? iter.next() : null;
-        }
-    }
-
-    public boolean isEmpty()
-    {
-        return size() == 0;
-    }
-
-    public int getEstimatedColumnCount()
-    {
-        return size();
     }
 }

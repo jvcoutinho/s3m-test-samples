@@ -29,14 +29,11 @@ import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
-
-import org.apache.cassandra.db.compaction.CompactionHistoryTabularData;
-import org.apache.cassandra.metrics.RestorableMeter;
-import org.apache.cassandra.transport.Server;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cache.CachingOptions;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
@@ -45,6 +42,9 @@ import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
+import org.apache.cassandra.db.compaction.CompactionHistoryTabularData;
+import org.apache.cassandra.db.composites.Composite;
+import org.apache.cassandra.db.composites.Composites;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.dht.Range;
@@ -53,10 +53,12 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.locator.IEndpointSnitch;
+import org.apache.cassandra.metrics.RestorableMeter;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.paxos.Commit;
 import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.thrift.cassandraConstants;
+import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.utils.*;
 
 import static org.apache.cassandra.cql3.QueryProcessor.processInternal;
@@ -79,6 +81,7 @@ public class SystemKeyspace
     public static final String SCHEMA_COLUMNFAMILIES_CF = "schema_columnfamilies";
     public static final String SCHEMA_COLUMNS_CF = "schema_columns";
     public static final String SCHEMA_TRIGGERS_CF = "schema_triggers";
+    public static final String SCHEMA_USER_TYPES_CF = "schema_usertypes";
     public static final String COMPACTION_LOG = "compactions_in_progress";
     public static final String PAXOS_CF = "paxos";
     public static final String SSTABLE_ACTIVITY_CF = "sstable_activity";
@@ -86,6 +89,12 @@ public class SystemKeyspace
 
     private static final String LOCAL_KEY = "local";
     private static final ByteBuffer ALL_LOCAL_NODE_ID_KEY = ByteBufferUtil.bytes("Local");
+
+    public static final List<String> allSchemaCfs = Arrays.asList(SCHEMA_KEYSPACES_CF,
+                                                                  SCHEMA_COLUMNFAMILIES_CF,
+                                                                  SCHEMA_COLUMNS_CF,
+                                                                  SCHEMA_TRIGGERS_CF,
+                                                                  SCHEMA_USER_TYPES_CF);
 
     public enum BootstrapState
     {
@@ -103,8 +112,8 @@ public class SystemKeyspace
     {
         setupVersion();
 
-        copyAllAliasesToColumnsProper();
-
+        migrateIndexInterval();
+        migrateCachingOption();
         // add entries to system schema columnfamilies for the hardcoded system definitions
         for (String ksname : Schema.systemKeyspaceNames)
         {
@@ -122,31 +131,6 @@ public class SystemKeyspace
         }
     }
 
-    // Starting with 2.0 (CASSANDRA-5125) we keep all the 'aliases' in system.schema_columns together with the regular columns,
-    // but only for the newly-created tables. This migration is for the pre-2.0 created tables.
-    private static void copyAllAliasesToColumnsProper()
-    {
-        for (UntypedResultSet.Row row : processInternal(String.format("SELECT * FROM system.%s", SCHEMA_COLUMNFAMILIES_CF)))
-        {
-            CFMetaData table = CFMetaData.fromSchema(row);
-            String query = String.format("SELECT writetime(type) "
-                                         + "FROM system.%s "
-                                         + "WHERE keyspace_name = '%s' AND columnfamily_name = '%s'",
-                                         SCHEMA_COLUMNFAMILIES_CF,
-                                         table.ksName,
-                                         table.cfName);
-            long timestamp = processInternal(query).one().getLong("writetime(type)");
-            try
-            {
-                table.toSchema(timestamp).apply();
-            }
-            catch (ConfigurationException e)
-            {
-                // shouldn't happen
-            }
-        }
-    }
-
     private static void setupVersion()
     {
         String req = "INSERT INTO system.%s (key, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner) VALUES ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')";
@@ -160,6 +144,66 @@ public class SystemKeyspace
                                          snitch.getDatacenter(FBUtilities.getBroadcastAddress()),
                                          snitch.getRack(FBUtilities.getBroadcastAddress()),
                                          DatabaseDescriptor.getPartitioner().getClass().getName()));
+    }
+
+    // TODO: In 3.0, remove this and the index_interval column from system.schema_columnfamilies
+    /** Migrates index_interval values to min_index_interval and sets index_interval to null */
+    private static void migrateIndexInterval()
+    {
+        for (UntypedResultSet.Row row : processInternal(String.format("SELECT * FROM system.%s", SCHEMA_COLUMNFAMILIES_CF)))
+        {
+            if (!row.has("index_interval"))
+                continue;
+
+            logger.debug("Migrating index_interval to min_index_interval");
+
+            CFMetaData table = CFMetaData.fromSchema(row);
+            String query = String.format("SELECT writetime(type) "
+                    + "FROM system.%s "
+                    + "WHERE keyspace_name = '%s' AND columnfamily_name = '%s'",
+                    SCHEMA_COLUMNFAMILIES_CF,
+                    table.ksName,
+                    table.cfName);
+            long timestamp = processInternal(query).one().getLong("writetime(type)");
+            try
+            {
+                table.toSchema(timestamp).apply();
+            }
+            catch (ConfigurationException e)
+            {
+                // shouldn't happen
+            }
+        }
+    }
+
+    private static void migrateCachingOption()
+    {
+        for (UntypedResultSet.Row row : processInternal(String.format("SELECT * FROM system.%s", SCHEMA_COLUMNFAMILIES_CF)))
+        {
+            if (!row.has("caching"))
+                continue;
+
+            if (!CachingOptions.isLegacy(row.getString("caching")))
+                continue;
+            try
+            {
+                CachingOptions caching = CachingOptions.fromString(row.getString("caching"));
+                CFMetaData table = CFMetaData.fromSchema(row);
+                logger.info("Migrating caching option {} to {} for {}.{}", row.getString("caching"), caching.toString(), table.ksName, table.cfName);
+                String query = String.format("SELECT writetime(type) "
+                        + "FROM system.%s "
+                        + "WHERE keyspace_name = '%s' AND columnfamily_name = '%s'",
+                        SCHEMA_COLUMNFAMILIES_CF,
+                        table.ksName,
+                        table.cfName);
+                long timestamp = processInternal(query).one().getLong("writetime(type)");
+                table.toSchema(timestamp).apply();
+            }
+            catch (ConfigurationException e)
+            {
+                // shouldn't happen
+            }
+        }
     }
 
     /**
@@ -621,7 +665,7 @@ public class SystemKeyspace
         ColumnFamilyStore cfs = Keyspace.open(Keyspace.SYSTEM_KS).getColumnFamilyStore(INDEX_CF);
         QueryFilter filter = QueryFilter.getNamesFilter(decorate(ByteBufferUtil.bytes(keyspaceName)),
                                                         INDEX_CF,
-                                                        FBUtilities.singleton(ByteBufferUtil.bytes(indexName), cfs.getComparator()),
+                                                        FBUtilities.singleton(cfs.getComparator().makeCellName(indexName), cfs.getComparator()),
                                                         System.currentTimeMillis());
         return ColumnFamilyStore.removeDeleted(cfs.getColumnFamily(filter), Integer.MAX_VALUE) != null;
     }
@@ -629,16 +673,15 @@ public class SystemKeyspace
     public static void setIndexBuilt(String keyspaceName, String indexName)
     {
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(Keyspace.SYSTEM_KS, INDEX_CF);
-        cf.addColumn(new Column(ByteBufferUtil.bytes(indexName), ByteBufferUtil.EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros()));
-        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, ByteBufferUtil.bytes(keyspaceName), cf);
-        rm.apply();
+        cf.addColumn(new Cell(cf.getComparator().makeCellName(indexName), ByteBufferUtil.EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros()));
+        new Mutation(Keyspace.SYSTEM_KS, ByteBufferUtil.bytes(keyspaceName), cf).apply();
     }
 
     public static void setIndexRemoved(String keyspaceName, String indexName)
     {
-        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, ByteBufferUtil.bytes(keyspaceName));
-        rm.delete(INDEX_CF, ByteBufferUtil.bytes(indexName), FBUtilities.timestampMicros());
-        rm.apply();
+        Mutation mutation = new Mutation(Keyspace.SYSTEM_KS, ByteBufferUtil.bytes(keyspaceName));
+        mutation.delete(INDEX_CF, CFMetaData.IndexCf.comparator.makeCellName(indexName), FBUtilities.timestampMicros());
+        mutation.apply();
     }
 
     /**
@@ -685,14 +728,14 @@ public class SystemKeyspace
         // Get the last CounterId (since CounterId are timeuuid is thus ordered from the older to the newer one)
         QueryFilter filter = QueryFilter.getSliceFilter(decorate(ALL_LOCAL_NODE_ID_KEY),
                                                         COUNTER_ID_CF,
-                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
-                                                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                                                        Composites.EMPTY,
+                                                        Composites.EMPTY,
                                                         true,
                                                         1,
                                                         System.currentTimeMillis());
         ColumnFamily cf = keyspace.getColumnFamilyStore(COUNTER_ID_CF).getColumnFamily(filter);
-        if (cf != null && cf.getColumnCount() != 0)
-            return CounterId.wrap(cf.iterator().next().name());
+        if (cf != null && cf.hasColumns())
+            return CounterId.wrap(cf.iterator().next().name().toByteBuffer());
         else
             return null;
     }
@@ -708,31 +751,9 @@ public class SystemKeyspace
         ByteBuffer ip = ByteBuffer.wrap(FBUtilities.getBroadcastAddress().getAddress());
 
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(Keyspace.SYSTEM_KS, COUNTER_ID_CF);
-        cf.addColumn(new Column(newCounterId.bytes(), ip, now));
-        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, ALL_LOCAL_NODE_ID_KEY, cf);
-        rm.apply();
+        cf.addColumn(new Cell(cf.getComparator().makeCellName(newCounterId.bytes()), ip, now));
+        new Mutation(Keyspace.SYSTEM_KS, ALL_LOCAL_NODE_ID_KEY, cf).apply();
         forceBlockingFlush(COUNTER_ID_CF);
-    }
-
-    public static List<CounterId.CounterIdRecord> getOldLocalCounterIds()
-    {
-        List<CounterId.CounterIdRecord> l = new ArrayList<CounterId.CounterIdRecord>();
-
-        Keyspace keyspace = Keyspace.open(Keyspace.SYSTEM_KS);
-        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(ALL_LOCAL_NODE_ID_KEY), COUNTER_ID_CF, System.currentTimeMillis());
-        ColumnFamily cf = keyspace.getColumnFamilyStore(COUNTER_ID_CF).getColumnFamily(filter);
-
-        CounterId previous = null;
-        for (Column c : cf)
-        {
-            if (previous != null)
-                l.add(new CounterId.CounterIdRecord(previous, c.timestamp()));
-
-            // this will ignore the last column on purpose since it is the
-            // current local node id
-            previous = CounterId.wrap(c.name());
-        }
-        return l;
     }
 
     /**
@@ -748,10 +769,8 @@ public class SystemKeyspace
     {
         List<Row> schema = new ArrayList<>();
 
-        schema.addAll(serializedSchema(SCHEMA_KEYSPACES_CF));
-        schema.addAll(serializedSchema(SCHEMA_COLUMNFAMILIES_CF));
-        schema.addAll(serializedSchema(SCHEMA_COLUMNS_CF));
-        schema.addAll(serializedSchema(SCHEMA_TRIGGERS_CF));
+        for (String cf : allSchemaCfs)
+            schema.addAll(serializedSchema(cf));
 
         return schema;
     }
@@ -771,29 +790,27 @@ public class SystemKeyspace
                                                      System.currentTimeMillis());
     }
 
-    public static Collection<RowMutation> serializeSchema()
+    public static Collection<Mutation> serializeSchema()
     {
-        Map<DecoratedKey, RowMutation> mutationMap = new HashMap<>();
+        Map<DecoratedKey, Mutation> mutationMap = new HashMap<>();
 
-        serializeSchema(mutationMap, SCHEMA_KEYSPACES_CF);
-        serializeSchema(mutationMap, SCHEMA_COLUMNFAMILIES_CF);
-        serializeSchema(mutationMap, SCHEMA_COLUMNS_CF);
-        serializeSchema(mutationMap, SCHEMA_TRIGGERS_CF);
+        for (String cf : allSchemaCfs)
+            serializeSchema(mutationMap, cf);
 
         return mutationMap.values();
     }
 
-    private static void serializeSchema(Map<DecoratedKey, RowMutation> mutationMap, String schemaCfName)
+    private static void serializeSchema(Map<DecoratedKey, Mutation> mutationMap, String schemaCfName)
     {
         for (Row schemaRow : serializedSchema(schemaCfName))
         {
             if (Schema.ignoredSchemaRow(schemaRow))
                 continue;
 
-            RowMutation mutation = mutationMap.get(schemaRow.key);
+            Mutation mutation = mutationMap.get(schemaRow.key);
             if (mutation == null)
             {
-                mutation = new RowMutation(Keyspace.SYSTEM_KS, schemaRow.key.key);
+                mutation = new Mutation(Keyspace.SYSTEM_KS, schemaRow.key.key);
                 mutationMap.put(schemaRow.key, mutation);
             }
 
@@ -838,9 +855,10 @@ public class SystemKeyspace
     {
         DecoratedKey key = StorageService.getPartitioner().decorateKey(getSchemaKSKey(ksName));
         ColumnFamilyStore schemaCFS = SystemKeyspace.schemaCFS(schemaCfName);
+        Composite prefix = schemaCFS.getComparator().make(cfName);
         ColumnFamily cf = schemaCFS.getColumnFamily(key,
-                                                    DefsTables.searchComposite(cfName, true),
-                                                    DefsTables.searchComposite(cfName, false),
+                                                    prefix,
+                                                    prefix.end(),
                                                     false,
                                                     Integer.MAX_VALUE,
                                                     System.currentTimeMillis());
@@ -855,7 +873,7 @@ public class SystemKeyspace
             return new PaxosState(key, metadata);
         UntypedResultSet.Row row = results.one();
         Commit promised = row.has("in_progress_ballot")
-                        ? new Commit(key, row.getUUID("in_progress_ballot"), EmptyColumns.factory.create(metadata))
+                        ? new Commit(key, row.getUUID("in_progress_ballot"), ArrayBackedSortedColumns.factory.create(metadata))
                         : Commit.emptyCommit(key, metadata);
         // either we have both a recently accepted ballot and update or we have neither
         Commit accepted = row.has("proposal")

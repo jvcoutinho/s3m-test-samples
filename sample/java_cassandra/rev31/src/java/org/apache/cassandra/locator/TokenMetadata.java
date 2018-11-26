@@ -27,7 +27,7 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import com.google.common.collect.*;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,9 +86,6 @@ public class TokenMetadata
 
     // nodes which are migrating to the new tokens in the ring
     private final Set<Pair<Token, InetAddress>> movingEndpoints = new HashSet<Pair<Token, InetAddress>>();
-
-    // tokens which are migrating to new endpoints
-    private final ConcurrentMap<Token, InetAddress> relocatingTokens = new ConcurrentHashMap<Token, InetAddress>();
 
     /* Use this lock for manipulating the token map */
     private final ReadWriteLock lock = new ReentrantReadWriteLock(true);
@@ -388,33 +385,6 @@ public class TokenMetadata
         }
     }
 
-    /**
-     * Add new relocating ranges (tokens moving from their respective endpoints, to another).
-     * @param tokens tokens being moved
-     * @param endpoint destination of moves
-     */
-    public void addRelocatingTokens(Collection<Token> tokens, InetAddress endpoint)
-    {
-        assert endpoint != null;
-        assert tokens != null && tokens.size() > 0;
-
-        lock.writeLock().lock();
-
-        try
-        {
-            for (Token token : tokens)
-            {
-                InetAddress prev = relocatingTokens.put(token, endpoint);
-                if (prev != null && !prev.equals(endpoint))
-                    logger.warn("Relocation of {} to {} overwrites previous to {}", new Object[]{token, endpoint, prev});
-            }
-        }
-        finally
-        {
-            lock.writeLock().unlock();
-        }
-    }
-
     public void removeEndpoint(InetAddress endpoint)
     {
         assert endpoint != null;
@@ -457,38 +427,6 @@ public class TokenMetadata
             }
 
             invalidateCachedRings();
-        }
-        finally
-        {
-            lock.writeLock().unlock();
-        }
-    }
-
-    /**
-     * Remove pair of token/address from relocating ranges.
-     * @param endpoint
-     */
-    public void removeFromRelocating(Token token, InetAddress endpoint)
-    {
-        assert endpoint != null;
-        assert token != null;
-
-        lock.writeLock().lock();
-
-        try
-        {
-            InetAddress previous = relocatingTokens.remove(token);
-
-            if (previous == null)
-            {
-                logger.debug("Cannot remove {}, not found among the relocating (previously removed?)", token);
-            }
-            else if (!previous.equals(endpoint))
-            {
-                logger.warn(
-                        "Removal of relocating token {} with mismatched endpoint ({} != {})",
-                        new Object[]{token, endpoint, previous});
-            }
         }
         finally
         {
@@ -570,22 +508,6 @@ public class TokenMetadata
         }
     }
 
-    public boolean isRelocating(Token token)
-    {
-        assert token != null;
-
-        lock.readLock().lock();
-
-        try
-        {
-            return relocatingTokens.containsKey(token);
-        }
-        finally
-        {
-            lock.readLock().unlock();
-        }
-    }
-
     private final AtomicReference<TokenMetadata> cachedTokenMap = new AtomicReference<TokenMetadata>();
 
     /**
@@ -658,7 +580,7 @@ public class TokenMetadata
 
     /**
      * Create a copy of TokenMetadata with tokenToEndpointMap reflecting situation after all
-     * current leave, move, and relocate operations have finished.
+     * current leave, and move operations have finished.
      *
      * @return new token metadata
      */
@@ -676,9 +598,6 @@ public class TokenMetadata
 
             for (Pair<Token, InetAddress> pair : movingEndpoints)
                 metadata.updateNormalToken(pair.left, pair.right);
-
-            for (Map.Entry<Token, InetAddress> relocating: relocatingTokens.entrySet())
-                metadata.updateNormalToken(relocating.getKey(), relocating.getValue());
 
             return metadata;
         }
@@ -720,13 +639,13 @@ public class TokenMetadata
         return sortedTokens;
     }
 
-    private Multimap<Range<Token>, InetAddress> getPendingRangesMM(String table)
+    private Multimap<Range<Token>, InetAddress> getPendingRangesMM(String keyspaceName)
     {
-        Multimap<Range<Token>, InetAddress> map = pendingRanges.get(table);
+        Multimap<Range<Token>, InetAddress> map = pendingRanges.get(keyspaceName);
         if (map == null)
         {
             map = HashMultimap.create();
-            Multimap<Range<Token>, InetAddress> priorMap = pendingRanges.putIfAbsent(table, map);
+            Multimap<Range<Token>, InetAddress> priorMap = pendingRanges.putIfAbsent(keyspaceName, map);
             if (priorMap != null)
                 map = priorMap;
         }
@@ -734,15 +653,15 @@ public class TokenMetadata
     }
 
     /** a mutable map may be returned but caller should not modify it */
-    public Map<Range<Token>, Collection<InetAddress>> getPendingRanges(String table)
+    public Map<Range<Token>, Collection<InetAddress>> getPendingRanges(String keyspaceName)
     {
-        return getPendingRangesMM(table).asMap();
+        return getPendingRangesMM(keyspaceName).asMap();
     }
 
-    public List<Range<Token>> getPendingRanges(String table, InetAddress endpoint)
+    public List<Range<Token>> getPendingRanges(String keyspaceName, InetAddress endpoint)
     {
         List<Range<Token>> ranges = new ArrayList<Range<Token>>();
-        for (Map.Entry<Range<Token>, InetAddress> entry : getPendingRangesMM(table).entries())
+        for (Map.Entry<Range<Token>, InetAddress> entry : getPendingRangesMM(keyspaceName).entries())
         {
             if (entry.getValue().equals(endpoint))
             {
@@ -752,9 +671,9 @@ public class TokenMetadata
         return ranges;
     }
 
-    public void setPendingRanges(String table, Multimap<Range<Token>, InetAddress> rangeMap)
+    public void setPendingRanges(String keyspaceName, Multimap<Range<Token>, InetAddress> rangeMap)
     {
-        pendingRanges.put(table, rangeMap);
+        pendingRanges.put(keyspaceName, rangeMap);
     }
 
     public Token getPredecessor(Token token)
@@ -829,15 +748,6 @@ public class TokenMetadata
         {
             lock.readLock().unlock();
         }
-    }
-
-    /**
-     * Ranges which are migrating to new endpoints.
-     * @return set of token-address pairs of relocating ranges
-     */
-    public Map<Token, InetAddress> getRelocatingRanges()
-    {
-        return relocatingTokens;
     }
 
     public static int firstTokenIndex(final ArrayList ring, Token start, boolean insertMin)
@@ -994,19 +904,9 @@ public class TokenMetadata
         return sb.toString();
     }
 
-    public String printRelocatingRanges()
+    public Collection<InetAddress> pendingEndpointsFor(Token token, String keyspaceName)
     {
-        StringBuilder sb = new StringBuilder();
-
-        for (Map.Entry<Token, InetAddress> entry : relocatingTokens.entrySet())
-            sb.append(String.format("%s:%s%n", entry.getKey(), entry.getValue()));
-
-        return sb.toString();
-    }
-
-    public Collection<InetAddress> pendingEndpointsFor(Token token, String table)
-    {
-        Map<Range<Token>, Collection<InetAddress>> ranges = getPendingRanges(table);
+        Map<Range<Token>, Collection<InetAddress>> ranges = getPendingRanges(keyspaceName);
         if (ranges.isEmpty())
             return Collections.emptyList();
 
@@ -1023,9 +923,9 @@ public class TokenMetadata
     /**
      * @deprecated retained for benefit of old tests
      */
-    public Collection<InetAddress> getWriteEndpoints(Token token, String table, Collection<InetAddress> naturalEndpoints)
+    public Collection<InetAddress> getWriteEndpoints(Token token, String keyspaceName, Collection<InetAddress> naturalEndpoints)
     {
-        return ImmutableList.copyOf(Iterables.concat(naturalEndpoints, pendingEndpointsFor(token, table)));
+        return ImmutableList.copyOf(Iterables.concat(naturalEndpoints, pendingEndpointsFor(token, keyspaceName)));
     }
 
     /** @return an endpoint to token multimap representation of tokenToEndpointMap (a copy) */

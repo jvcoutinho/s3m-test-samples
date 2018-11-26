@@ -26,8 +26,11 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.SortedSet;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ExecutionException;
 
 import org.slf4j.Logger;
@@ -43,14 +46,14 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
-
-import static com.google.common.base.Charsets.UTF_8;
+import org.apache.cassandra.utils.NodeId;
 
 public class SystemTable
 {
     private static Logger logger = LoggerFactory.getLogger(SystemTable.class);
     public static final String STATUS_CF = "LocationInfo"; // keep the old CF string for backwards-compatibility
     public static final String INDEX_CF = "IndexInfo";
+    public static final String NODE_ID_CF = "NodeIdInfo";
     private static final ByteBuffer LOCATION_KEY = ByteBufferUtil.bytes("L");
     private static final ByteBuffer RING_KEY = ByteBufferUtil.bytes("Ring");
     private static final ByteBuffer BOOTSTRAP_KEY = ByteBufferUtil.bytes("Bootstrap");
@@ -60,6 +63,8 @@ public class SystemTable
     private static final ByteBuffer GENERATION = ByteBufferUtil.bytes("Generation");
     private static final ByteBuffer CLUSTERNAME = ByteBufferUtil.bytes("ClusterName");
     private static final ByteBuffer PARTITIONER = ByteBufferUtil.bytes("Partioner");
+    private static final ByteBuffer CURRENT_LOCAL_NODE_ID_KEY = ByteBufferUtil.bytes("CurrentLocal");
+    private static final ByteBuffer ALL_LOCAL_NODE_ID_KEY = ByteBufferUtil.bytes("Local");
 
     private static DecoratedKey decorate(ByteBuffer key)
     {
@@ -239,8 +244,8 @@ public class SystemTable
             // no system files.  this is a new node.
             RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, LOCATION_KEY);
             cf = ColumnFamily.create(Table.SYSTEM_TABLE, SystemTable.STATUS_CF);
-            cf.addColumn(new Column(PARTITIONER, ByteBuffer.wrap(DatabaseDescriptor.getPartitioner().getClass().getName().getBytes(UTF_8)), FBUtilities.timestampMicros()));
-            cf.addColumn(new Column(CLUSTERNAME, ByteBuffer.wrap(DatabaseDescriptor.getClusterName().getBytes()), FBUtilities.timestampMicros()));
+            cf.addColumn(new Column(PARTITIONER, ByteBufferUtil.bytes(DatabaseDescriptor.getPartitioner().getClass().getName()), FBUtilities.timestampMicros()));
+            cf.addColumn(new Column(CLUSTERNAME, ByteBufferUtil.bytes(DatabaseDescriptor.getClusterName()), FBUtilities.timestampMicros()));
             rm.add(cf);
             rm.apply();
 
@@ -252,9 +257,9 @@ public class SystemTable
         IColumn clusterCol = cf.getColumn(CLUSTERNAME);
         assert partitionerCol != null;
         assert clusterCol != null;
-        if (!DatabaseDescriptor.getPartitioner().getClass().getName().equals(ByteBufferUtil.string(partitionerCol.value(), UTF_8)))
+        if (!DatabaseDescriptor.getPartitioner().getClass().getName().equals(ByteBufferUtil.string(partitionerCol.value())))
             throw new ConfigurationException("Detected partitioner mismatch! Did you change the partitioner?");
-        String savedClusterName = ByteBufferUtil.string(clusterCol.value(), UTF_8);
+        String savedClusterName = ByteBufferUtil.string(clusterCol.value());
         if (!DatabaseDescriptor.getClusterName().equals(savedClusterName))
             throw new ConfigurationException("Saved cluster name " + savedClusterName + " != configured name " + DatabaseDescriptor.getClusterName());
     }
@@ -331,17 +336,17 @@ public class SystemTable
     public static boolean isIndexBuilt(String table, String indexName)
     {
         ColumnFamilyStore cfs = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(INDEX_CF);
-        QueryFilter filter = QueryFilter.getNamesFilter(decorate(ByteBuffer.wrap(table.getBytes(UTF_8))),
+        QueryFilter filter = QueryFilter.getNamesFilter(decorate(ByteBufferUtil.bytes(table)),
                                                         new QueryPath(INDEX_CF),
-                                                        ByteBuffer.wrap(indexName.getBytes(UTF_8)));
+                                                        ByteBufferUtil.bytes(indexName));
         return cfs.getColumnFamily(filter) != null;
     }
 
     public static void setIndexBuilt(String table, String indexName)
     {
         ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_TABLE, INDEX_CF);
-        cf.addColumn(new Column(ByteBuffer.wrap(indexName.getBytes(UTF_8)), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis()));
-        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, ByteBuffer.wrap(table.getBytes(UTF_8)));
+        cf.addColumn(new Column(ByteBufferUtil.bytes(indexName), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis()));
+        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, ByteBufferUtil.bytes(table));
         rm.add(cf);
         try
         {
@@ -357,8 +362,8 @@ public class SystemTable
 
     public static void setIndexRemoved(String table, String indexName)
     {
-        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, ByteBuffer.wrap(table.getBytes(UTF_8)));
-        rm.delete(new QueryPath(INDEX_CF, null, ByteBuffer.wrap(indexName.getBytes(UTF_8))), System.currentTimeMillis());
+        RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, ByteBufferUtil.bytes(table));
+        rm.delete(new QueryPath(INDEX_CF, null, ByteBufferUtil.bytes(indexName)), System.currentTimeMillis());
         try
         {
             rm.apply();
@@ -369,5 +374,89 @@ public class SystemTable
         }
 
         forceBlockingFlush(INDEX_CF);
+    }
+
+    /**
+     * Read the current local node id from the system table or null if no
+     * such node id is recorded.
+     */
+    public static NodeId getCurrentLocalNodeId()
+    {
+        ByteBuffer id = null;
+        Table table = Table.open(Table.SYSTEM_TABLE);
+        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(CURRENT_LOCAL_NODE_ID_KEY),
+                new QueryPath(NODE_ID_CF));
+        ColumnFamily cf = table.getColumnFamilyStore(NODE_ID_CF).getColumnFamily(filter);
+        if (cf != null)
+        {
+            assert cf.getColumnCount() <= 1;
+            if (cf.getColumnCount() > 0)
+                id = cf.iterator().next().name();
+        }
+        if (id != null)
+        {
+            return NodeId.wrap(id);
+        }
+        else
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Write a new current local node id to the system table.
+     *
+     * @param oldNodeId the previous local node id (that {@code newNodeId}
+     * replace) or null if no such node id exists (new node or removed system
+     * table)
+     * @param newNodeId the new current local node id to record
+     */
+    public static void writeCurrentLocalNodeId(NodeId oldNodeId, NodeId newNodeId)
+    {
+        long now = System.currentTimeMillis();
+        ByteBuffer ip = ByteBuffer.wrap(FBUtilities.getLocalAddress().getAddress());
+
+        ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_TABLE, NODE_ID_CF);
+        cf.addColumn(new Column(newNodeId.bytes(), ip, now));
+        ColumnFamily cf2 = cf.cloneMe();
+        if (oldNodeId != null)
+        {
+            cf2.addColumn(new DeletedColumn(oldNodeId.bytes(), (int) (now / 1000), now));
+        }
+        RowMutation rmCurrent = new RowMutation(Table.SYSTEM_TABLE, CURRENT_LOCAL_NODE_ID_KEY);
+        RowMutation rmAll = new RowMutation(Table.SYSTEM_TABLE, ALL_LOCAL_NODE_ID_KEY);
+        rmCurrent.add(cf2);
+        rmAll.add(cf);
+        try
+        {
+            rmCurrent.apply();
+            rmAll.apply();
+        }
+        catch (IOException e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static List<NodeId.NodeIdRecord> getOldLocalNodeIds()
+    {
+        List<NodeId.NodeIdRecord> l = new ArrayList<NodeId.NodeIdRecord>();
+
+        Table table = Table.open(Table.SYSTEM_TABLE);
+        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(ALL_LOCAL_NODE_ID_KEY),
+                new QueryPath(NODE_ID_CF));
+        ColumnFamily cf = table.getColumnFamilyStore(NODE_ID_CF).getColumnFamily(filter);
+
+        NodeId previous = null;
+        for (IColumn c : cf.getReverseSortedColumns())
+        {
+            if (previous != null)
+                l.add(new NodeId.NodeIdRecord(previous, c.timestamp()));
+
+            // this will ignore the last column on purpose since it is the
+            // current local node id
+            previous = NodeId.wrap(c.name());
+        }
+        return l;
     }
 }

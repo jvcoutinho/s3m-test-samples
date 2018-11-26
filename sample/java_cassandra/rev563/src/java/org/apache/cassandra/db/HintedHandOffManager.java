@@ -46,7 +46,6 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.gms.ApplicationState;
-import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.service.*;
 import org.apache.cassandra.thrift.*;
@@ -129,7 +128,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
         }
 
         Table table = Table.open(tableName);
-        DecoratedKey dkey = StorageService.getPartitioner().decorateKey(key);
+        DecoratedKey<?> dkey = StorageService.getPartitioner().decorateKey(key);
         ColumnFamilyStore cfs = table.getColumnFamilyStore(cfName);
         ByteBuffer startColumn = ByteBufferUtil.EMPTY_BYTE_BUFFER;
         while (true)
@@ -147,9 +146,8 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
             startColumn = cf.getColumnNames().last();
             RowMutation rm = new RowMutation(tableName, key);
             rm.add(cf);
-            Message message = rm.makeRowMutationMessage();
             IWriteResponseHandler responseHandler =  WriteResponseHandler.create(endpoint);
-            MessagingService.instance().sendRR(message, endpoint, responseHandler);
+            MessagingService.instance().sendRR(rm, endpoint, responseHandler);
             try
             {
                 responseHandler.get();
@@ -197,7 +195,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
     {
         final String ipaddr = endpoint.getHostAddress();
         final ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
-        final RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, ByteBuffer.wrap(ipaddr.getBytes()));
+        final RowMutation rm = new RowMutation(Table.SYSTEM_TABLE, ByteBufferUtil.bytes(ipaddr));
         rm.delete(new QueryPath(HINTS_CF), System.currentTimeMillis());
 
         // execute asynchronously to avoid blocking caller (which may be processing gossip)
@@ -230,13 +228,13 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
 
     public static ByteBuffer makeCombinedName(String tableName, String columnFamily)
     {
-        byte[] withsep = ArrayUtils.addAll(tableName.getBytes(UTF_8), SEPARATOR.getBytes());
+        byte[] withsep = ArrayUtils.addAll(tableName.getBytes(UTF_8), SEPARATOR.getBytes(UTF_8));
         return ByteBuffer.wrap(ArrayUtils.addAll(withsep, columnFamily.getBytes(UTF_8)));
     }
 
     private static String[] getTableAndCFNames(ByteBuffer joined)
     {
-        int index = ByteBufferUtil.lastIndexOf(joined, SEPARATOR.getBytes()[0], joined.limit());
+        int index = ByteBufferUtil.lastIndexOf(joined, SEPARATOR.getBytes(UTF_8)[0], joined.limit());
 
         if (index == -1 || index < (joined.position() + 1))
             throw new RuntimeException("Corrupted hint name " + ByteBufferUtil.bytesToHex(joined));
@@ -308,8 +306,8 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
         // 3. Delete the subcolumn if the write was successful
         // 4. Force a flush
         // 5. Do major compaction to clean up all deletes etc.
-        ByteBuffer endpointAsUTF8 = ByteBuffer.wrap(endpoint.getHostAddress().getBytes(UTF_8)); // keys have to be UTF8 to make OPP happy
-        DecoratedKey epkey =  StorageService.getPartitioner().decorateKey(endpointAsUTF8);
+        ByteBuffer endpointAsUTF8 = ByteBufferUtil.bytes(endpoint.getHostAddress()); // keys have to be UTF8 to make OPP happy
+        DecoratedKey<?> epkey =  StorageService.getPartitioner().decorateKey(endpointAsUTF8);
         int rowsReplayed = 0;
         ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
         ByteBuffer startColumn = ByteBufferUtil.EMPTY_BYTE_BUFFER;
@@ -364,7 +362,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
     /** called when a keyspace is dropped or rename. newTable==null in the case of a drop. */
     public static void renameHints(String oldTable, String newTable) throws IOException
     {
-        DecoratedKey oldTableKey = StorageService.getPartitioner().decorateKey(ByteBuffer.wrap(oldTable.getBytes(UTF_8)));
+        DecoratedKey<?> oldTableKey = StorageService.getPartitioner().decorateKey(ByteBufferUtil.bytes(oldTable));
         // we're basically going to fetch, drop and add the scf for the old and new table. we need to do it piecemeal 
         // though since there could be GB of data.
         ColumnFamilyStore hintStore = Table.open(Table.SYSTEM_TABLE).getColumnFamilyStore(HINTS_CF);
@@ -378,7 +376,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
                 break;
             if (newTable != null)
             {
-                RowMutation insert = new RowMutation(Table.SYSTEM_TABLE, ByteBuffer.wrap(newTable.getBytes(UTF_8)));
+                RowMutation insert = new RowMutation(Table.SYSTEM_TABLE, ByteBufferUtil.bytes(newTable));
                 insert.add(cf);
                 insert.apply();
             }
@@ -457,7 +455,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
         predicate.setSlice_range(sliceRange);
 
         // From keys "" to ""...
-        IPartitioner partitioner = StorageService.getPartitioner();
+        IPartitioner<?> partitioner = StorageService.getPartitioner();
         ByteBuffer empty = ByteBufferUtil.EMPTY_BYTE_BUFFER;
         Range range = new Range(partitioner.getToken(empty), partitioner.getToken(empty));
 

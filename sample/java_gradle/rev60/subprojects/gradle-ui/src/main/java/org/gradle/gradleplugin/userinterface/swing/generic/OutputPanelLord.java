@@ -15,20 +15,19 @@
  */
 package org.gradle.gradleplugin.userinterface.swing.generic;
 
+import org.gradle.foundation.output.FileLinkDefinitionLord;
 import org.gradle.foundation.queue.ExecutionQueue;
 import org.gradle.foundation.common.ObserverLord;
 import org.gradle.gradleplugin.foundation.GradlePluginLord;
 import org.gradle.gradleplugin.foundation.request.ExecutionRequest;
 import org.gradle.gradleplugin.foundation.request.RefreshTaskListRequest;
 import org.gradle.gradleplugin.foundation.request.Request;
+import org.gradle.gradleplugin.userinterface.AlternateUIInteraction;
 
-import javax.swing.AbstractAction;
-import javax.swing.JMenuItem;
-import javax.swing.JPanel;
-import javax.swing.JPopupMenu;
-import javax.swing.JTabbedPane;
+import javax.swing.*;
 import java.awt.BorderLayout;
 import java.awt.Point;
+import java.awt.Font;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -57,14 +56,28 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
 
    private ObserverLord<OutputObserver> observerLord = new ObserverLord<OutputObserver>();
    private GradlePluginLord gradlePluginLord;
+   private AlternateUIInteraction alternateUIInteraction;
+   private Font font;
 
-   public OutputPanelLord( GradlePluginLord gradlePluginLord ) {
+    private FileLinkDefinitionLord fileLinkDefinitionLord;
+
+    private ExecutionRequest lastExecutionRequest;
+
+    public OutputPanelLord( GradlePluginLord gradlePluginLord, AlternateUIInteraction alternateUIInteraction ) {
       this.gradlePluginLord = gradlePluginLord;
+      this.alternateUIInteraction = alternateUIInteraction;
+
+       fileLinkDefinitionLord = new FileLinkDefinitionLord();
 
       //add the OutputPanelLord as a request observer so it can create new tabs when new requests are added.
         gradlePluginLord.addRequestObserver( this, true );
 
         setupUI();
+
+       //gradle formats some output in 'ascii art' fashion. This ensures things line up properly.
+       Font font = new Font("Monospaced", Font.PLAIN, UIManager.getDefaults().getFont("Label.font").getSize());
+
+       setOutputTextFont( font );
     }
 
    public JPanel getMainPanel() {
@@ -158,8 +171,6 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
        closing a bunch of tabs is a pain.
 
        @param  description          the title we'll give to the output.
-       @param  forceOutputToBeShown overrides the user setting onlyShowOutputOnErrors
-                                    so that the output is shown regardless
        @param selectOutputPanel true to select the output panel after we setup
                                 the tab, false if not. This is really only useful
                                 if you're calling this for multiple tasks one
@@ -179,7 +190,9 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
             outputPanel.setTabHeaderText(description);
             outputPanel.reset();
         } else {  //we don't have an existing tab. Create a new one.
-            outputPanel = new OutputTab( this, description );
+            outputPanel = new OutputTab( this, description, alternateUIInteraction );
+            outputPanel.setFont( font );
+            outputPanel.initialize();
             tabbedPane.addTab(description, outputPanel);
             if (selectOutputPanel) {
                tabbedPane.setSelectedComponent(outputPanel);
@@ -238,7 +251,9 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
          return displayName;   //its fine
       }
 
-      return displayName.substring( 0, 17 ) + "...";
+       //I'm going 6 characters less because it looks stupid to replace 3 characters with 3 characters.
+       //There's no absolute amount here, this just seems to look better.
+      return displayName.substring( 0, 14 ) + "...";
    }
 
    /**
@@ -320,8 +335,8 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
    public void executeAgain( Request request, OutputPanel outputPanel )
    {
       //this needs to work better. It needs to do the execute again in the same
-      //OutputPanel. However, because this only listens for requests, it complicates
-      //things.
+      //OutputPanel. However, because this generically listens for requests and
+      //adds them to this panel, things are more complicated.
       request.executeAgain( gradlePluginLord );
    }
 
@@ -351,6 +366,8 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
 
    public void executionRequestAdded( final ExecutionRequest request )
    {
+       lastExecutionRequest = request;
+
       String displayName = reformatDisplayName( request.getDisplayName() );
       requestAdded( request, "Execute '" + displayName + "'" );
       observerLord.notifyObservers( new ObserverLord.ObserverNotification<OutputObserver>()
@@ -378,7 +395,7 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
    {
       OutputPanel outputPanel = getOutputPanelForExecution(name, false, true );
 
-      outputPanel.initialize( request, onlyShowOutputOnErrors );
+      outputPanel.setRequest( request, onlyShowOutputOnErrors );
       request.setExecutionInteraction( outputPanel );
    }
 
@@ -386,7 +403,7 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
     Notification that a command is about to be executed. This is mostly useful
     for IDE's that may need to save their files.
 
-    @param fullCommandLine the command that's about to be executed.
+    @param request the request to be executed
     @author mhunsicker
     */
    public void aboutToExecuteRequest( Request request )
@@ -419,4 +436,35 @@ public class OutputPanelLord implements OutputUILord, GradlePluginLord.RequestOb
    {
       return tabbedPane.getTabCount();
    }
+
+   /**
+    Sets the font for the output text
+    @param font the new font
+    */
+   public void setOutputTextFont( Font font ) {
+
+      this.font = font;
+      Iterator<OutputPanel> iterator = getOutputPanels().iterator();
+      while( iterator.hasNext() )
+      {
+         OutputPanel outputPanel = iterator.next();
+         outputPanel.setFont( font );
+      }
+   }
+
+    public FileLinkDefinitionLord getFileLinkDefinitionLord() {
+        return fileLinkDefinitionLord;
+    }
+
+    /*
+    This re-executes the last execution command (ignores refresh commands).
+    This is potentially useful for IDEs to hook into (hotkey to execute last command).
+     */
+    public void reExecuteLastCommand()
+    {
+        ExecutionRequest executionRequest = lastExecutionRequest;
+        if( executionRequest != null ) {
+            gradlePluginLord.addExecutionRequestToQueue( executionRequest.getFullCommandLine(), executionRequest.getDisplayName(), executionRequest.forceOutputToBeShown() );
+        }
+    }
 }

@@ -27,7 +27,7 @@ import com.google.common.collect.Sets;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.Table;
+import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
@@ -56,16 +56,16 @@ public class PendingRangeCalculatorService extends PendingRangeCalculatorService
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.DiscardPolicy());
     }
 
-    private class PendingRangeTask implements Runnable
+    private static class PendingRangeTask implements Runnable
     {
         public void run()
         {
             long start = System.currentTimeMillis();
-            for (String table : Schema.instance.getNonSystemTables())
+            for (String keyspaceName : Schema.instance.getNonSystemKeyspaces())
             {
-                calculatePendingRanges(Table.open(table).getReplicationStrategy(), table);
+                calculatePendingRanges(Keyspace.open(keyspaceName).getReplicationStrategy(), keyspaceName);
             }
-            logger.debug("finished calculation for {} keyspaces in {}ms", Schema.instance.getNonSystemTables().size(), System.currentTimeMillis() - start);
+            logger.debug("finished calculation for {} keyspaces in {}ms", Schema.instance.getNonSystemKeyspaces().size(), System.currentTimeMillis() - start);
         }
     }
 
@@ -91,8 +91,6 @@ public class PendingRangeCalculatorService extends PendingRangeCalculatorService
         }
     }
 
-
-
     /**
      * Calculate pending ranges according to bootsrapping and leaving nodes. Reasoning is:
      *
@@ -117,18 +115,18 @@ public class PendingRangeCalculatorService extends PendingRangeCalculatorService
      * changes state in the cluster, so it should be manageable.
      */
     // public & static for testing purposes
-    public static void calculatePendingRanges(AbstractReplicationStrategy strategy, String table)
+    public static void calculatePendingRanges(AbstractReplicationStrategy strategy, String keyspaceName)
     {
         TokenMetadata tm = StorageService.instance.getTokenMetadata();
         Multimap<Range<Token>, InetAddress> pendingRanges = HashMultimap.create();
         BiMultiValMap<Token, InetAddress> bootstrapTokens = tm.getBootstrapTokens();
         Set<InetAddress> leavingEndpoints = tm.getLeavingEndpoints();
 
-        if (bootstrapTokens.isEmpty() && leavingEndpoints.isEmpty() && tm.getMovingEndpoints().isEmpty() && tm.getRelocatingRanges().isEmpty())
+        if (bootstrapTokens.isEmpty() && leavingEndpoints.isEmpty() && tm.getMovingEndpoints().isEmpty())
         {
             if (logger.isDebugEnabled())
-                logger.debug("No bootstrapping, leaving or moving nodes, and no relocating tokens -> empty pending ranges for {}", table);
-            tm.setPendingRanges(table, pendingRanges);
+                logger.debug("No bootstrapping, leaving or moving nodes, and no relocating tokens -> empty pending ranges for {}", keyspaceName);
+            tm.setPendingRanges(keyspaceName, pendingRanges);
             return;
         }
 
@@ -187,21 +185,7 @@ public class PendingRangeCalculatorService extends PendingRangeCalculatorService
             allLeftMetadata.removeEndpoint(endpoint);
         }
 
-        // Ranges being relocated.
-        for (Map.Entry<Token, InetAddress> relocating : tm.getRelocatingRanges().entrySet())
-        {
-            InetAddress endpoint = relocating.getValue(); // address of the moving node
-            Token token = relocating.getKey();
-
-            allLeftMetadata.updateNormalToken(token, endpoint);
-
-            for (Range<Token> range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
-                pendingRanges.put(range, endpoint);
-
-            allLeftMetadata.removeEndpoint(endpoint);
-        }
-
-        tm.setPendingRanges(table, pendingRanges);
+        tm.setPendingRanges(keyspaceName, pendingRanges);
 
         if (logger.isDebugEnabled())
             logger.debug("Pending ranges:\n" + (pendingRanges.isEmpty() ? "<empty>" : tm.printPendingRanges()));

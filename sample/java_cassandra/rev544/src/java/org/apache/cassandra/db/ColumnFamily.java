@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db;
 
 import static org.apache.cassandra.db.DBConstants.*;
@@ -39,7 +38,7 @@ import org.apache.cassandra.utils.HeapAllocator;
 public class ColumnFamily extends AbstractColumnContainer
 {
     /* The column serializer for this Column Family. Create based on config. */
-    private static ColumnFamilySerializer serializer = new ColumnFamilySerializer();
+    private static final ColumnFamilySerializer serializer = new ColumnFamilySerializer();
     private final CFMetaData cfm;
 
     public static ColumnFamilySerializer serializer()
@@ -336,16 +335,16 @@ public class ColumnFamily extends AbstractColumnContainer
 
     public long serializedSize()
     {
-        return boolSize // nullness bool
-               + intSize // id
+        return BOOL_SIZE // nullness bool
+               + INT_SIZE // id
                + serializedSizeForSSTable();
     }
 
     public long serializedSizeForSSTable()
     {
-        int size = intSize // local deletion time
-                 + longSize // client deletion time
-                 + intSize; // column count
+        int size = INT_SIZE // local deletion time
+                 + LONG_SIZE // client deletion time
+                 + INT_SIZE; // column count
         for (IColumn column : columns)
             size += column.serializedSize();
         return size;

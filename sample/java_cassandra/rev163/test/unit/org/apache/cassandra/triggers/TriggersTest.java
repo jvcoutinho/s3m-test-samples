@@ -31,24 +31,20 @@ import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ArrayBackedSortedColumns;
-import org.apache.cassandra.db.Column;
+import org.apache.cassandra.db.Cell;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.ConsistencyLevel;
-import org.apache.cassandra.db.RowMutation;
+import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.thrift.Cassandra;
-import org.apache.cassandra.thrift.ColumnOrSuperColumn;
-import org.apache.cassandra.thrift.ColumnParent;
-import org.apache.cassandra.thrift.InvalidRequestException;
-import org.apache.cassandra.thrift.Mutation;
-import org.apache.cassandra.thrift.TFramedTransportFactory;
-import org.apache.cassandra.thrift.ThriftServer;
-import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.thrift.*;
 import org.apache.thrift.protocol.TBinaryProtocol;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+
+import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
+import static org.apache.cassandra.utils.ByteBufferUtil.toInt;
 
 public class TriggersTest extends SchemaLoader
 {
@@ -65,7 +61,7 @@ public class TriggersTest extends SchemaLoader
         StorageService.instance.initServer(0);
         if (thriftServer == null || ! thriftServer.isRunning())
         {
-            thriftServer = new ThriftServer(InetAddress.getLocalHost(), 9170);
+            thriftServer = new ThriftServer(InetAddress.getLocalHost(), 9170, 50);
             thriftServer.start();
         }
 
@@ -126,7 +122,7 @@ public class TriggersTest extends SchemaLoader
                                             new TFramedTransportFactory().openTransport(
                                                 InetAddress.getLocalHost().getHostName(), 9170)));
         client.set_keyspace(ksName);
-        client.insert(ByteBufferUtil.bytes(2),
+        client.insert(bytes(2),
                       new ColumnParent(cfName),
                       getColumnForInsert("v1", 2),
                       org.apache.cassandra.thrift.ConsistencyLevel.ONE);
@@ -142,12 +138,12 @@ public class TriggersTest extends SchemaLoader
                                         new TFramedTransportFactory().openTransport(
                                             InetAddress.getLocalHost().getHostName(), 9170)));
         client.set_keyspace(ksName);
-        Mutation mutation = new Mutation();
+        org.apache.cassandra.thrift.Mutation mutation = new org.apache.cassandra.thrift.Mutation();
         ColumnOrSuperColumn cosc = new ColumnOrSuperColumn();
         cosc.setColumn(getColumnForInsert("v1", 3));
         mutation.setColumn_or_supercolumn(cosc);
         client.batch_mutate(
-            Collections.singletonMap(ByteBufferUtil.bytes(3),
+            Collections.singletonMap(bytes(3),
                                      Collections.singletonMap(cfName,
                                                               Collections.singletonList(mutation))),
             org.apache.cassandra.thrift.ConsistencyLevel.ONE);
@@ -183,9 +179,9 @@ public class TriggersTest extends SchemaLoader
                         new TFramedTransportFactory().openTransport(
                                 InetAddress.getLocalHost().getHostName(), 9170)));
         client.set_keyspace(ksName);
-        client.cas(ByteBufferUtil.bytes(6),
+        client.cas(bytes(6),
                    cfName,
-                   Collections.EMPTY_LIST,
+                   Collections.<Column>emptyList(),
                    Collections.singletonList(getColumnForInsert("v1", 6)),
                    org.apache.cassandra.thrift.ConsistencyLevel.LOCAL_SERIAL,
                    org.apache.cassandra.thrift.ConsistencyLevel.ONE);
@@ -241,9 +237,9 @@ public class TriggersTest extends SchemaLoader
                             new TFramedTransportFactory().openTransport(
                                     InetAddress.getLocalHost().getHostName(), 9170)));
             client.set_keyspace(ksName);
-            client.cas(ByteBufferUtil.bytes(9),
+            client.cas(bytes(9),
                        cf,
-                       Collections.EMPTY_LIST,
+                       Collections.<Column>emptyList(),
                        Collections.singletonList(getColumnForInsert("v1", 9)),
                        org.apache.cassandra.thrift.ConsistencyLevel.LOCAL_SERIAL,
                        org.apache.cassandra.thrift.ConsistencyLevel.ONE);
@@ -266,9 +262,9 @@ public class TriggersTest extends SchemaLoader
                             new TFramedTransportFactory().openTransport(
                                     InetAddress.getLocalHost().getHostName(), 9170)));
             client.set_keyspace(ksName);
-            client.cas(ByteBufferUtil.bytes(10),
+            client.cas(bytes(10),
                        cf,
-                       Collections.EMPTY_LIST,
+                       Collections.<Column>emptyList(),
                        Collections.singletonList(getColumnForInsert("v1", 10)),
                        org.apache.cassandra.thrift.ConsistencyLevel.LOCAL_SERIAL,
                        org.apache.cassandra.thrift.ConsistencyLevel.ONE);
@@ -309,51 +305,51 @@ public class TriggersTest extends SchemaLoader
     private org.apache.cassandra.thrift.Column getColumnForInsert(String columnName, int value)
     {
         org.apache.cassandra.thrift.Column column = new org.apache.cassandra.thrift.Column();
-        column.setName(Schema.instance.getCFMetaData(ksName, cfName).comparator.fromString(columnName));
-        column.setValue(ByteBufferUtil.bytes(value));
+        column.setName(Schema.instance.getCFMetaData(ksName, cfName).comparator.asAbstractType().fromString(columnName));
+        column.setValue(bytes(value));
         column.setTimestamp(System.currentTimeMillis());
         return column;
     }
 
     public static class TestTrigger implements ITrigger
     {
-        public Collection<RowMutation> augment(ByteBuffer key, ColumnFamily update)
+        public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
         {
             ColumnFamily extraUpdate = update.cloneMeShallow(ArrayBackedSortedColumns.factory, false);
-            extraUpdate.addColumn(new Column(update.metadata().comparator.fromString("v2"),
-                                             ByteBufferUtil.bytes(999)));
-            RowMutation rm = new RowMutation(ksName, key);
-            rm.add(extraUpdate);
-            return Collections.singletonList(rm);
+            extraUpdate.addColumn(new Cell(update.metadata().comparator.makeCellName(bytes("v2")),
+                                           bytes(999)));
+            Mutation mutation = new Mutation(ksName, key);
+            mutation.add(extraUpdate);
+            return Collections.singletonList(mutation);
         }
     }
 
     public static class CrossPartitionTrigger implements ITrigger
     {
-        public Collection<RowMutation> augment(ByteBuffer key, ColumnFamily update)
+        public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
         {
             ColumnFamily extraUpdate = update.cloneMeShallow(ArrayBackedSortedColumns.factory, false);
-            extraUpdate.addColumn(new Column(update.metadata().comparator.fromString("v2"),
-                                             ByteBufferUtil.bytes(999)));
+            extraUpdate.addColumn(new Cell(update.metadata().comparator.makeCellName(bytes("v2")),
+                                           bytes(999)));
 
-            int newKey = ByteBufferUtil.toInt(key) + 1000;
-            RowMutation rm = new RowMutation(ksName, ByteBufferUtil.bytes(newKey));
-            rm.add(extraUpdate);
-            return Collections.singletonList(rm);
+            int newKey = toInt(key) + 1000;
+            Mutation mutation = new Mutation(ksName, bytes(newKey));
+            mutation.add(extraUpdate);
+            return Collections.singletonList(mutation);
         }
     }
 
     public static class CrossTableTrigger implements ITrigger
     {
-        public Collection<RowMutation> augment(ByteBuffer key, ColumnFamily update)
+        public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
         {
             ColumnFamily extraUpdate = ArrayBackedSortedColumns.factory.create(ksName, otherCf);
-            extraUpdate.addColumn(new Column(extraUpdate.metadata().comparator.fromString("v2"),
-                                             ByteBufferUtil.bytes(999)));
+            extraUpdate.addColumn(new Cell(extraUpdate.metadata().comparator.makeCellName(bytes("v2")),
+                                           bytes(999)));
 
-            RowMutation rm = new RowMutation(ksName, key);
-            rm.add(extraUpdate);
-            return Collections.singletonList(rm);
+            Mutation mutation = new Mutation(ksName, key);
+            mutation.add(extraUpdate);
+            return Collections.singletonList(mutation);
         }
     }
 }

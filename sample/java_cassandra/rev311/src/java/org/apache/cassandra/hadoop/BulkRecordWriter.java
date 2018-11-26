@@ -1,7 +1,4 @@
-package org.apache.cassandra.hadoop;
-
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -10,16 +7,16 @@ package org.apache.cassandra.hadoop;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+package org.apache.cassandra.hadoop;
+
 
 import java.io.File;
 import java.io.IOException;
@@ -30,6 +27,7 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -62,7 +60,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
     private final Logger logger = LoggerFactory.getLogger(BulkRecordWriter.class);
     private SSTableSimpleUnsortedWriter writer;
     private SSTableLoader loader;
-    private File outputdir;
+    private final File outputdir;
     private Progressable progress;
     private int maxFailures;
 
@@ -134,8 +132,13 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
         if (writer == null)
         {
             AbstractType<?> subcomparator = null;
+            ExternalClient externalClient = null;
+            String username = ConfigHelper.getOutputKeyspaceUserName(conf);
+            String password = ConfigHelper.getOutputKeyspacePassword(conf);
+
             if (cfType == CFType.SUPER)
                 subcomparator = BytesType.instance;
+            
             this.writer = new SSTableSimpleUnsortedWriter(
                     outputdir,
                     ConfigHelper.getOutputPartitioner(conf),
@@ -145,7 +148,13 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                     subcomparator,
                     Integer.valueOf(conf.get(BUFFER_SIZE_IN_MB, "64")),
                     ConfigHelper.getOutputCompressionParamaters(conf));
-            this.loader = new SSTableLoader(outputdir, new ExternalClient(ConfigHelper.getOutputInitialAddress(conf), ConfigHelper.getOutputRpcPort(conf)), new NullOutputHandler());
+
+            externalClient = new ExternalClient(ConfigHelper.getOutputInitialAddress(conf), 
+                                                ConfigHelper.getOutputRpcPort(conf),
+                                                username,
+                                                password);
+
+            this.loader = new SSTableLoader(outputdir, externalClient, new NullOutputHandler());
         }
     }
 
@@ -179,12 +188,12 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                 if (colType == ColType.COUNTER)
                     writer.addCounterColumn(mut.getColumn_or_supercolumn().counter_column.name, mut.getColumn_or_supercolumn().counter_column.value);
                 else
-	            {
+                {
                     if(mut.getColumn_or_supercolumn().column.ttl == 0)
-	                     writer.addColumn(mut.getColumn_or_supercolumn().column.name, mut.getColumn_or_supercolumn().column.value, mut.getColumn_or_supercolumn().column.timestamp);
+                        writer.addColumn(mut.getColumn_or_supercolumn().column.name, mut.getColumn_or_supercolumn().column.value, mut.getColumn_or_supercolumn().column.timestamp);
                     else
                         writer.addExpiringColumn(mut.getColumn_or_supercolumn().column.name, mut.getColumn_or_supercolumn().column.value, mut.getColumn_or_supercolumn().column.timestamp, mut.getColumn_or_supercolumn().column.ttl, System.currentTimeMillis() + ((long)(mut.getColumn_or_supercolumn().column.ttl) * 1000));
-	            }
+                }
             }
             progress.progress();
         }
@@ -237,14 +246,18 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
     static class ExternalClient extends SSTableLoader.Client
     {
         private final Map<String, Set<String>> knownCfs = new HashMap<String, Set<String>>();
-        private String hostlist;
-        private int rpcPort;
+        private final String hostlist;
+        private final int rpcPort;
+        private final String username;
+        private final String password;
 
-        public ExternalClient(String hostlist, int port)
+        public ExternalClient(String hostlist, int port, String username, String password)
         {
             super();
             this.hostlist = hostlist;
             this.rpcPort = port;
+            this.username = username;
+            this.password = password;
         }
 
         public void init(String keyspace)
@@ -269,6 +282,18 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                 {
                     InetAddress host = hostiter.next();
                     Cassandra.Client client = createThriftClient(host.getHostAddress(), rpcPort);
+
+                    // log in
+                    client.set_keyspace(keyspace);
+                    if (username != null)
+                    {
+                        Map<String, String> creds = new HashMap<String, String>();
+                        creds.put(IAuthenticator.USERNAME_KEY, username);
+                        creds.put(IAuthenticator.PASSWORD_KEY, password);
+                        AuthenticationRequest authRequest = new AuthenticationRequest(creds);
+                        client.login(authRequest);
+                    }
+
                     List<TokenRange> tokenRanges = client.describe_ring(keyspace);
                     List<KsDef> ksDefs = client.describe_keyspaces();
 

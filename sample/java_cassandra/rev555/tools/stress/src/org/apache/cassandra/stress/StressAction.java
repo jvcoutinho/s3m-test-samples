@@ -20,7 +20,9 @@ package org.apache.cassandra.stress;
 import java.io.PrintStream;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.TimeUnit;
 
+import com.google.common.util.concurrent.Uninterruptibles;
 import com.yammer.metrics.stats.Snapshot;
 import org.apache.cassandra.stress.operations.*;
 import org.apache.cassandra.stress.util.CassandraClient;
@@ -63,7 +65,7 @@ public class StressAction extends Thread
         int threadCount = client.getThreads();
         Consumer[] consumers = new Consumer[threadCount];
 
-        output.println("total,interval_op_rate,interval_key_rate,latency/95th/99th,elapsed_time");
+        output.println("total,interval_op_rate,interval_key_rate,latency,95th,99th,elapsed_time");
 
         int itemsPerThread = client.getKeysPerThread();
         int modulo = client.getNumKeys() % threadCount;
@@ -89,7 +91,9 @@ public class StressAction extends Thread
 
         int interval = client.getProgressInterval();
         int epochIntervals = client.getProgressInterval() * 10;
-        long testStartTime = System.currentTimeMillis();
+        long testStartTime = System.nanoTime();
+        
+        StressStatistics stats = new StressStatistics(client, output);
 
         while (!terminate)
         {
@@ -103,14 +107,7 @@ public class StressAction extends Thread
                 break;
             }
 
-            try
-            {
-                Thread.sleep(100);
-            }
-            catch (InterruptedException e)
-            {
-                throw new RuntimeException(e.getMessage(), e);
-            }
+            Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
 
             int alive = 0;
             for (Thread thread : consumers)
@@ -135,7 +132,7 @@ public class StressAction extends Thread
                 int opDelta = total - oldTotal;
                 int keyDelta = keyCount - oldKeyCount;
 
-                long currentTimeInSeconds = (System.currentTimeMillis() - testStartTime) / 1000;
+                long currentTimeInSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - testStartTime);
 
                 output.println(String.format("%d,%d,%d,%.1f,%.1f,%.1f,%d",
                                              total,
@@ -143,6 +140,14 @@ public class StressAction extends Thread
                                              keyDelta / interval,
                                              latency.getMedian(), latency.get95thPercentile(), latency.get999thPercentile(),
                                              currentTimeInSeconds));
+
+                if (client.outputStatistics()) {
+                    stats.addIntervalStats(total, 
+                                           opDelta / interval, 
+                                           keyDelta / interval, 
+                                           latency, 
+                                           currentTimeInSeconds);
+                        }
             }
         }
 
@@ -157,11 +162,14 @@ public class StressAction extends Thread
             if (consumer.getReturnCode() == FAILURE)
                 returnCode = FAILURE;
 
-        if (returnCode == SUCCESS)
+        if (returnCode == SUCCESS) {            
+            if (client.outputStatistics())
+                stats.printStats();
             // marking an end of the output to the client
-            output.println("END");
-        else
+            output.println("END");            
+        } else {
             output.println("FAILURE");
+        }
 
     }
 

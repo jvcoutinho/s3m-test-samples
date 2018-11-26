@@ -1,17 +1,14 @@
 /*******************************************************************************
  * Copyright (c) 2011 GigaSpaces Technologies Ltd. All rights reserved
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *       http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
  *******************************************************************************/
 package org.cloudifysource.esc.shell.installer;
 
@@ -41,8 +38,10 @@ import org.cloudifysource.dsl.cloud.Cloud;
 import org.cloudifysource.dsl.cloud.CloudTemplate;
 import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.dsl.internal.CloudifyErrorMessages;
+import org.cloudifysource.dsl.rest.response.ControllerDetails;
 import org.cloudifysource.esc.driver.provisioning.CloudProvisioningException;
 import org.cloudifysource.esc.driver.provisioning.MachineDetails;
+import org.cloudifysource.esc.driver.provisioning.ManagementLocator;
 import org.cloudifysource.esc.driver.provisioning.ProvisioningDriver;
 import org.cloudifysource.esc.driver.provisioning.context.DefaultProvisioningDriverClassContext;
 import org.cloudifysource.esc.driver.provisioning.context.ProvisioningDriverClassContextAware;
@@ -59,13 +58,14 @@ import org.cloudifysource.shell.ConditionLatch;
 import org.cloudifysource.shell.ShellUtils;
 import org.cloudifysource.shell.commands.CLIException;
 import org.cloudifysource.shell.commands.CLIStatusException;
+import org.codehaus.jackson.map.ObjectMapper;
+import org.codehaus.jackson.map.type.TypeFactory;
 import org.openspaces.admin.gsa.GSAReservationId;
 import org.openspaces.admin.zone.config.ExactZonesConfig;
 import org.openspaces.admin.zone.config.ExactZonesConfigurer;
 
 /**
- * This class handles the bootstrapping of machines, activation of management
- * processes and cloud tear-down.
+ * This class handles the bootstrapping of machines, activation of management processes and cloud tear-down.
  *
  * @author barakm, adaml
  * @since 2.0.0
@@ -99,6 +99,8 @@ public class CloudGridAgentBootstrapper {
 	private File cloudFile;
 
 	private boolean noWebServices;
+	private boolean useExistingManagers;
+	private File existingManagersFile;
 
 	public void setProviderDirectory(final File providerDirectory) {
 		this.providerDirectory = providerDirectory;
@@ -150,8 +152,8 @@ public class CloudGridAgentBootstrapper {
 	}
 
 	/**
-	 * Bootstraps and waits until the management machines are running, or until
-	 * the timeout is reached.
+	 * Bootstraps and waits until the management machines are running, or until the timeout is reached.
+	 *
 	 * @param securityProfile
 	 *            set security profile (nonsecure/secure/ssl)
 	 * @param username
@@ -165,17 +167,16 @@ public class CloudGridAgentBootstrapper {
 	 * @param timeoutUnit
 	 *            The time unit to use (seconds, minutes etc.)
 	 * @throws InstallerException
-	 *             Indicates the provisioning driver failed to start management
-	 *             machines or that the management processes failed to start
+	 *             Indicates the provisioning driver failed to start management machines or that the management
+	 *             processes failed to start
 	 * @throws CLIException
-	 *             Indicates a basic failure or a time out. a detailed message
-	 *             is included
+	 *             Indicates a basic failure or a time out. a detailed message is included
 	 * @throws InterruptedException
 	 *             Indicates a thread was interrupted while waiting
 	 */
 	public void bootstrapCloudAndWait(final String securityProfile, final String username,
 			final String password, final String keystorePassword, final long timeout, final TimeUnit timeoutUnit)
-					throws InstallerException, CLIException, InterruptedException {
+			throws InstallerException, CLIException, InterruptedException {
 
 		final long end = System.currentTimeMillis()
 				+ timeoutUnit.toMillis(timeout);
@@ -183,23 +184,7 @@ public class CloudGridAgentBootstrapper {
 		createProvisioningDriver();
 
 		// Start the cloud machines!!!
-		MachineDetails[] servers;
-		try {
-			servers = provisioning.startManagementMachines(timeout, timeoutUnit);
-		} catch (final CloudProvisioningException e) {
-			CLIStatusException cliStatusException = new CLIStatusException(e, 
-					CloudifyErrorMessages.CLOUD_API_ERROR.getName(), e.getMessage());
-			throw cliStatusException;
-		} catch (final TimeoutException e) {
-			throw new CLIException("Cloudify bootstrap on provider "
-					+ this.cloud.getProvider().getProvider() + " timed-out. "
-					+ "Please try to run again using the –timeout option.", e);
-		}
-
-		if (servers.length == 0) {
-			throw new IllegalArgumentException(
-					"Received zero management servers from provisioning implementation");
-		}
+		final MachineDetails[] servers = getOrCreateManagementServers(timeout, timeoutUnit);
 
 		// from this point on - close machines if an exception is thrown (to
 		// avoid leaks).
@@ -212,11 +197,11 @@ public class CloudGridAgentBootstrapper {
 				}
 			}
 
+			validateServers(servers);
+
 			// Start the management agents and other processes
 			if (servers[0].isAgentRunning()) {
 				// must be using existing machines.
-				// TODO - check if management machines are running properly. If
-				// so - use them, like connect.
 				throw new IllegalStateException(
 						"Cloud bootstrapper found existing management machines with the same name. "
 								+ "Please shut them down before continuing");
@@ -225,9 +210,9 @@ public class CloudGridAgentBootstrapper {
 			startManagememntProcesses(servers, securityProfile, keystorePassword, end);
 
 			if (!isNoWebServices()) {
-				Integer restPort = getRestPort(cloud.getConfiguration().getComponents().getRest().getPort(),
+				final Integer restPort = getRestPort(cloud.getConfiguration().getComponents().getRest().getPort(),
 						ShellUtils.isSecureConnection(securityProfile));
-				Integer webuiPort = getWebuiPort(cloud.getConfiguration().getComponents().getWebui().getPort(),
+				final Integer webuiPort = getWebuiPort(cloud.getConfiguration().getComponents().getWebui().getPort(),
 						ShellUtils.isSecureConnection(securityProfile));
 				waitForManagementWebServices(ShellUtils.isSecureConnection(securityProfile), username, password,
 						restPort, webuiPort, end, servers);
@@ -257,6 +242,137 @@ public class CloudGridAgentBootstrapper {
 			stopManagementMachines();
 			throw e;
 		}
+	}
+
+	private MachineDetails[] getOrCreateManagementServers(final long timeout, final TimeUnit timeoutUnit)
+			throws CLIException {
+
+		if (this.existingManagersFile != null) {
+			return locateManagementMachinesFromFile();
+		} else if (this.useExistingManagers) {
+			return locateManagementMachines();
+		} else {
+			return createManagementServers(timeout, timeoutUnit);
+		}
+
+	}
+
+	private MachineDetails[] createManagementServers(final long timeout, final TimeUnit timeoutUnit)
+			throws CLIException {
+		MachineDetails[] servers;
+		try {
+			servers = provisioning.startManagementMachines(timeout, timeoutUnit);
+		} catch (final CloudProvisioningException e) {
+			final CLIStatusException cliStatusException =
+					new CLIStatusException(e, CloudifyErrorMessages.CLOUD_API_ERROR.getName(), e.getMessage());
+			throw cliStatusException;
+		} catch (final TimeoutException e) {
+			throw new CLIException("Cloudify bootstrap on provider "
+					+ this.cloud.getProvider().getProvider() + " timed-out. "
+					+ "Please try to run again using the –timeout option.", e);
+		}
+
+		if (servers.length == 0) {
+			throw new IllegalArgumentException(
+					"Received zero management servers from provisioning implementation");
+		}
+		return servers;
+	}
+
+	private MachineDetails[] locateManagementMachines() throws CLIStatusException {
+		if (provisioning instanceof ManagementLocator) {
+			final ManagementLocator locator = (ManagementLocator) provisioning;
+			MachineDetails[] mds;
+			try {
+				mds = locator.getExistingManagementServers();
+			} catch (final CloudProvisioningException e) {
+				throw new CLIStatusException(e, CloudifyErrorMessages.MANAGEMENT_SERVERS_FAILED_TO_READ.getName(),
+						e.getMessage());
+			}
+			if (mds.length == 0) {
+				throw new CLIStatusException(CloudifyErrorMessages.MANAGEMENT_SERVERS_NOT_LOCATED.getName());
+			}
+			if (mds.length != this.cloud.getProvider().getNumberOfManagementMachines()) {
+				throw new CLIStatusException(CloudifyErrorMessages.MANAGEMENT_SERVERS_NUMBER_NOT_MATCH.getName(),
+						cloud.getProvider().getNumberOfManagementMachines(), mds.length);
+			}
+
+			return mds;
+		} else {
+			throw new CLIStatusException(CloudifyErrorMessages.MANAGEMENT_LOCATOR_NOT_SUPPORTED.getName(),
+					this.cloud.getName());
+		}
+	}
+
+	private MachineDetails[] locateManagementMachinesFromFile() throws CLIStatusException {
+		if (provisioning instanceof ManagementLocator) {
+			ObjectMapper mapper = new ObjectMapper();
+			ControllerDetails[] controllers = null;
+			try {
+				controllers =
+						mapper.readValue(this.existingManagersFile, TypeFactory.arrayType(ControllerDetails.class));
+			} catch (IOException e) {
+				throw new IllegalArgumentException("Failed to read managers file: "
+						+ this.existingManagersFile.getAbsolutePath() + ". Error was: " + e.getMessage(), e);
+			}
+			final ManagementLocator locator = (ManagementLocator) provisioning;
+			MachineDetails[] mds;
+			try {
+				mds = locator.getExistingManagementServers(controllers);
+			} catch (final CloudProvisioningException e) {
+				throw new CLIStatusException(e, CloudifyErrorMessages.MANAGEMENT_SERVERS_FAILED_TO_READ.getName(),
+						e.getMessage());
+			}
+			if (mds.length == 0) {
+				throw new CLIStatusException(CloudifyErrorMessages.MANAGEMENT_SERVERS_NOT_LOCATED.getName());
+			}
+			if (mds.length != this.cloud.getProvider().getNumberOfManagementMachines()) {
+				throw new CLIStatusException(CloudifyErrorMessages.MANAGEMENT_SERVERS_NUMBER_NOT_MATCH.getName(),
+						cloud.getProvider().getNumberOfManagementMachines(), mds.length);
+			}
+
+			return mds;
+		} else {
+			throw new CLIStatusException(CloudifyErrorMessages.MANAGEMENT_LOCATOR_NOT_SUPPORTED.getName(),
+					this.cloud.getName());
+		}
+	}
+
+	private void validateServers(final MachineDetails[] servers) throws CLIException {
+		if (servers.length != this.cloud.getProvider().getNumberOfManagementMachines()) {
+			throw new CLIException("Bootstrap required " + this.cloud.getProvider().getNumberOfManagementMachines()
+					+ " machines, but recieved " + servers.length);
+		}
+
+		for (final MachineDetails machineDetails : servers) {
+			if (this.cloud.getConfiguration().isBootstrapManagementOnPublicIp()) {
+				if (machineDetails.getPublicAddress() == null) {
+					throw new CLIException("Missing a public address which is required for bootstrap in node with ID: "
+							+ machineDetails.getMachineId());
+				}
+			} else {
+				if (machineDetails.getPrivateAddress() == null) {
+					throw new CLIException(
+							"Missing a private address which is required for bootstrap in node with ID: "
+									+ machineDetails.getMachineId());
+				}
+			}
+
+			if (this.cloud.getConfiguration().isConnectToPrivateIp()) {
+				if (machineDetails.getPrivateAddress() == null) {
+					throw new CLIException(
+							"Missing a private address which is required for server setup in node with ID: "
+									+ machineDetails.getMachineId());
+				}
+			} else {
+				if (machineDetails.getPublicAddress() == null) {
+					throw new CLIException(
+							"Missing a public address which is required for server setup in node with ID: "
+									+ machineDetails.getMachineId());
+				}
+			}
+		}
+
 	}
 
 	private void waitForManagementWebServices(final boolean isSecureConnection, final String username,
@@ -301,7 +417,7 @@ public class CloudGridAgentBootstrapper {
 		}
 	}
 
-	//if webui port was configured we return the config value
+	// if webui port was configured we return the config value
 	private Integer getWebuiPort(final Integer configuredWebuiPort, final boolean isSecureConnection) {
 		if (configuredWebuiPort != null) {
 			return configuredWebuiPort;
@@ -314,6 +430,10 @@ public class CloudGridAgentBootstrapper {
 	}
 
 	private void stopManagementMachines() {
+		if (this.useExistingManagers || this.existingManagersFile != null) {
+			// if we did not start the machines, we will not close them.
+			return;
+		}
 		try {
 			provisioning.stopManagementMachines();
 		} catch (final CloudProvisioningException e) {
@@ -354,7 +474,7 @@ public class CloudGridAgentBootstrapper {
 		}
 
 		provisioning.addListener(new CliProvisioningDriverListener());
-		String serviceName = null;
+		final String serviceName = null;
 		provisioning.setConfig(cloud, cloud.getConfiguration()
 				.getManagementMachineTemplate(), true, serviceName);
 	}
@@ -366,11 +486,9 @@ public class CloudGridAgentBootstrapper {
 	 * @param timeoutUnit
 	 *            The time unit to use (seconds, minutes etc.)
 	 * @throws TimeoutException
-	 *             Indicates the time out was reached before the tear-down
-	 *             completed
+	 *             Indicates the time out was reached before the tear-down completed
 	 * @throws CLIException
-	 *             Indicates a basic failure tear-down the cloud. a detailed
-	 *             message is included
+	 *             Indicates a basic failure tear-down the cloud. a detailed message is included
 	 * @throws InterruptedException
 	 *             Indicates a thread was interrupted while waiting
 	 */
@@ -445,15 +563,15 @@ public class CloudGridAgentBootstrapper {
 		final long millisToEnd = end - startTime;
 		final int minutesToEnd = (int) TimeUnit.MILLISECONDS
 				.toMinutes(millisToEnd);
-		
-		Map<String, String> lifeCycleEventContainersIdsByApplicationName = new HashMap<String, String>();
+
+		final Map<String, String> lifeCycleEventContainersIdsByApplicationName = new HashMap<String, String>();
 
 		if (applicationsList.size() > 0) {
 			logger.info("Uninstalling the currently deployed applications");
 			for (final String application : applicationsList) {
 				if (!application.equals(MANAGEMENT_APPLICATION)) {
-					Map<String, String> uninstallApplicationResponse = adminFacade.uninstallApplication(application,
-							minutesToEnd);
+					final Map<String, String> uninstallApplicationResponse =
+							adminFacade.uninstallApplication(application, minutesToEnd);
 					lifeCycleEventContainersIdsByApplicationName.put(
 							uninstallApplicationResponse.get(CloudifyConstants.LIFECYCLE_EVENT_CONTAINER_ID),
 							application);
@@ -462,10 +580,10 @@ public class CloudGridAgentBootstrapper {
 		}
 
 		// now we need to wait for all the application to be uninstalled
-		for (Map.Entry<String, String> entry : lifeCycleEventContainersIdsByApplicationName.entrySet()) {
+		for (final Map.Entry<String, String> entry : lifeCycleEventContainersIdsByApplicationName.entrySet()) {
 			logger.info("Waiting for application " + entry.getValue() + " to uninstall.");
 			adminFacade.waitForLifecycleEvents(entry.getKey(), minutesToEnd, CloudifyConstants.TIMEOUT_ERROR_MESSAGE);
-		}		
+		}
 	}
 
 	private MachineDetails[] startManagememntProcesses(final MachineDetails[] machines, final String securityProfile,
@@ -597,23 +715,13 @@ public class CloudGridAgentBootstrapper {
 	private String createLocatorsString(
 			final InstallationDetails[] installations) {
 
-		// This is a workaround to allow cloudify nodes to use a non-default discovery port.
-		// At the moment, the cloudify cloud driver configuration does not support setting
-		// the unicast discovery port, so we use this property, along with the required
-		// environment variables.
-		// This should be replaced when cloudify adds support for network port configuration.
-		final Integer port = (Integer) cloud.getCustom().get(
-				CloudifyConstants.CUSTOM_CLOUD_PROPERTY_UNICAST_DISCOVERY_PORT);
+		final Integer port = cloud.getConfiguration().getComponents().getDiscovery().getDiscoveryPort();
 		final StringBuilder lookupSb = new StringBuilder();
 		for (final InstallationDetails detail : installations) {
 			final String ip = cloud.getConfiguration().isConnectToPrivateIp() ? detail
 					.getPrivateIp() : detail.getPublicIp();
 
-			if (port == null) {
-				lookupSb.append(ip).append(',');
-			} else {
-				lookupSb.append(ip).append(":").append(port).append(',');
-			}
+			lookupSb.append(ip).append(":").append(port).append(',');
 		}
 
 		lookupSb.setLength(lookupSb.length() - 1);
@@ -621,8 +729,6 @@ public class CloudGridAgentBootstrapper {
 		return lookupSb.toString();
 	}
 
-	// TODO: This code should be placed in a Util package somewhere. It is used
-	// both here and in the esc project, for starting new agent machines.
 	private InstallationDetails[] createInstallationDetails(final int numOfManagementMachines,
 			final MachineDetails[] machineDetails, final CloudTemplate template, final String securityProfile,
 			final String keystorePassword) throws FileNotFoundException {
@@ -643,9 +749,8 @@ public class CloudGridAgentBootstrapper {
 	}
 
 	/**
-	 * Waits for a connection to be established with the service. If the timeout
-	 * is reached before a connection could be established, a
-	 * {@link TimeoutException} is thrown.
+	 * Waits for a connection to be established with the service. If the timeout is reached before a connection could be
+	 * established, a {@link TimeoutException} is thrown.
 	 *
 	 * @param username
 	 *            The username for a secure connection to the rest server
@@ -664,12 +769,11 @@ public class CloudGridAgentBootstrapper {
 	 * @throws TimeoutException
 	 *             Reporting the time out was reached
 	 * @throws CLIException
-	 *             Reporting different errors while creating the connection to
-	 *             the service
+	 *             Reporting different errors while creating the connection to the service
 	 */
 	private void waitForConnection(final String username, final String password, final URL restAdminUrl,
 			final boolean isSecureConnection, final long timeout, final TimeUnit timeunit)
-					throws InterruptedException, TimeoutException, CLIException {
+			throws InterruptedException, TimeoutException, CLIException {
 
 		adminFacade.disconnect();
 
@@ -715,7 +819,30 @@ public class CloudGridAgentBootstrapper {
 		return noWebServices;
 	}
 
-	public void setNoWebServices(boolean noWebServices) {
+	public void setNoWebServices(final boolean noWebServices) {
 		this.noWebServices = noWebServices;
+	}
+
+	public void setUseExisting(final boolean useExistingManagers) {
+		this.useExistingManagers = useExistingManagers;
+
+	}
+
+	/******
+	 * Returns existing cloud managers.
+	 *
+	 * @return details of existing cloud managers.
+	 * @throws CLIException
+	 *             if failed to read cloudify managers from Cloud API.
+	 */
+	public MachineDetails[] getCloudManagers() throws CLIException {
+		createProvisioningDriver();
+		return locateManagementMachines();
+
+	}
+
+	public void setExistingManagersFile(final File existingManagersFile) {
+		this.existingManagersFile = existingManagersFile;
+
 	}
 }

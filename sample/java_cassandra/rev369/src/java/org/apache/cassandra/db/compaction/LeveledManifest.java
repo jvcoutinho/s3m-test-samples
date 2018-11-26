@@ -1,6 +1,4 @@
-package org.apache.cassandra.db.compaction;
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -9,23 +7,21 @@ package org.apache.cassandra.db.compaction;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
+package org.apache.cassandra.db.compaction;
 
 import java.io.File;
-import java.io.IOError;
 import java.io.IOException;
 import java.util.*;
 
+import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
@@ -37,6 +33,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RowPosition;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
@@ -45,8 +42,6 @@ import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonGenerator;
 import org.codehaus.jackson.JsonNode;
 import org.codehaus.jackson.map.ObjectMapper;
-
-import static org.apache.cassandra.db.compaction.AbstractCompactionStrategy.filterSuspectSSTables;
 
 public class LeveledManifest
 {
@@ -59,7 +54,7 @@ public class LeveledManifest
      * uses a pessimistic estimate of how many keys overlap (none), so we risk wasting memory
      * or even OOMing when compacting highly overlapping sstables
      */
-    static int MAX_COMPACTING_L0 = 32;
+    static final int MAX_COMPACTING_L0 = 32;
 
     private final ColumnFamilyStore cfs;
     private final List<SSTableReader>[] generations;
@@ -336,6 +331,14 @@ public class LeveledManifest
         return generations.length > i ? generations[i].size() : 0;
     }
 
+    public synchronized int[] getAllLevelSize()
+    {
+        int[] counts = new int[generations.length];
+        for (int i = 0; i < counts.length; i++)
+            counts[i] = generations[i].size();
+        return counts;
+    }
+
     private void logDistribution()
     {
         if (logger.isDebugEnabled())
@@ -558,19 +561,23 @@ public class LeveledManifest
             g.writeEndArray(); // for field generations
             g.writeEndObject(); // write global object
             g.close();
-
-            if (oldFile.exists() && manifestFile.exists())
-                FileUtils.deleteWithConfirm(oldFile);
-            if (manifestFile.exists())
-                FileUtils.renameWithConfirm(manifestFile, oldFile);
-            assert tmpFile.exists();
-            FileUtils.renameWithConfirm(tmpFile, manifestFile);
-            logger.debug("Saved manifest {}", manifestFile);
         }
         catch (IOException e)
         {
-            throw new IOError(e);
+            throw new FSWriteError(e, tmpFile);
         }
+
+        if (oldFile.exists() && manifestFile.exists())
+            FileUtils.deleteWithConfirm(oldFile);
+
+        if (manifestFile.exists())
+            FileUtils.renameWithConfirm(manifestFile, oldFile);
+
+        assert tmpFile.exists();
+
+        FileUtils.renameWithConfirm(tmpFile, manifestFile);
+
+        logger.debug("Saved manifest {}", manifestFile);
     }
 
     @Override
@@ -587,6 +594,11 @@ public class LeveledManifest
                 return i;
         }
         return 0;
+    }
+
+    public synchronized SortedSet<SSTableReader> getLevelSorted(int level, Comparator<SSTableReader> comparator)
+    {
+        return ImmutableSortedSet.copyOf(comparator, generations[level]);
     }
 
     public List<SSTableReader> getLevel(int i)

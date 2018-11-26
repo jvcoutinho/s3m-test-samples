@@ -22,15 +22,39 @@ package org.apache.cassandra.db.marshal;
 
 
 import java.nio.ByteBuffer;
+import java.text.ParseException;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
+import org.apache.commons.lang.time.DateUtils;
 
-public class TimeUUIDType extends AbstractType
+public class TimeUUIDType extends AbstractType<UUID>
 {
+    
     public static final TimeUUIDType instance = new TimeUUIDType();
+    private Pattern regexPattern = Pattern.compile("[A-Fa-f0-9]{8}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{4}\\-[A-Fa-f0-9]{12}");
+    private static String[] iso8601Patterns = new String[] {
+        "yyyy-MM-dd HH:mm",
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd HH:mmZ",
+        "yyyy-MM-dd HH:mm:ssZ",
+        "yyyy-MM-dd'T'HH:mm",
+        "yyyy-MM-dd'T'HH:mmZ",
+        "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ssZ",
+        "yyyy-MM-dd",
+        "yyyy-MM-ddZ"
+    };
 
     TimeUUIDType() {} // singleton
+
+    public UUID compose(ByteBuffer bytes)
+    {
+        return UUIDGen.getUUID(bytes);
+    }
 
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
@@ -95,14 +119,67 @@ public class TimeUUIDType extends AbstractType
         return uuid.toString();
     }
 
-    public ByteBuffer fromString(String source)
+    public String toString(UUID uuid)
     {
-        UUID uuid = UUID.fromString(source);
+        return uuid.toString();
+    }
 
-        if (uuid.version() != 1)
-            throw new IllegalArgumentException("TimeUUID supports only version 1 UUIDs");
-
-        return ByteBuffer.wrap(UUIDGen.decompose(uuid));
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+        
+        ByteBuffer idBytes = null;
+        
+        // ffffffff-ffff-ffff-ffff-ffffffffff
+        if (regexPattern.matcher(source).matches())
+        {
+            UUID uuid = null;
+            try
+            {
+                uuid = UUID.fromString(source);
+                idBytes = ByteBuffer.wrap(UUIDGen.decompose(uuid));
+            }
+            catch (IllegalArgumentException e)
+            {
+                throw new MarshalException(String.format("unable to make UUID from '%s'", source), e);
+            }
+            
+            if (uuid.version() != 1)
+                throw new MarshalException("TimeUUID supports only version 1 UUIDs");
+        }
+        else if (source.toLowerCase().equals("now"))
+        {
+            idBytes = ByteBuffer.wrap(UUIDGen.decompose(UUIDGen.makeType1UUIDFromHost(FBUtilities.getLocalAddress())));
+        }
+        // Milliseconds since epoch?
+        else if (source.matches("^\\d+$"))
+        {
+            try
+            {
+                idBytes = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes(Long.parseLong(source)));
+            }
+            catch (NumberFormatException e)
+            {
+                throw new MarshalException(String.format("unable to make version 1 UUID from '%s'", source), e);
+            }
+        }
+        // Last chance, attempt to parse as date-time string
+        else
+        {
+            try
+            {
+                long timestamp = DateUtils.parseDate(source, iso8601Patterns).getTime();
+                idBytes = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes(timestamp));
+            }
+            catch (ParseException e1)
+            {
+                throw new MarshalException(String.format("unable to coerce '%s' to version 1 UUID", source), e1);
+            }
+        }
+            
+        return idBytes;
     }
 
     public void validate(ByteBuffer bytes) throws MarshalException
@@ -117,5 +194,10 @@ public class TimeUUIDType extends AbstractType
             if ((slice.get() & 0xf0) != 0x10)
                 throw new MarshalException("Invalid version for TimeUUID type.");
         }
+    }
+
+    public Class<UUID> getType()
+    {
+        return UUID.class;
     }
 }

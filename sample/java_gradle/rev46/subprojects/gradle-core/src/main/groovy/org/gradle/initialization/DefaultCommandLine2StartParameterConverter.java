@@ -73,6 +73,9 @@ public class DefaultCommandLine2StartParameterConverter implements CommandLine2S
     private static final String HELP = "h";
     private static final String GUI = "gui";
     private static final String ALL = "all";
+    private static final String FOREGROUND = "foreground";
+    private static final String NO_DAEMON = "no-daemon";
+    private static final String STOP_DAEMON = "stop";
 
     private final OptionParser parser = new OptionParser() {
         {
@@ -126,6 +129,9 @@ public class DefaultCommandLine2StartParameterConverter implements CommandLine2S
                     .withRequiredArg().ofType(String.class);
             acceptsAll(WrapUtil.toList(NO_COLOR), "Do not use color in the console output.");
             acceptsAll(WrapUtil.toList(HELP, "?", "help"), "Shows this help message");
+            acceptsAll(WrapUtil.toList(FOREGROUND), "Runs the Gradle daemon in the foreground.");
+            acceptsAll(WrapUtil.toList(NO_DAEMON), "Does not use the Gradle daemon.");
+            acceptsAll(WrapUtil.toList(STOP_DAEMON), "Stops the Gradle daemon, if running.");
         }};
 
     private static BiMap<String, LogLevel> logLevelMap = HashBiMap.create();
@@ -172,6 +178,15 @@ public class DefaultCommandLine2StartParameterConverter implements CommandLine2S
 
         if (options.has(GUI)) {
             startParameter.setLaunchGUI(true);
+        }
+        if (options.has(FOREGROUND)) {
+            startParameter.setForeground(true);
+        }
+        if (options.has(NO_DAEMON)) {
+            startParameter.setNoDaemon(true);
+        }
+        if (options.has(STOP_DAEMON)) {
+            startParameter.setStopDaemon(true);
         }
 
         if (options.has(SYSTEM_PROP)) {

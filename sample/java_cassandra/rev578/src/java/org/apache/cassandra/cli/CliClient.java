@@ -137,7 +137,12 @@ public class CliClient
         COMPACTION_STRATEGY_OPTIONS,
         COMPRESSION_OPTIONS,
         BLOOM_FILTER_FP_CHANCE,
-        CACHING
+        INDEX_INTERVAL,
+        MEMTABLE_FLUSH_PERIOD_IN_MS,
+        CACHING,
+        DEFAULT_TIME_TO_LIVE,
+        SPECULATIVE_RETRY,
+        POPULATE_IO_CACHE_ON_FLUSH
     }
 
     private static final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.NetworkTopologyStrategy";
@@ -1323,8 +1328,22 @@ public class CliClient
             case BLOOM_FILTER_FP_CHANCE:
                 cfDef.setBloom_filter_fp_chance(Double.parseDouble(mValue));
                 break;
+            case MEMTABLE_FLUSH_PERIOD_IN_MS:
+                cfDef.setMemtable_flush_period_in_ms(Integer.parseInt(mValue));
+                break;
             case CACHING:
                 cfDef.setCaching(CliUtils.unescapeSQLString(mValue));
+                break;
+            case DEFAULT_TIME_TO_LIVE:
+                cfDef.setDefault_time_to_live(Integer.parseInt(mValue));
+                break;
+            case INDEX_INTERVAL:
+                cfDef.setIndex_interval(Integer.parseInt(mValue));
+                break;
+            case SPECULATIVE_RETRY:
+                cfDef.setSpeculative_retry(CliUtils.unescapeSQLString(mValue));
+            case POPULATE_IO_CACHE_ON_FLUSH:
+                cfDef.setPopulate_io_cache_on_flush(Boolean.parseBoolean(mValue));
                 break;
             default:
                 //must match one of the above or we'd throw an exception at the valueOf statement above.
@@ -1774,12 +1793,15 @@ public class CliClient
 
         writeAttr(output, false, "read_repair_chance", cfDef.read_repair_chance);
         writeAttr(output, false, "dclocal_read_repair_chance", cfDef.dclocal_read_repair_chance);
+        writeAttr(output, false, "populate_io_cache_on_flush", cfDef.populate_io_cache_on_flush);
         writeAttr(output, false, "gc_grace", cfDef.gc_grace_seconds);
         writeAttr(output, false, "min_compaction_threshold", cfDef.min_compaction_threshold);
         writeAttr(output, false, "max_compaction_threshold", cfDef.max_compaction_threshold);
         writeAttr(output, false, "replicate_on_write", cfDef.replicate_on_write);
         writeAttr(output, false, "compaction_strategy", cfDef.compaction_strategy);
         writeAttr(output, false, "caching", cfDef.caching);
+        writeAttr(output, false, "default_time_to_live", cfDef.default_time_to_live);
+        writeAttr(output, false, "speculative_retry", cfDef.speculative_retry);
 
         if (cfDef.isSetBloom_filter_fp_chance())
             writeAttr(output, false, "bloom_filter_fp_chance", cfDef.bloom_filter_fp_chance);
@@ -1852,6 +1874,8 @@ public class CliClient
 
             writeAttrRaw(output, false, "compression_options", compOptions.toString());
         }
+        if (cfDef.isSetIndex_interval())
+            writeAttr(output, false, "index_interval", cfDef.index_interval);
 
         output.append(";");
         output.append(NEWLINE);
@@ -2143,9 +2167,13 @@ public class CliClient
         sessionState.out.printf("      Compaction min/max thresholds: %s/%s%n", cf_def.min_compaction_threshold, cf_def.max_compaction_threshold);
         sessionState.out.printf("      Read repair chance: %s%n", cf_def.read_repair_chance);
         sessionState.out.printf("      DC Local Read repair chance: %s%n", cf_def.dclocal_read_repair_chance);
+        sessionState.out.printf("      Populate IO Cache on flush: %b%n", cf_def.populate_io_cache_on_flush);
         sessionState.out.printf("      Replicate on write: %s%n", cf_def.replicate_on_write);
         sessionState.out.printf("      Caching: %s%n", cf_def.caching);
+        sessionState.out.printf("      Default time to live: %s%n", cf_def.default_time_to_live);
         sessionState.out.printf("      Bloom Filter FP chance: %s%n", cf_def.isSetBloom_filter_fp_chance() ? cf_def.bloom_filter_fp_chance : "default");
+        sessionState.out.printf("      Index interval: %s%n", cf_def.isSetIndex_interval() ? cf_def.index_interval : "default");
+        sessionState.out.printf("      Speculative Retry: %s%n", cf_def.speculative_retry);
 
         // if we have connection to the cfMBean established
         if (cfMBean != null)

@@ -120,11 +120,6 @@ public class CassandraServer implements Cassandra.Iface
         // TODO - Support multiple column families per row, right now row only contains 1 column family
         Map<DecoratedKey, ColumnFamily> columnFamilyKeyMap = new HashMap<DecoratedKey, ColumnFamily>();
 
-        if (consistency_level == ConsistencyLevel.ANY)
-        {
-            throw new InvalidRequestException("Consistency level any may not be applied to read operations");
-        }
-
         List<Row> rows;
         try
         {
@@ -346,7 +341,7 @@ public class CassandraServer implements Cassandra.Iface
         CFMetaData metadata = ThriftValidation.validateColumnFamily(keyspace, column_parent.column_family);
         ThriftValidation.validateColumnParent(metadata, column_parent);
         ThriftValidation.validatePredicate(metadata, column_parent, predicate);
-        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level);
+        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level, RequestType.READ);
 
         List<ReadCommand> commands = new ArrayList<ReadCommand>();
         if (predicate.column_names != null)
@@ -378,7 +373,7 @@ public class CassandraServer implements Cassandra.Iface
 
         CFMetaData metadata = ThriftValidation.validateColumnFamily(keyspace, column_path.column_family);
         ThriftValidation.validateColumnPath(metadata, column_path);
-        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level);
+        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level, RequestType.READ);
 
         QueryPath path = new QueryPath(column_path.column_family, column_path.column == null ? null : column_path.super_column);
         List<ByteBuffer> nameAsList = Arrays.asList(column_path.column == null ? column_path.super_column : column_path.column);
@@ -630,7 +625,7 @@ public class CassandraServer implements Cassandra.Iface
 
     private void doInsert(ConsistencyLevel consistency_level, List<? extends IMutation> mutations) throws UnavailableException, TimedOutException, InvalidRequestException
     {
-        ThriftValidation.validateConsistencyLevel(state().getKeyspace(), consistency_level);
+        ThriftValidation.validateConsistencyLevel(state().getKeyspace(), consistency_level, RequestType.WRITE);
         if (mutations.isEmpty())
             return;
         try
@@ -674,23 +669,23 @@ public class CassandraServer implements Cassandra.Iface
         ThriftValidation.validateColumnParent(metadata, column_parent);
         ThriftValidation.validatePredicate(metadata, column_parent, predicate);
         ThriftValidation.validateKeyRange(range);
-        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level);
+        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level, RequestType.READ);
 
         List<Row> rows;
         try
         {
             IPartitioner p = StorageService.getPartitioner();
-            AbstractBounds bounds;
+            AbstractBounds<RowPosition> bounds;
             if (range.start_key == null)
             {
                 Token.TokenFactory tokenFactory = p.getTokenFactory();
                 Token left = tokenFactory.fromString(range.start_token);
                 Token right = tokenFactory.fromString(range.end_token);
-                bounds = new Range(left, right);
+                bounds = Range.makeRowRange(left, right, p);
             }
             else
             {
-                bounds = new Bounds(p.getToken(range.start_key), p.getToken(range.end_key));
+                bounds = new Bounds<RowPosition>(RowPosition.forKey(range.start_key, p), RowPosition.forKey(range.end_key, p));
             }
             schedule(DatabaseDescriptor.getRpcTimeout());
             try
@@ -738,7 +733,7 @@ public class CassandraServer implements Cassandra.Iface
         ThriftValidation.validateColumnParent(metadata, column_parent);
         ThriftValidation.validatePredicate(metadata, column_parent, column_predicate);
         ThriftValidation.validateIndexClauses(metadata, index_clause);
-        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level);
+        ThriftValidation.validateConsistencyLevel(keyspace, consistency_level, RequestType.READ);
 
         List<Row> rows;
         try
@@ -794,9 +789,9 @@ public class CassandraServer implements Cassandra.Iface
         List<TokenRange> ranges = new ArrayList<TokenRange>();
         Token.TokenFactory tf = StorageService.getPartitioner().getTokenFactory();
 
-        for (Map.Entry<Range, List<InetAddress>> entry : StorageService.instance.getRangeToAddressMap(keyspace).entrySet())
+        for (Map.Entry<Range<Token>, List<InetAddress>> entry : StorageService.instance.getRangeToAddressMap(keyspace).entrySet())
         {
-            Range range = entry.getKey();
+            Range<Token> range = entry.getKey();
             List<String> endpoints = new ArrayList<String>();
             List<String> rpc_endpoints = new ArrayList<String>();
             List<EndpointDetails> epDetails = new ArrayList<EndpointDetails>();
@@ -842,7 +837,7 @@ public class CassandraServer implements Cassandra.Iface
     {
         // TODO: add keyspace authorization call post CASSANDRA-1425
         Token.TokenFactory tf = StorageService.getPartitioner().getTokenFactory();
-        List<Token> tokens = StorageService.instance.getSplits(state().getKeyspace(), cfName, new Range(tf.fromString(start_token), tf.fromString(end_token)), keys_per_split);
+        List<Token> tokens = StorageService.instance.getSplits(state().getKeyspace(), cfName, new Range<Token>(tf.fromString(start_token), tf.fromString(end_token)), keys_per_split);
         List<String> splits = new ArrayList<String>(tokens.size());
         for (Token token : tokens)
         {

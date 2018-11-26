@@ -26,8 +26,10 @@ import ch.qos.logback.core.ConsoleAppender;
 import ch.qos.logback.core.Layout;
 import ch.qos.logback.core.filter.Filter;
 import ch.qos.logback.core.spi.FilterReply;
-import org.fusesource.jansi.AnsiConsole;
-import org.gradle.api.logging.*;
+import org.gradle.api.logging.LogLevel;
+import org.gradle.api.logging.Logging;
+import org.gradle.api.logging.LoggingOutput;
+import org.gradle.api.logging.StandardOutputListener;
 import org.gradle.api.specs.Spec;
 import org.gradle.listener.ListenerBroadcast;
 import org.gradle.util.UncheckedException;
@@ -39,7 +41,7 @@ import java.io.PrintStream;
 /**
  * @author Hans Dockter
  */
-public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput {
+public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput, TerminalLoggingConfigurer {
     private final LoggingDestination stdout = new LoggingDestination();
     private final LoggingDestination stderr = new LoggingDestination();
     private final Appender errorAppender = new Appender();
@@ -61,10 +63,12 @@ public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput 
 
     Console createConsole() {
         if (stdout.terminal) {
-            return new org.gradle.logging.AnsiConsole(AnsiConsole.out(), AnsiConsole.out());
+            PrintStream target = System.out;
+            return new org.gradle.logging.AnsiConsole(target, target);
         }
         if (stderr.terminal) {
-            return new org.gradle.logging.AnsiConsole(AnsiConsole.err(), AnsiConsole.err());
+            PrintStream target = System.err;
+            return new org.gradle.logging.AnsiConsole(target, target);
         }
         return null;
     }
@@ -85,13 +89,20 @@ public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput 
         stdout.removeListener(listener);
     }
 
+    public void configure(boolean stdOutIsTerminal, boolean stdErrIsTerminal) {
+        stdout.terminal = stdOutIsTerminal;
+        stderr.terminal = stdErrIsTerminal;
+        doConfigure(true);
+    }
+
     public void configure(LogLevel logLevel) {
         if (currentLevel == logLevel) {
             return;
         }
-
+        boolean init = currentLevel == null;
+        currentLevel = logLevel;
         try {
-            doConfigure(logLevel);
+            doConfigure(init);
         } catch (Throwable e) {
             doFailsafeConfiguration();
             throw UncheckedException.asUncheckedException(e);
@@ -118,15 +129,15 @@ public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput 
         rootLogger.setLevel(Level.INFO);
         rootLogger.addAppender(consoleAppender);
     }
-
-    private void doConfigure(LogLevel logLevel) {
+    
+    private void doConfigure(boolean init) {
         LoggerContext lc = (LoggerContext) LoggerFactory.getILoggerFactory();
         ch.qos.logback.classic.Logger rootLogger;
-        if (currentLevel == null) {
+        if (init) {
             lc.reset();
 
-            stdout.init(FileDescriptor.out, System.out);
-            stderr.init(FileDescriptor.err, System.err);
+            stdout.init(System.out);
+            stderr.init(System.err);
 
             Console console = createConsole();
             consoleFormatter = console == null ? null : new ConsoleBackedFormatter(lc, console);
@@ -143,7 +154,6 @@ public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput 
             rootLogger = lc.getLogger("ROOT");
         }
 
-        currentLevel = logLevel;
         errorAppender.stop();
         infoAppender.stop();
         errorAppender.clearAllFilters();
@@ -152,19 +162,19 @@ public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput 
         errorAppender.addFilter(createLevelFilter(lc, Level.ERROR, FilterReply.ACCEPT, FilterReply.DENY));
         Level level = Level.INFO;
 
-        infoAppender.setFormatter(stdout.createFormatter(lc, logLevel));
-        errorAppender.setFormatter(stderr.createFormatter(lc, logLevel));
+        infoAppender.setFormatter(stdout.createFormatter(lc, currentLevel));
+        errorAppender.setFormatter(stderr.createFormatter(lc, currentLevel));
 
         MarkerFilter quietFilter = new MarkerFilter(FilterReply.DENY, Logging.QUIET);
         infoAppender.addFilter(quietFilter);
-        if (!(logLevel == LogLevel.QUIET)) {
+        if (!(currentLevel == LogLevel.QUIET)) {
             quietFilter.setOnMismatch(FilterReply.NEUTRAL);
-            if (logLevel == LogLevel.DEBUG) {
+            if (currentLevel == LogLevel.DEBUG) {
                 level = Level.DEBUG;
                 infoAppender.addFilter(createLevelFilter(lc, Level.INFO, FilterReply.ACCEPT, FilterReply.NEUTRAL));
                 infoAppender.addFilter(createLevelFilter(lc, Level.DEBUG, FilterReply.ACCEPT, FilterReply.NEUTRAL));
             } else {
-                if (logLevel == LogLevel.INFO) {
+                if (currentLevel == LogLevel.INFO) {
                     level = Level.INFO;
                     infoAppender.addFilter(createLevelFilter(lc, Level.INFO, FilterReply.ACCEPT, FilterReply.NEUTRAL));
                 } else {
@@ -201,9 +211,8 @@ public class Slf4jLoggingConfigurer implements LoggingConfigurer, LoggingOutput 
         private boolean terminal;
         private PrintStream target;
 
-        private void init(FileDescriptor fileDescriptor, PrintStream target) {
+        private void init(PrintStream target) {
             this.target = target;
-            terminal = terminalDetector.isSatisfiedBy(fileDescriptor);
         }
 
         private LogEventFormatter createFormatter(LoggerContext loggerContext, LogLevel logLevel) {

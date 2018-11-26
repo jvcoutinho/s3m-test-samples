@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.config;
 
 import java.io.IOException;
@@ -85,7 +84,8 @@ public final class KSMetaData
                                                 CFMetaData.VersionCf,
                                                 CFMetaData.SchemaKeyspacesCf,
                                                 CFMetaData.SchemaColumnFamiliesCf,
-                                                CFMetaData.SchemaColumnsCf);
+                                                CFMetaData.SchemaColumnsCf,
+                                                CFMetaData.HostIdCf);
         return new KSMetaData(Table.SYSTEM_TABLE, LocalStrategy.class, optsWithRF(1), true, cfDefs);
     }
 

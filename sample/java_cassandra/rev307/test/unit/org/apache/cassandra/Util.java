@@ -36,10 +36,11 @@ import java.util.concurrent.Future;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.AbstractCompactionTask;
 import org.apache.cassandra.db.compaction.CompactionManager;
-import org.apache.cassandra.db.compaction.CompactionTask;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
+import org.apache.cassandra.db.filter.IDiskAtomFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.filter.SliceQueryFilter;
+import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.Gossiper;
@@ -91,14 +92,6 @@ public class Util
         return new CounterUpdateColumn(ByteBufferUtil.bytes(name), value, timestamp);
     }
 
-    public static SuperColumn superColumn(ColumnFamily cf, String name, Column... columns)
-    {
-        SuperColumn sc = new SuperColumn(ByteBufferUtil.bytes(name), cf.metadata().comparator);
-        for (Column c : columns)
-            sc.addColumn(c);
-        return sc;
-    }
-
     public static Token token(String key)
     {
         return StorageService.getPartitioner().getToken(ByteBufferUtil.bytes(key));
@@ -121,7 +114,10 @@ public class Util
 
     public static void addMutation(RowMutation rm, String columnFamilyName, String superColumnName, long columnName, String value, long timestamp)
     {
-        rm.add(new QueryPath(columnFamilyName, ByteBufferUtil.bytes(superColumnName), getBytes(columnName)), ByteBufferUtil.bytes(value), timestamp);
+        ByteBuffer cname = superColumnName == null
+                         ? getBytes(columnName)
+                         : CompositeType.build(ByteBufferUtil.bytes(superColumnName), getBytes(columnName));
+        rm.add(columnFamilyName, cname, ByteBufferUtil.bytes(value), timestamp);
     }
 
     public static ByteBuffer getBytes(long v)
@@ -149,39 +145,39 @@ public class Util
 
     public static List<Row> getRangeSlice(ColumnFamilyStore cfs, ByteBuffer superColumn) throws IOException, ExecutionException, InterruptedException
     {
+        IDiskAtomFilter filter = superColumn == null
+                               ? new IdentityQueryFilter()
+                               : new SliceQueryFilter(SuperColumns.startOf(superColumn), SuperColumns.endOf(superColumn), false, Integer.MAX_VALUE);
+
         Token min = StorageService.getPartitioner().getMinimumToken();
-        return cfs.getRangeSlice(superColumn,
-                                 new Bounds<Token>(min, min).toRowBounds(),
-                                 10000,
-                                 new IdentityQueryFilter(),
-                                 null);
+        return cfs.getRangeSlice(new Bounds<Token>(min, min).toRowBounds(), null, filter, 10000);
     }
 
     /**
-     * Writes out a bunch of rows for a single column family.
+     * Writes out a bunch of mutations for a single column family.
      *
-     * @param rows A group of RowMutations for the same table and column family.
+     * @param mutations A group of RowMutations for the same keyspace and column family.
      * @return The ColumnFamilyStore that was used.
      */
-    public static ColumnFamilyStore writeColumnFamily(List<IMutation> rms) throws IOException, ExecutionException, InterruptedException
+    public static ColumnFamilyStore writeColumnFamily(List<IMutation> mutations) throws IOException, ExecutionException, InterruptedException
     {
-        IMutation first = rms.get(0);
-        String tablename = first.getTable();
+        IMutation first = mutations.get(0);
+        String keyspaceName = first.getKeyspaceName();
         UUID cfid = first.getColumnFamilyIds().iterator().next();
 
-        for (IMutation rm : rms)
+        for (IMutation rm : mutations)
             rm.apply();
 
-        ColumnFamilyStore store = Table.open(tablename).getColumnFamilyStore(cfid);
+        ColumnFamilyStore store = Keyspace.open(keyspaceName).getColumnFamilyStore(cfid);
         store.forceBlockingFlush();
         return store;
     }
 
-    public static ColumnFamily getColumnFamily(Table table, DecoratedKey key, String cfName) throws IOException
+    public static ColumnFamily getColumnFamily(Keyspace keyspace, DecoratedKey key, String cfName) throws IOException
     {
-        ColumnFamilyStore cfStore = table.getColumnFamilyStore(cfName);
+        ColumnFamilyStore cfStore = keyspace.getColumnFamilyStore(cfName);
         assert cfStore != null : "Column family " + cfName + " has not been defined";
-        return cfStore.getColumnFamily(QueryFilter.getIdentityFilter(key, new QueryPath(cfName)));
+        return cfStore.getColumnFamily(QueryFilter.getIdentityFilter(key, cfName, System.currentTimeMillis()));
     }
 
     public static byte[] concatByteArrays(byte[] first, byte[]... remaining)
@@ -259,7 +255,7 @@ public class Util
 
     public static void compact(ColumnFamilyStore cfs, Collection<SSTableReader> sstables)
     {
-        int gcBefore = (int) (System.currentTimeMillis() / 1000) - cfs.metadata.getGcGraceSeconds();
+        int gcBefore = cfs.gcBefore(System.currentTimeMillis());
         AbstractCompactionTask task = cfs.getCompactionStrategy().getUserDefinedTask(sstables, gcBefore);
         task.execute(null);
     }
@@ -284,22 +280,5 @@ public class Util
         }
 
         assert thrown : exception.getName() + " not received";
-    }
-
-    public static ByteBuffer serializeForSSTable(ColumnFamily cf)
-    {
-        try
-        {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(baos);
-            DeletionInfo.serializer().serializeForSSTable(cf.deletionInfo(), dos);
-            dos.writeInt(cf.getColumnCount());
-            new ColumnIndex.Builder(cf, ByteBufferUtil.EMPTY_BYTE_BUFFER, dos).build(cf);
-            return ByteBuffer.wrap(baos.toByteArray());
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
     }
 }

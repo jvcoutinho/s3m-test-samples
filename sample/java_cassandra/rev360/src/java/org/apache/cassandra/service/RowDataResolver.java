@@ -30,20 +30,14 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.filter.IDiskAtomFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.filter.SliceQueryFilter;
-import org.apache.cassandra.net.IAsyncResult;
-import org.apache.cassandra.net.MessageIn;
-import org.apache.cassandra.net.MessageOut;
-import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.net.*;
 import org.apache.cassandra.utils.CloseableIterator;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.IFilter;
 
 public class RowDataResolver extends AbstractRowResolver
 {
     private int maxLiveCount = 0;
-    public List<IAsyncResult> repairResults = Collections.emptyList();
+    public List<AsyncOneResponse> repairResults = Collections.emptyList();
     private final IDiskAtomFilter filter;
 
     public RowDataResolver(String table, ByteBuffer key, IDiskAtomFilter qFilter)
@@ -109,9 +103,9 @@ public class RowDataResolver extends AbstractRowResolver
      * For each row version, compare with resolved (the superset of all row versions);
      * if it is missing anything, send a mutation to the endpoint it come from.
      */
-    public static List<IAsyncResult> scheduleRepairs(ColumnFamily resolved, String table, DecoratedKey key, List<ColumnFamily> versions, List<InetAddress> endpoints)
+    public static List<AsyncOneResponse> scheduleRepairs(ColumnFamily resolved, String table, DecoratedKey key, List<ColumnFamily> versions, List<InetAddress> endpoints)
     {
-        List<IAsyncResult> results = new ArrayList<IAsyncResult>(versions.size());
+        List<AsyncOneResponse> results = new ArrayList<AsyncOneResponse>(versions.size());
 
         for (int i = 0; i < versions.size(); i++)
         {
@@ -120,8 +114,7 @@ public class RowDataResolver extends AbstractRowResolver
                 continue;
 
             // create and send the row mutation message based on the diff
-            RowMutation rowMutation = new RowMutation(table, key.key);
-            rowMutation.add(diffCf);
+            RowMutation rowMutation = new RowMutation(table, key.key, diffCf);
             MessageOut repairMessage;
             // use a separate verb here because we don't want these to be get the white glove hint-
             // on-timeout behavior that a "real" mutation gets
@@ -153,8 +146,8 @@ public class RowDataResolver extends AbstractRowResolver
         // mimic the collectCollatedColumn + removeDeleted path that getColumnFamily takes.
         // this will handle removing columns and subcolumns that are supressed by a row or
         // supercolumn tombstone.
-        QueryFilter filter = new QueryFilter(null, new QueryPath(resolved.metadata().cfName), new IdentityQueryFilter());
-        List<CloseableIterator<IColumn>> iters = new ArrayList<CloseableIterator<IColumn>>();
+        QueryFilter filter = new QueryFilter(null, resolved.metadata().cfName, new IdentityQueryFilter());
+        List<CloseableIterator<Column>> iters = new ArrayList<CloseableIterator<Column>>();
         for (ColumnFamily version : versions)
         {
             if (version == null)

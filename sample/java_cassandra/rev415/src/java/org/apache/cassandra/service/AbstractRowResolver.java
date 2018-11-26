@@ -43,7 +43,7 @@ public abstract class AbstractRowResolver implements IResponseResolver<Row>
 {
     protected static Logger logger = LoggerFactory.getLogger(AbstractRowResolver.class);
 
-    private static final Message FAKE_MESSAGE = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.INTERNAL_RESPONSE, ArrayUtils.EMPTY_BYTE_ARRAY);
+    private static final Message FAKE_MESSAGE = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.INTERNAL_RESPONSE, ArrayUtils.EMPTY_BYTE_ARRAY, -1);
 
     protected final String table;
     protected final ConcurrentMap<Message, ReadResponse> replies = new NonBlockingHashMap<Message, ReadResponse>();
@@ -61,7 +61,7 @@ public abstract class AbstractRowResolver implements IResponseResolver<Row>
         ByteArrayInputStream bufIn = new ByteArrayInputStream(body);
         try
         {
-            ReadResponse result = ReadResponse.serializer().deserialize(new DataInputStream(bufIn));
+            ReadResponse result = ReadResponse.serializer().deserialize(new DataInputStream(bufIn), message.getVersion());
             if (logger.isDebugEnabled())
                 logger.debug("Preprocessed {} response", result.isDigestQuery() ? "digest" : "data");
             replies.put(message, result);

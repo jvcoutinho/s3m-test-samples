@@ -26,7 +26,6 @@ import java.util.concurrent.TimeUnit;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.SetMultimap;
 import com.google.common.collect.Sets;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -35,10 +34,8 @@ import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.dht.BytesToken;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -71,9 +68,9 @@ public class CompactionsTest extends SchemaLoader
         for (int i = 0; i < 10; i++)
         {
             DecoratedKey key = Util.dk(Integer.toString(i));
-            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
             for (int j = 0; j < 10; j++)
-                rm.add("Standard1", ByteBufferUtil.bytes(Integer.toString(j)),
+                rm.add("Standard1", Util.cellname(Integer.toString(j)),
                        ByteBufferUtil.EMPTY_BYTE_BUFFER,
                        timestamp,
                        j > 0 ? 3 : 0); // let first column never expire, since deleting all columns does not produce sstable
@@ -122,7 +119,7 @@ public class CompactionsTest extends SchemaLoader
     }
 
     @Test
-    public void testSuperColumnTombstones() throws IOException, ExecutionException, InterruptedException
+    public void testSuperColumnTombstones() throws ExecutionException, InterruptedException
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore("Super1");
@@ -132,15 +129,15 @@ public class CompactionsTest extends SchemaLoader
         ByteBuffer scName = ByteBufferUtil.bytes("TestSuperColumn");
 
         // a subcolumn
-        RowMutation rm = new RowMutation(KEYSPACE1, key.key);
-        rm.add("Super1", CompositeType.build(scName, ByteBufferUtil.bytes(0)),
+        Mutation rm = new Mutation(KEYSPACE1, key.getKey());
+        rm.add("Super1", Util.cellname(scName, ByteBufferUtil.bytes(0)),
                ByteBufferUtil.EMPTY_BYTE_BUFFER,
                FBUtilities.timestampMicros());
         rm.apply();
         cfs.forceBlockingFlush();
 
         // shadow the subcolumn with a supercolumn tombstone
-        rm = new RowMutation(KEYSPACE1, key.key);
+        rm = new Mutation(KEYSPACE1, key.getKey());
         rm.deleteRange("Super1", SuperColumns.startOf(scName), SuperColumns.endOf(scName), FBUtilities.timestampMicros());
         rm.apply();
         cfs.forceBlockingFlush();
@@ -167,7 +164,7 @@ public class CompactionsTest extends SchemaLoader
     }
 
     @Test
-    public void testEchoedRow() throws IOException, ExecutionException, InterruptedException
+    public void testEchoedRow()
     {
         // This test check that EchoedRow doesn't skipp rows: see CASSANDRA-2653
 
@@ -182,8 +179,8 @@ public class CompactionsTest extends SchemaLoader
         for (int i=1; i < 5; i++)
         {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
-            rm.add("Standard2", ByteBufferUtil.bytes(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
+            rm.add("Standard2", Util.cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
             rm.apply();
 
             if (i % 2 == 0)
@@ -197,8 +194,8 @@ public class CompactionsTest extends SchemaLoader
         for (int i=1; i < 5; i++)
         {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
-            rm.add("Standard2", ByteBufferUtil.bytes(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
+            rm.add("Standard2", Util.cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
             rm.apply();
         }
         cfs.forceBlockingFlush();
@@ -221,7 +218,7 @@ public class CompactionsTest extends SchemaLoader
     }
 
     @Test
-    public void testDontPurgeAccidentaly() throws IOException, ExecutionException, InterruptedException
+    public void testDontPurgeAccidentaly() throws InterruptedException
     {
         testDontPurgeAccidentaly("test1", "Super5");
 
@@ -242,8 +239,8 @@ public class CompactionsTest extends SchemaLoader
         final int ROWS_PER_SSTABLE = 10;
         for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            RowMutation rm = new RowMutation(KEYSPACE1, key.key);
-            rm.add(cfname, ByteBufferUtil.bytes("col"),
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
+            rm.add(cfname, Util.cellname("col"),
                    ByteBufferUtil.EMPTY_BYTE_BUFFER,
                    System.currentTimeMillis());
             rm.apply();
@@ -298,7 +295,7 @@ public class CompactionsTest extends SchemaLoader
         assert !compactionLogs.containsKey(Pair.create(KEYSPACE1, cf));
     }
 
-    private void testDontPurgeAccidentaly(String k, String cfname) throws IOException, ExecutionException, InterruptedException
+    private void testDontPurgeAccidentaly(String k, String cfname) throws InterruptedException
     {
         // This test catches the regression of CASSANDRA-2786
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
@@ -310,8 +307,8 @@ public class CompactionsTest extends SchemaLoader
 
         // Add test row
         DecoratedKey key = Util.dk(k);
-        RowMutation rm = new RowMutation(KEYSPACE1, key.key);
-        rm.add(cfname, CompositeType.build(ByteBufferUtil.bytes("sc"), ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
+        Mutation rm = new Mutation(KEYSPACE1, key.getKey());
+        rm.add(cfname, Util.cellname(ByteBufferUtil.bytes("sc"), ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
 
         cfs.forceBlockingFlush();
@@ -319,15 +316,15 @@ public class CompactionsTest extends SchemaLoader
         Collection<SSTableReader> sstablesBefore = cfs.getSSTables();
 
         QueryFilter filter = QueryFilter.getIdentityFilter(key, cfname, System.currentTimeMillis());
-        assert !(cfs.getColumnFamily(filter).getColumnCount() == 0);
+        assertTrue(cfs.getColumnFamily(filter).hasColumns());
 
         // Remove key
-        rm = new RowMutation(KEYSPACE1, key.key);
+        rm = new Mutation(KEYSPACE1, key.getKey());
         rm.delete(cfname, 2);
         rm.apply();
 
         ColumnFamily cf = cfs.getColumnFamily(filter);
-        assert cf == null || cf.getColumnCount() == 0 : "should be empty: " + cf;
+        assertTrue("should be empty: " + cf, cf == null || !cf.hasColumns());
 
         // Sleep one second so that the removal is indeed purgeable even with gcgrace == 0
         Thread.sleep(1000);
@@ -343,7 +340,7 @@ public class CompactionsTest extends SchemaLoader
         Util.compact(cfs, toCompact);
 
         cf = cfs.getColumnFamily(filter);
-        assert cf == null || cf.getColumnCount() == 0 : "should be empty: " + cf;
+        assertTrue("should be empty: " + cf, cf == null || !cf.hasColumns());
     }
 
     private static Range<Token> rangeFor(int start, int end)
@@ -364,13 +361,13 @@ public class CompactionsTest extends SchemaLoader
     {
         long timestamp = System.currentTimeMillis();
         DecoratedKey decoratedKey = Util.dk(String.format("%03d", key));
-        RowMutation rm = new RowMutation(KEYSPACE1, decoratedKey.key);
-        rm.add("Standard1", ByteBufferUtil.bytes("col"), ByteBufferUtil.EMPTY_BYTE_BUFFER, timestamp, 1000);
+        Mutation rm = new Mutation(KEYSPACE1, decoratedKey.getKey());
+        rm.add("Standard1", Util.cellname("col"), ByteBufferUtil.EMPTY_BYTE_BUFFER, timestamp, 1000);
         rm.apply();
     }
 
     @Test
-    public void testNeedsCleanup() throws IOException
+    public void testNeedsCleanup()
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
         ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");

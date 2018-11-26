@@ -1,11 +1,14 @@
 package org.junit.tests.experimental.rules;
 
 import static org.hamcrest.CoreMatchers.any;
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.junit.Assert.assertThat;
 import static org.junit.experimental.results.PrintableResult.testResult;
+import static org.junit.experimental.results.ResultMatchers.failureIs;
 import static org.junit.experimental.results.ResultMatchers.hasSingleFailureContaining;
 import static org.junit.experimental.results.ResultMatchers.isSuccessful;
 import static org.junit.matchers.JUnitMatchers.both;
+import static org.junit.matchers.JUnitMatchers.causedBy;
 import org.hamcrest.Description;
 import org.hamcrest.Matcher;
 import org.junit.Rule;
@@ -58,6 +61,13 @@ public class ExpectedExceptionRuleTest {
 		assertThat(
 				testResult(HasWrongExpectedException.class),
 				hasSingleFailureContaining("Expected: an instance of java.lang.NullPointerException"));
+	}
+	
+	@Test
+	public void expectedExceptionClauseExists() {
+		assertThat(
+				testResult(HasWrongExpectedException.class),
+				failureIs(causedBy(instanceOf(IllegalArgumentException.class))));
 	}
 
 	public static class HasWrongMessage {

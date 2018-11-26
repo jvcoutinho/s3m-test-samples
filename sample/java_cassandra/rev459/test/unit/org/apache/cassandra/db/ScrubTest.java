@@ -27,12 +27,16 @@ import java.util.List;
 import java.util.concurrent.ExecutionException;
 
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
+import org.apache.cassandra.OrderedJUnit4ClassRunner;
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.filter.NamesQueryFilter;
+import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CLibrary;
@@ -41,6 +45,7 @@ import static org.apache.cassandra.Util.column;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
+@RunWith(OrderedJUnit4ClassRunner.class)
 public class ScrubTest extends SchemaLoader
 {
     public String TABLE = "Keyspace1";
@@ -93,17 +98,18 @@ public class ScrubTest extends SchemaLoader
         boolean caught = false;
         try
         {
-             rows = cfs.getRangeSlice(ByteBufferUtil.bytes("1"), Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+             rows = cfs.getRangeSlice(Util.range("", ""), 1000, new NamesQueryFilter(CompositeType.build(ByteBufferUtil.bytes("1"))), null);
              fail("This slice should fail");
         }
-        catch (NegativeArraySizeException e)
+        catch (IllegalArgumentException e)
         {
+            // thrown by Buffer.limit as the column names are attempted to be read (after the row-level BF is skipped)
             caught = true;
         }
         assert caught : "'corrupt' test file actually was not";
 
         CompactionManager.instance.performScrub(cfs);
-        rows = cfs.getRangeSlice(ByteBufferUtil.bytes("1"), Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assertEquals(100, rows.size());
     }
 
@@ -118,13 +124,13 @@ public class ScrubTest extends SchemaLoader
 
         // insert data and verify we get it back w/ range query
         fillCF(cfs, 1);
-        rows = cfs.getRangeSlice(null, Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assertEquals(1, rows.size());
 
         CompactionManager.instance.performScrub(cfs);
 
         // check data is still there
-        rows = cfs.getRangeSlice(null, Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assertEquals(1, rows.size());
     }
 
@@ -135,11 +141,9 @@ public class ScrubTest extends SchemaLoader
         Table table = Table.open(TABLE);
         ColumnFamilyStore cfs = table.getColumnFamilyStore(CF3);
 
-        RowMutation rm;
-        rm = new RowMutation(TABLE, ByteBufferUtil.bytes(1));
         ColumnFamily cf = ColumnFamily.create(TABLE, CF3);
         cf.delete(new DeletionInfo(0, 1)); // expired tombstone
-        rm.add(cf);
+        RowMutation rm = new RowMutation(TABLE, ByteBufferUtil.bytes(1), cf);
         rm.applyUnsafe();
         cfs.forceBlockingFlush();
 
@@ -158,13 +162,13 @@ public class ScrubTest extends SchemaLoader
 
         // insert data and verify we get it back w/ range query
         fillCF(cfs, 10);
-        rows = cfs.getRangeSlice(null, Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assertEquals(10, rows.size());
 
         CompactionManager.instance.performScrub(cfs);
 
         // check data is still there
-        rows = cfs.getRangeSlice(null, Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assertEquals(10, rows.size());
     }
 
@@ -198,11 +202,11 @@ public class ScrubTest extends SchemaLoader
         assert cfs.getSSTables().size() > 0;
 
         List<Row> rows;
-        rows = cfs.getRangeSlice(null, Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assert !isRowOrdered(rows) : "'corrupt' test file actually was not";
 
         CompactionManager.instance.performScrub(cfs);
-        rows = cfs.getRangeSlice(null, Util.range("", ""), 1000, new IdentityQueryFilter(), null);
+        rows = cfs.getRangeSlice(Util.range("", ""), 1000, new IdentityQueryFilter(), null);
         assert isRowOrdered(rows) : "Scrub failed: " + rows;
         assert rows.size() == 6: "Got " + rows.size();
     }
@@ -225,12 +229,10 @@ public class ScrubTest extends SchemaLoader
         {
             String key = String.valueOf(i);
             // create a row and update the birthdate value, test that the index query fetches the new version
-            RowMutation rm;
-            rm = new RowMutation(TABLE, ByteBufferUtil.bytes(key));
             ColumnFamily cf = ColumnFamily.create(TABLE, CF);
             cf.addColumn(column("c1", "1", 1L));
             cf.addColumn(column("c2", "2", 1L));
-            rm.add(cf);
+            RowMutation rm = new RowMutation(TABLE, ByteBufferUtil.bytes(key), cf);
             rm.applyUnsafe();
         }
 

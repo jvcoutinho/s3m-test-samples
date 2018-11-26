@@ -28,7 +28,6 @@ import org.apache.cassandra.Util;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.UUIDGen;
@@ -60,7 +59,8 @@ public class BatchlogManagerTest extends SchemaLoader
         for (int i = 0; i < 1000; i++)
         {
             RowMutation mutation = new RowMutation("Keyspace1", bytes(i));
-            mutation.add(new QueryPath("Standard1", null, bytes(i)), bytes(i), 0);
+            mutation.add("Standard1", bytes(i), bytes(i), System.currentTimeMillis());
+
             long timestamp = System.currentTimeMillis();
             if (i < 500)
                 timestamp -= DatabaseDescriptor.getWriteRpcTimeout() * 2;
@@ -68,7 +68,7 @@ public class BatchlogManagerTest extends SchemaLoader
         }
 
         // Flush the batchlog to disk (see CASSANDRA-6822).
-        Table.open(Table.SYSTEM_KS).getColumnFamilyStore(SystemTable.BATCHLOG_CF).forceFlush();
+        Keyspace.open(Keyspace.SYSTEM_KS).getColumnFamilyStore(SystemKeyspace.BATCHLOG_CF).forceBlockingFlush();
 
         assertEquals(1000, BatchlogManager.instance.countAllBatches());
         assertEquals(0, BatchlogManager.instance.getTotalBatchesReplayed());

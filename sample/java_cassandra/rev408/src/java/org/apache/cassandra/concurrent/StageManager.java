@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,13 +15,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.concurrent;
 
 import java.util.EnumMap;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.cassandra.net.MessagingService;
 
 import static org.apache.cassandra.config.DatabaseDescriptor.*;
 
@@ -33,7 +35,9 @@ import static org.apache.cassandra.config.DatabaseDescriptor.*;
  */
 public class StageManager
 {
-    private static EnumMap<Stage, ThreadPoolExecutor> stages = new EnumMap<Stage, ThreadPoolExecutor>(Stage.class);
+    private static final Logger logger = LoggerFactory.getLogger(StageManager.class);
+
+    private static final EnumMap<Stage, ThreadPoolExecutor> stages = new EnumMap<Stage, ThreadPoolExecutor>(Stage.class);
 
     public static final long KEEPALIVE = 60; // seconds to keep "extra" threads alive for when idle
 
@@ -47,12 +51,30 @@ public class StageManager
         stages.put(Stage.INTERNAL_RESPONSE, multiThreadedStage(Stage.INTERNAL_RESPONSE, Runtime.getRuntime().availableProcessors()));
         stages.put(Stage.REPLICATE_ON_WRITE, multiThreadedConfigurableStage(Stage.REPLICATE_ON_WRITE, getConcurrentReplicators(), MAX_REPLICATE_ON_WRITE_TASKS));
         // the rest are all single-threaded
-        stages.put(Stage.STREAM, new JMXEnabledThreadPoolExecutor(Stage.STREAM));
         stages.put(Stage.GOSSIP, new JMXEnabledThreadPoolExecutor(Stage.GOSSIP));
         stages.put(Stage.ANTI_ENTROPY, new JMXEnabledThreadPoolExecutor(Stage.ANTI_ENTROPY));
         stages.put(Stage.MIGRATION, new JMXEnabledThreadPoolExecutor(Stage.MIGRATION));
         stages.put(Stage.MISC, new JMXEnabledThreadPoolExecutor(Stage.MISC));
         stages.put(Stage.READ_REPAIR, multiThreadedStage(Stage.READ_REPAIR, Runtime.getRuntime().availableProcessors()));
+        stages.put(Stage.TRACING, tracingExecutor());
+    }
+
+    private static ThreadPoolExecutor tracingExecutor()
+    {
+        RejectedExecutionHandler reh = new RejectedExecutionHandler()
+        {
+            public void rejectedExecution(Runnable r, ThreadPoolExecutor executor)
+            {
+                MessagingService.instance().incrementDroppedMessages(MessagingService.Verb._TRACE);
+            }
+        };
+        return new ExecuteOnlyExecutor(1,
+                                       1,
+                                       KEEPALIVE,
+                                       TimeUnit.SECONDS,
+                                       new ArrayBlockingQueue<Runnable>(1000),
+                                       new NamedThreadFactory(Stage.TRACING.getJmxName()),
+                                       reh);
     }
 
     private static ThreadPoolExecutor multiThreadedStage(Stage stage, int numThreads)
@@ -102,6 +124,36 @@ public class StageManager
         for (Stage stage : Stage.values())
         {
             StageManager.stages.get(stage).shutdownNow();
+        }
+    }
+
+    /**
+     * A TPE that disallows submit so that we don't need to worry about unwrapping exceptions on the
+     * tracing stage.  See CASSANDRA-1123 for background.
+     */
+    private static class ExecuteOnlyExecutor extends ThreadPoolExecutor
+    {
+        public ExecuteOnlyExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue, ThreadFactory threadFactory, RejectedExecutionHandler handler)
+        {
+            super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory, handler);
+        }
+
+        @Override
+        public Future<?> submit(Runnable task)
+        {
+            return super.submit(task);
+        }
+
+        @Override
+        public <T> Future<T> submit(Runnable task, T result)
+        {
+            return super.submit(task, result);
+        }
+
+        @Override
+        public <T> Future<T> submit(Callable<T> task)
+        {
+            return super.submit(task);
         }
     }
 }

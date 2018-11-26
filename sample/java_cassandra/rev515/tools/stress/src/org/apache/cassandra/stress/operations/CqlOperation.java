@@ -267,10 +267,7 @@ public abstract class CqlOperation<V> extends Operation
 
     public ClientWrapper wrap(ThriftClient client)
     {
-        return state.isCql3()
-                ? new Cql3CassandraClientWrapper(client)
-                : new Cql2CassandraClientWrapper(client);
-
+        return new Cql3CassandraClientWrapper(client);
     }
 
     public ClientWrapper wrap(JavaDriverClient client)
@@ -301,7 +298,7 @@ public abstract class CqlOperation<V> extends Operation
         @Override
         public <V> V execute(String query, ByteBuffer key, List<Object> queryParams, ResultHandler<V> handler)
         {
-            String formattedQuery = formatCqlQuery(query, queryParams, state.isCql3());
+            String formattedQuery = formatCqlQuery(query, queryParams);
             return handler.javaDriverHandler().apply(client.execute(formattedQuery, ThriftConversion.fromThrift(state.settings.command.consistencyLevel)));
         }
 
@@ -333,7 +330,7 @@ public abstract class CqlOperation<V> extends Operation
         @Override
         public <V> V execute(String query, ByteBuffer key, List<Object> queryParams, ResultHandler<V> handler)
         {
-            String formattedQuery = formatCqlQuery(query, queryParams, state.isCql3());
+            String formattedQuery = formatCqlQuery(query, queryParams);
             return handler.thriftHandler().apply(client.execute(formattedQuery, ThriftConversion.fromThrift(state.settings.command.consistencyLevel)));
         }
 
@@ -366,7 +363,7 @@ public abstract class CqlOperation<V> extends Operation
         @Override
         public <V> V execute(String query, ByteBuffer key, List<Object> queryParams, ResultHandler<V> handler) throws TException
         {
-            String formattedQuery = formatCqlQuery(query, queryParams, true);
+            String formattedQuery = formatCqlQuery(query, queryParams);
             return handler.simpleNativeHandler().apply(
                     client.execute_cql3_query(formattedQuery, key, Compression.NONE, state.settings.command.consistencyLevel)
             );
@@ -385,40 +382,6 @@ public abstract class CqlOperation<V> extends Operation
         public Object createPreparedStatement(String cqlQuery) throws TException
         {
             return client.prepare_cql3_query(cqlQuery, Compression.NONE);
-        }
-    }
-
-    // client wrapper for Cql2
-    private final class Cql2CassandraClientWrapper implements ClientWrapper
-    {
-        final ThriftClient client;
-        private Cql2CassandraClientWrapper(ThriftClient client)
-        {
-            this.client = client;
-        }
-
-        @Override
-        public <V> V execute(String query, ByteBuffer key, List<Object> queryParams, ResultHandler<V> handler) throws TException
-        {
-            String formattedQuery = formatCqlQuery(query, queryParams, false);
-            return handler.simpleNativeHandler().apply(
-                    client.execute_cql_query(formattedQuery, key, Compression.NONE)
-            );
-        }
-
-        @Override
-        public <V> V execute(Object preparedStatementId, ByteBuffer key, List<Object> queryParams, ResultHandler<V> handler) throws TException
-        {
-            Integer id = (Integer) preparedStatementId;
-            return handler.simpleNativeHandler().apply(
-                    client.execute_prepared_cql_query(id, key, toByteBufferParams(queryParams))
-            );
-        }
-
-        @Override
-        public Object createPreparedStatement(String cqlQuery) throws TException
-        {
-            return client.prepare_cql_query(cqlQuery, Compression.NONE);
         }
     }
 
@@ -631,11 +594,9 @@ public abstract class CqlOperation<V> extends Operation
 
     }
 
-    private static String getUnQuotedCqlBlob(ByteBuffer term, boolean isCQL3)
+    private static String getUnQuotedCqlBlob(ByteBuffer term)
     {
-        return isCQL3
-                ? "0x" + ByteBufferUtil.bytesToHex(term)
-                : ByteBufferUtil.bytesToHex(term);
+        return "0x" + ByteBufferUtil.bytesToHex(term);
     }
 
     /**
@@ -646,7 +607,7 @@ public abstract class CqlOperation<V> extends Operation
      * @param parms sequence of string query parameters
      * @return formatted CQL query string
      */
-    private static String formatCqlQuery(String query, List<Object> parms, boolean isCql3)
+    private static String formatCqlQuery(String query, List<Object> parms)
     {
         int marker, position = 0;
         StringBuilder result = new StringBuilder();
@@ -657,8 +618,9 @@ public abstract class CqlOperation<V> extends Operation
         for (Object parm : parms)
         {
             result.append(query.substring(position, marker));
+
             if (parm instanceof ByteBuffer)
-                result.append(getUnQuotedCqlBlob((ByteBuffer) parm, isCql3));
+                result.append(getUnQuotedCqlBlob((ByteBuffer) parm));
             else if (parm instanceof Long)
                 result.append(parm.toString());
             else throw new AssertionError();
@@ -688,11 +650,9 @@ public abstract class CqlOperation<V> extends Operation
         return r;
     }
 
-    protected String wrapInQuotesIfRequired(String string)
+    protected String wrapInQuotes(String string)
     {
-        return state.settings.mode.cqlVersion == CqlVersion.CQL3
-                ? "\"" + string + "\""
-                : string;
+        return "\"" + string + "\"";
     }
 
 }

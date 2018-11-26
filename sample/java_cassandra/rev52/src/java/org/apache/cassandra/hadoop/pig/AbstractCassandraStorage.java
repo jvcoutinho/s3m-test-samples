@@ -30,7 +30,6 @@ import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.auth.IAuthenticator;
 import org.apache.cassandra.db.Column;
-import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.marshal.AbstractCompositeType.CompositeComponent;
 import org.apache.cassandra.hadoop.*;
@@ -50,6 +49,7 @@ import org.apache.pig.impl.util.UDFContext;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
+import org.apache.thrift.protocol.TBinaryProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -113,7 +113,7 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
     }
 
     /** convert a column to a tuple */
-    protected Tuple columnToTuple(IColumn col, CfDef cfDef, AbstractType comparator) throws IOException
+    protected Tuple columnToTuple(Column col, CfDef cfDef, AbstractType comparator) throws IOException
     {
         Tuple pair = TupleFactory.getInstance().newTuple(2);
 
@@ -124,28 +124,14 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
             setTupleValue(pair, 0, comparator.compose(col.name()));
 
         // value
-        if (col instanceof Column)
+        Map<ByteBuffer,AbstractType> validators = getValidatorMap(cfDef);
+        if (validators.get(col.name()) == null)
         {
-            // standard
-            Map<ByteBuffer,AbstractType> validators = getValidatorMap(cfDef);
-            if (validators.get(col.name()) == null)
-            {
-                Map<MarshallerType, AbstractType> marshallers = getDefaultMarshallers(cfDef);
-                setTupleValue(pair, 1, marshallers.get(MarshallerType.DEFAULT_VALIDATOR).compose(col.value()));
-            }
-            else
-                setTupleValue(pair, 1, validators.get(col.name()).compose(col.value()));
-            return pair;
+            Map<MarshallerType, AbstractType> marshallers = getDefaultMarshallers(cfDef);
+            setTupleValue(pair, 1, marshallers.get(MarshallerType.DEFAULT_VALIDATOR).compose(col.value()));
         }
         else
-        {
-            // super
-            ArrayList<Tuple> subcols = new ArrayList<Tuple>();
-            for (IColumn subcol : col.getSubColumns())
-                subcols.add(columnToTuple(subcol, cfDef, parseType(cfDef.getSubcomparator_type())));
-
-            pair.set(1, new DefaultDataBag(subcols));
-        }
+            setTupleValue(pair, 1, validators.get(col.name()).compose(col.value()));
         return pair;
     }
 
@@ -159,7 +145,7 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
        else if (value instanceof UUID)
            pair.set(position, new DataByteArray(UUIDGen.decompose((java.util.UUID) value)));
        else if (value instanceof Date)
-           pair.set(position, DateType.instance.decompose((Date) value).getLong());
+           pair.set(position, TimestampType.instance.decompose((Date) value).getLong());
        else
            pair.set(position, value);
     }
@@ -318,7 +304,7 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
     /** get pig type for the cassandra data type*/
     protected byte getPigType(AbstractType type)
     {
-        if (type instanceof LongType || type instanceof DateType) // DateType is bad and it should feel bad
+        if (type instanceof LongType || type instanceof DateType || type instanceof TimestampType) // DateType is bad and it should feel bad
             return DataType.LONG;
         else if (type instanceof IntegerType || type instanceof Int32Type) // IntegerType will overflow at 2**31, but is kept for compatibility until pig has a BigInteger
             return DataType.INTEGER;
@@ -519,23 +505,11 @@ public abstract class AbstractCassandraStorage extends LoadFunc implements Store
             {
                 throw new RuntimeException(e);
             }
-            catch (InvalidRequestException e)
+            catch (CharacterCodingException e)
             {
                 throw new RuntimeException(e);
             }
             catch (IOException e)
-            {
-                throw new RuntimeException(e);
-            }
-            catch (UnavailableException e)
-            {
-                throw new RuntimeException(e);
-            }
-            catch (TimedOutException e)
-            {
-                throw new RuntimeException(e);
-            }
-            catch (SchemaDisagreementException e)
             {
                 throw new RuntimeException(e);
             }

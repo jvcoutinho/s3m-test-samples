@@ -28,6 +28,9 @@ import org.apache.cassandra.gms.Gossiper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.config.EncryptionOptions;
+import org.apache.cassandra.security.streaming.SSLIncomingStreamReader;
 import org.apache.cassandra.streaming.IncomingStreamReader;
 import org.apache.cassandra.streaming.StreamHeader;
 
@@ -87,8 +90,7 @@ public class IncomingTcpConnection extends Thread
                     int size = input.readInt();
                     byte[] headerBytes = new byte[size];
                     input.readFully(headerBytes);
-                    StreamHeader streamHeader = StreamHeader.serializer().deserialize(new DataInputStream(new ByteArrayInputStream(headerBytes)));
-                    new IncomingStreamReader(streamHeader, socket.getChannel()).read();
+                    stream(StreamHeader.serializer().deserialize(new DataInputStream(new ByteArrayInputStream(headerBytes)), version), input);
                     break;
                 }
                 else
@@ -101,8 +103,11 @@ public class IncomingTcpConnection extends Thread
                         logger.info("Received connection from newer protocol version. Ignorning message.");
                     else
                     {
-                        Message message = Message.serializer().deserialize(new DataInputStream(new ByteArrayInputStream(contentBytes)));
-                        MessagingService.instance().receive(message);
+                        // todo: need to be aware of message version.
+                        DataInputStream dis = new DataInputStream(new ByteArrayInputStream(contentBytes));
+                        String id = dis.readUTF();
+                        Message message = Message.serializer().deserialize(dis, version);
+                        MessagingService.instance().receive(message, id);
                     }
                 }
                 // prepare to read the next message
@@ -110,6 +115,7 @@ public class IncomingTcpConnection extends Thread
                 int header = input.readInt();
                 version = MessagingService.getBits(header, 15, 8);
                 assert isStream == (MessagingService.getBits(header, 3, 1) == 1) : "Connections cannot change type: " + isStream;
+                assert version == MessagingService.getBits(header, 15, 8) : "Protocol version shouldn't change during a session";
             }
             catch (EOFException e)
             {
@@ -139,5 +145,13 @@ public class IncomingTcpConnection extends Thread
             if (logger.isDebugEnabled())
                 logger.debug("error closing socket", e);
         }
+    }
+
+    private void stream(StreamHeader streamHeader, DataInputStream input) throws IOException
+    {
+        if (DatabaseDescriptor.getEncryptionOptions().internode_encryption == EncryptionOptions.InternodeEncryption.all)
+            new SSLIncomingStreamReader(streamHeader, socket, input).read();
+        else
+            new IncomingStreamReader(streamHeader, socket).read();
     }
 }

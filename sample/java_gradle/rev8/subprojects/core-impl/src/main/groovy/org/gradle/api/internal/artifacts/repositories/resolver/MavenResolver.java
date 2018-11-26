@@ -23,20 +23,16 @@ import org.apache.ivy.plugins.matcher.PatternMatcher;
 import org.gradle.api.Transformer;
 import org.gradle.api.artifacts.ArtifactIdentifier;
 import org.gradle.api.artifacts.ModuleVersionIdentifier;
-import org.gradle.api.artifacts.resolution.JvmLibraryJavadocArtifact;
-import org.gradle.api.artifacts.resolution.JvmLibrarySourcesArtifact;
 import org.gradle.api.artifacts.resolution.SoftwareArtifact;
 import org.gradle.api.internal.artifacts.DefaultArtifactIdentifier;
 import org.gradle.api.internal.artifacts.DefaultModuleVersionIdentifier;
+import org.gradle.api.internal.artifacts.MavenClassifierArtifactScheme;
 import org.gradle.api.internal.artifacts.ivyservice.IvyUtil;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.BuildableModuleVersionMetaDataResolveResult;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.ModuleSource;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.parser.GradlePomModuleDescriptorParser;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.strategy.ResolverStrategy;
-import org.gradle.api.internal.artifacts.metadata.DefaultModuleVersionArtifactMetaData;
-import org.gradle.api.internal.artifacts.metadata.DependencyMetaData;
-import org.gradle.api.internal.artifacts.metadata.ModuleVersionArtifactMetaData;
-import org.gradle.api.internal.artifacts.metadata.ModuleVersionMetaData;
+import org.gradle.api.internal.artifacts.metadata.*;
 import org.gradle.api.internal.artifacts.repositories.transport.RepositoryTransport;
 import org.gradle.api.internal.artifacts.resolution.ComponentMetaDataArtifact;
 import org.gradle.api.internal.externalresource.local.LocallyAvailableResourceFinder;
@@ -254,39 +250,25 @@ public class MavenResolver extends ExternalResourceResolver implements PatternBa
         }
     }
 
-    public Set<ModuleVersionArtifactMetaData> getTypedArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
-        if (artifactType == JvmLibraryJavadocArtifact.class) {
-            return ImmutableSet.of(createArtifactMetaData(module, "javadoc", "javadoc"));
-        }
-
-        if (artifactType == JvmLibrarySourcesArtifact.class) {
-            return ImmutableSet.of(createArtifactMetaData(module, "source", "sources"));
-        }
-
+    protected Set<ModuleVersionArtifactMetaData> getTypedArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
         if (artifactType == ComponentMetaDataArtifact.class) {
             Artifact pomArtifact = DefaultArtifact.newPomArtifact(IvyUtil.createModuleRevisionId(module.getId()), new Date());
-            return ImmutableSet.<ModuleVersionArtifactMetaData>of(new DefaultModuleVersionArtifactMetaData(module.getId(), pomArtifact));
+            return ImmutableSet.<ModuleVersionArtifactMetaData>of(new DefaultModuleVersionArtifactMetaData(module, pomArtifact));
         }
 
-        throw new IllegalArgumentException(String.format("Don't know how to get candidate artifacts of type %s", artifactType.getName()));
+        return new MavenClassifierArtifactScheme().get(module, artifactType);
     }
 
     @Override
     protected Set<ModuleVersionArtifactMetaData> getOptionalMainArtifacts(ModuleVersionMetaData module) {
         if (module.isMetaDataOnly()) {
-            ModuleVersionArtifactMetaData possibleJarArtifact = createArtifactMetaData(module, "jar", null);
+            ModuleVersionArtifactIdentifier artifactId = new DefaultModuleVersionArtifactIdentifier(module.getComponentId(), module.getId(), module.getId().getName(), "jar", "jar", Collections.<String, String>emptyMap());
+            ModuleVersionArtifactMetaData possibleJarArtifact = new DefaultModuleVersionArtifactMetaData(artifactId);
             if (artifactExists(possibleJarArtifact)) {
                 return ImmutableSet.of(possibleJarArtifact);
             }
         }
         return Collections.emptySet();
-    }
-
-    private ModuleVersionArtifactMetaData createArtifactMetaData(ModuleVersionMetaData module, String type, String classifier) {
-        Map extraAttributes = classifier == null ? Collections.emptyMap() : Collections.singletonMap("m:classifier", classifier);
-        Artifact artifact = new DefaultArtifact(module.getDescriptor().getModuleRevisionId(), null,
-                module.getId().getName(), type, "jar", extraAttributes);
-        return new DefaultModuleVersionArtifactMetaData(module.getId(), artifact);
     }
 
     protected static class TimestampedModuleSource implements ModuleSource {

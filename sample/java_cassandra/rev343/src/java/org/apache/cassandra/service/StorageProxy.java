@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service;
 
 import java.io.DataOutputStream;
@@ -35,7 +34,6 @@ import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.MapMaker;
 import com.google.common.collect.Multimap;
-import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,6 +47,7 @@ import org.apache.cassandra.dht.AbstractBounds;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.RingPosition;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.util.FastByteArrayOutputStream;
@@ -57,19 +56,14 @@ import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.metrics.ClientRequestMetrics;
 import org.apache.cassandra.net.*;
-import org.apache.cassandra.thrift.*;
+import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.utils.*;
-
 
 public class StorageProxy implements StorageProxyMBean
 {
+    public static final String MBEAN_NAME = "org.apache.cassandra.db:type=StorageProxy";
     private static final Logger logger = LoggerFactory.getLogger(StorageProxy.class);
     private static final boolean OPTIMIZE_LOCAL_REQUESTS = true; // set to false to test messagingservice path on single node
-
-    // mbean stuff
-    private static final LatencyTracker readStats = new LatencyTracker();
-    private static final LatencyTracker rangeStats = new LatencyTracker();
-    private static final LatencyTracker writeStats = new LatencyTracker();
 
     public static final String UNREACHABLE = "UNREACHABLE";
 
@@ -79,8 +73,6 @@ public class StorageProxy implements StorageProxyMBean
 
     public static final StorageProxy instance = new StorageProxy();
 
-    private static volatile boolean hintedHandoffEnabled = DatabaseDescriptor.hintedHandoffEnabled();
-    private static volatile int maxHintWindow = DatabaseDescriptor.getMaxHintWindow();
     private static volatile int maxHintsInProgress = 1024 * Runtime.getRuntime().availableProcessors();
     private static final AtomicInteger totalHintsInProgress = new AtomicInteger();
     private static final Map<InetAddress, AtomicInteger> hintsInProgress = new MapMaker().concurrencyLevel(1).makeComputingMap(new Function<InetAddress, AtomicInteger>()
@@ -91,6 +83,9 @@ public class StorageProxy implements StorageProxyMBean
         }
     });
     private static final AtomicLong totalHints = new AtomicLong();
+    private static final ClientRequestMetrics readMetrics = new ClientRequestMetrics("Read");
+    private static final ClientRequestMetrics rangeMetrics = new ClientRequestMetrics("RangeSlice");
+    private static final ClientRequestMetrics writeMetrics = new ClientRequestMetrics("Write");
 
     private StorageProxy() {}
 
@@ -99,7 +94,7 @@ public class StorageProxy implements StorageProxyMBean
         MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
         try
         {
-            mbs.registerMBean(new StorageProxy(), new ObjectName("org.apache.cassandra.db:type=StorageProxy"));
+            mbs.registerMBean(new StorageProxy(), new ObjectName(MBEAN_NAME));
         }
         catch (Exception e)
         {
@@ -113,7 +108,7 @@ public class StorageProxy implements StorageProxyMBean
                               IWriteResponseHandler responseHandler,
                               String localDataCenter,
                               ConsistencyLevel consistency_level)
-            throws IOException, TimeoutException
+            throws IOException, OverloadedException
             {
                 assert mutation instanceof RowMutation;
                 sendToHintedEndpoints((RowMutation) mutation, targets, responseHandler, localDataCenter, consistency_level);
@@ -170,7 +165,8 @@ public class StorageProxy implements StorageProxyMBean
      * @param mutations the mutations to be applied across the replicas
      * @param consistency_level the consistency level for the operation
      */
-    public static void mutate(List<? extends IMutation> mutations, ConsistencyLevel consistency_level) throws UnavailableException, TimeoutException
+    public static void mutate(List<? extends IMutation> mutations, ConsistencyLevel consistency_level)
+    throws UnavailableException, OverloadedException, WriteTimeoutException
     {
         logger.debug("Mutations/ConsistencyLevel are {}/{}", mutations, consistency_level);
         final String localDataCenter = DatabaseDescriptor.getEndpointSnitch().getDatacenter(FBUtilities.getBroadcastAddress());
@@ -201,19 +197,26 @@ public class StorageProxy implements StorageProxyMBean
             }
 
         }
-        catch (TimeoutException ex)
+        catch (WriteTimeoutException ex)
         {
+            writeMetrics.timeouts.mark();
             ClientRequestMetrics.writeTimeouts.inc();
             if (logger.isDebugEnabled())
             {
                 List<String> mstrings = new ArrayList<String>(mutations.size());
                 for (IMutation mutation : mutations)
                     mstrings.add(mutation.toString(true));
-                logger.debug("Write timeout {} for one (or more) of: ", ex.toString(), mstrings);
+                logger.debug("Write timeout {} for one (or more) of: {}", ex.toString(), mstrings);
             }
             throw ex;
         }
         catch (UnavailableException e)
+        {
+            writeMetrics.unavailables.mark();
+            ClientRequestMetrics.writeUnavailables.inc();
+            throw e;
+        }
+        catch (OverloadedException e)
         {
             ClientRequestMetrics.writeUnavailables.inc();
             throw e;
@@ -225,7 +228,7 @@ public class StorageProxy implements StorageProxyMBean
         }
         finally
         {
-            writeStats.addNano(System.nanoTime() - startTime);
+            writeMetrics.addNano(System.nanoTime() - startTime);
         }
     }
 
@@ -245,7 +248,7 @@ public class StorageProxy implements StorageProxyMBean
                                                      ConsistencyLevel consistency_level,
                                                      String localDataCenter,
                                                      WritePerformer performer)
-    throws UnavailableException, TimeoutException, IOException
+    throws UnavailableException, OverloadedException, IOException
     {
         String table = mutation.getTable();
         AbstractReplicationStrategy rs = Table.open(table).getReplicationStrategy();
@@ -284,15 +287,14 @@ public class StorageProxy implements StorageProxyMBean
      * @throws TimeoutException if the hints cannot be written/enqueued
      */
     public static void sendToHintedEndpoints(final RowMutation rm,
-                                              Collection<InetAddress> targets,
-                                              IWriteResponseHandler responseHandler,
-                                              String localDataCenter,
-                                              ConsistencyLevel consistency_level)
-    throws IOException, TimeoutException
+                                             Collection<InetAddress> targets,
+                                             IWriteResponseHandler responseHandler,
+                                             String localDataCenter,
+                                             ConsistencyLevel consistency_level)
+    throws IOException, OverloadedException
     {
         // Multimap that holds onto all the messages and addresses meant for a specific datacenter
-        Map<String, Multimap<Message, InetAddress>> dcMessages = new HashMap<String, Multimap<Message, InetAddress>>(targets.size());
-        MessageProducer producer = new CachingMessageProducer(rm);
+        Map<String, Multimap<MessageOut, InetAddress>> dcMessages = new HashMap<String, Multimap<MessageOut, InetAddress>>(targets.size());
 
         for (InetAddress destination : targets)
         {
@@ -304,7 +306,7 @@ public class StorageProxy implements StorageProxyMBean
             if (totalHintsInProgress.get() > maxHintsInProgress
                 && (hintsInProgress.get(destination).get() > 0 && shouldHint(destination)))
             {
-                throw new TimeoutException();
+                throw new OverloadedException("Too many in flight hints: " + totalHintsInProgress.get());
             }
 
             if (FailureDetector.instance.isAlive(destination))
@@ -320,14 +322,14 @@ public class StorageProxy implements StorageProxyMBean
                         logger.debug("insert writing key " + ByteBufferUtil.bytesToHex(rm.key()) + " to " + destination);
 
                     String dc = DatabaseDescriptor.getEndpointSnitch().getDatacenter(destination);
-                    Multimap<Message, InetAddress> messages = dcMessages.get(dc);
+                    Multimap<MessageOut, InetAddress> messages = dcMessages.get(dc);
                     if (messages == null)
                     {
-                       messages = HashMultimap.create();
-                       dcMessages.put(dc, messages);
+                        messages = HashMultimap.create();
+                        dcMessages.put(dc, messages);
                     }
 
-                    messages.put(producer.getMessage(Gossiper.instance.getVersion(destination)), destination);
+                    messages.put(rm.createMessage(), destination);
                 }
             }
             else
@@ -347,7 +349,6 @@ public class StorageProxy implements StorageProxyMBean
                                                  final InetAddress target,
                                                  final IWriteResponseHandler responseHandler,
                                                  final ConsistencyLevel consistencyLevel)
-    throws IOException
     {
         // Hint of itself doesn't make sense.
         assert !target.equals(FBUtilities.getBroadcastAddress()) : target;
@@ -364,9 +365,14 @@ public class StorageProxy implements StorageProxyMBean
 
                 try
                 {
-                    Token<?> token = StorageService.instance.getTokenMetadata().getToken(target);
-                    ByteBuffer tokenbytes = StorageService.getPartitioner().getTokenFactory().toByteArray(token);
-                    RowMutation hintedMutation = RowMutation.hintFor(mutation, tokenbytes);
+                    UUID hostId = StorageService.instance.getTokenMetadata().getHostId(target);
+                    if ((hostId == null) && (MessagingService.instance().getVersion(target) < MessagingService.VERSION_12))
+                    {
+                        logger.warn("Unable to store hint for host with missing ID, {} (old node?)", target.toString());
+                        return;
+                    }
+                    assert hostId != null : "Missing host ID for " + target.getHostAddress();
+                    RowMutation hintedMutation = RowMutation.hintFor(mutation, hostId);
                     hintedMutation.apply();
 
                     totalHints.incrementAndGet();
@@ -389,25 +395,25 @@ public class StorageProxy implements StorageProxyMBean
     /**
      * for each datacenter, send a message to one node to relay the write to other replicas
      */
-    private static void sendMessages(String localDataCenter, Map<String, Multimap<Message, InetAddress>> dcMessages, IWriteResponseHandler handler)
+    private static void sendMessages(String localDataCenter, Map<String, Multimap<MessageOut, InetAddress>> dcMessages, IWriteResponseHandler handler)
     throws IOException
     {
-        for (Map.Entry<String, Multimap<Message, InetAddress>> entry: dcMessages.entrySet())
+        for (Map.Entry<String, Multimap<MessageOut, InetAddress>> entry: dcMessages.entrySet())
         {
             String dataCenter = entry.getKey();
 
             // send the messages corresponding to this datacenter
-            for (Map.Entry<Message, Collection<InetAddress>> messages: entry.getValue().asMap().entrySet())
+            for (Map.Entry<MessageOut, Collection<InetAddress>> messages: entry.getValue().asMap().entrySet())
             {
-                Message message = messages.getKey();
+                MessageOut message = messages.getKey();
                 // a single message object is used for unhinted writes, so clean out any forwards
                 // from previous loop iterations
-                message = message.withHeaderRemoved(RowMutation.FORWARD_HEADER);
+                message = message.withHeaderRemoved(RowMutation.FORWARD_TO);
                 Iterator<InetAddress> iter = messages.getValue().iterator();
                 InetAddress target = iter.next();
 
                 // direct writes to local DC or old Cassadra versions
-                if (dataCenter.equals(localDataCenter) || Gossiper.instance.getVersion(target) < MessagingService.VERSION_11)
+                if (dataCenter.equals(localDataCenter) || MessagingService.instance().getVersion(target) < MessagingService.VERSION_11)
                 {
                     // yes, the loop and non-loop code here are the same; this is clunky but we want to avoid
                     // creating a second iterator since we already have a perfectly good one
@@ -428,12 +434,12 @@ public class StorageProxy implements StorageProxyMBean
                 {
                     InetAddress destination = iter.next();
                     CompactEndpointSerializationHelper.serialize(destination, dos);
-                    String id = MessagingService.instance().addCallback(handler, message, destination);
+                    String id = MessagingService.instance().addCallback(handler, message, destination, message.getTimeout());
                     dos.writeUTF(id);
                     if (logger.isDebugEnabled())
                         logger.debug("Adding FWD message to: " + destination + " with ID " + id);
                 }
-                message = message.withHeaderAdded(RowMutation.FORWARD_HEADER, bos.toByteArray());
+                message = message.withParameter(RowMutation.FORWARD_TO, bos.toByteArray());
                 // send the combined message + forward headers
                 String id = MessagingService.instance().sendRR(message, target, handler);
                 if (logger.isDebugEnabled())
@@ -446,7 +452,7 @@ public class StorageProxy implements StorageProxyMBean
     {
         if (logger.isDebugEnabled())
             logger.debug("insert writing local " + rm.toString(true));
-        Runnable runnable = new DroppableRunnable(StorageService.Verb.MUTATION)
+        Runnable runnable = new DroppableRunnable(MessagingService.Verb.MUTATION)
         {
             public void runMayThrow() throws IOException
             {
@@ -471,9 +477,9 @@ public class StorageProxy implements StorageProxyMBean
      * quicker response and because the WriteResponseHandlers don't make it easy to send back an error. We also always gather
      * the write latencies at the coordinator node to make gathering point similar to the case of standard writes.
      */
-    public static IWriteResponseHandler mutateCounter(CounterMutation cm, String localDataCenter) throws UnavailableException, TimeoutException, IOException
+    public static IWriteResponseHandler mutateCounter(CounterMutation cm, String localDataCenter) throws UnavailableException, OverloadedException, IOException
     {
-        InetAddress endpoint = findSuitableEndpoint(cm.getTable(), cm.key(), localDataCenter);
+        InetAddress endpoint = findSuitableEndpoint(cm.getTable(), cm.key(), localDataCenter, cm.consistency());
 
         if (endpoint.equals(FBUtilities.getBroadcastAddress()))
         {
@@ -491,10 +497,9 @@ public class StorageProxy implements StorageProxyMBean
             // Forward the actual update to the chosen leader replica
             IWriteResponseHandler responseHandler = WriteResponseHandler.create(endpoint);
 
-            Message message = cm.makeMutationMessage(Gossiper.instance.getVersion(endpoint));
             if (logger.isDebugEnabled())
                 logger.debug("forwarding counter update of key " + ByteBufferUtil.bytesToHex(cm.key()) + " to " + endpoint);
-            MessagingService.instance().sendRR(message, endpoint, responseHandler);
+            MessagingService.instance().sendRR(cm.makeMutationMessage(), endpoint, responseHandler);
             return responseHandler;
         }
     }
@@ -509,12 +514,13 @@ public class StorageProxy implements StorageProxyMBean
      * is unclear we want to mix those latencies with read latencies, so this
      * may be a bit involved.
      */
-    private static InetAddress findSuitableEndpoint(String table, ByteBuffer key, String localDataCenter) throws UnavailableException
+    private static InetAddress findSuitableEndpoint(String table, ByteBuffer key, String localDataCenter, ConsistencyLevel cl) throws UnavailableException
     {
         IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
         List<InetAddress> endpoints = StorageService.instance.getLiveNaturalEndpoints(table, key);
         if (endpoints.isEmpty())
-            throw new UnavailableException();
+            // TODO have a way to compute the consistency level
+            throw new UnavailableException(cl, cl.blockFor(table), 0);
 
         List<InetAddress> localEndpoints = new ArrayList<InetAddress>();
         for (InetAddress endpoint : endpoints)
@@ -534,18 +540,18 @@ public class StorageProxy implements StorageProxyMBean
         }
     }
 
-
-
     // Must be called on a replica of the mutation. This replica becomes the
     // leader of this mutation.
-    public static IWriteResponseHandler applyCounterMutationOnLeader(CounterMutation cm, String localDataCenter) throws UnavailableException, TimeoutException, IOException
+    public static IWriteResponseHandler applyCounterMutationOnLeader(CounterMutation cm, String localDataCenter)
+    throws UnavailableException, IOException, OverloadedException
     {
         return performWrite(cm, cm.consistency(), localDataCenter, counterWritePerformer);
     }
 
     // Same as applyCounterMutationOnLeader but must with the difference that it use the MUTATION stage to execute the write (while
     // applyCounterMutationOnLeader assumes it is on the MUTATION stage already)
-    public static IWriteResponseHandler applyCounterMutationOnCoordinator(CounterMutation cm, String localDataCenter) throws UnavailableException, TimeoutException, IOException
+    public static IWriteResponseHandler applyCounterMutationOnCoordinator(CounterMutation cm, String localDataCenter)
+    throws UnavailableException, IOException, OverloadedException
     {
         return performWrite(cm, cm.consistency(), localDataCenter, counterWriteOnCoordinatorPerformer);
     }
@@ -556,7 +562,7 @@ public class StorageProxy implements StorageProxyMBean
                                              final String localDataCenter,
                                              final ConsistencyLevel consistency_level)
     {
-        return new DroppableRunnable(StorageService.Verb.MUTATION)
+        return new DroppableRunnable(MessagingService.Verb.MUTATION)
         {
             public void runMayThrow() throws IOException
             {
@@ -573,9 +579,9 @@ public class StorageProxy implements StorageProxyMBean
                 {
                     // We do the replication on another stage because it involves a read (see CM.makeReplicationMutation)
                     // and we want to avoid blocking too much the MUTATION stage
-                    StageManager.getStage(Stage.REPLICATE_ON_WRITE).execute(new DroppableRunnable(StorageService.Verb.READ)
+                    StageManager.getStage(Stage.REPLICATE_ON_WRITE).execute(new DroppableRunnable(MessagingService.Verb.READ)
                     {
-                        public void runMayThrow() throws IOException, TimeoutException
+                        public void runMayThrow() throws IOException, OverloadedException
                         {
                             // send mutation to other replica
                             sendToHintedEndpoints(cm.makeReplicationMutation(), targets, responseHandler, localDataCenter, consistency_level);
@@ -586,37 +592,48 @@ public class StorageProxy implements StorageProxyMBean
         };
     }
 
+    private static boolean systemTableQuery(List<ReadCommand> cmds)
+    {
+        for (ReadCommand cmd : cmds)
+            if (!cmd.table.equals(Table.SYSTEM_KS))
+                return false;
+        return true;
+    }
+
     /**
      * Performs the actual reading of a row out of the StorageService, fetching
      * a specific set of column names from a given column family.
      */
     public static List<Row> read(List<ReadCommand> commands, ConsistencyLevel consistency_level)
-            throws IOException, UnavailableException, TimeoutException, InvalidRequestException
+    throws IOException, UnavailableException, IsBootstrappingException, ReadTimeoutException
     {
-        if (StorageService.instance.isBootstrapMode())
+        if (StorageService.instance.isBootstrapMode() && !systemTableQuery(commands))
         {
+            readMetrics.unavailables.mark();
             ClientRequestMetrics.readUnavailables.inc();
-            throw new UnavailableException();
+            throw new IsBootstrappingException();
         }
         long startTime = System.nanoTime();
-        List<Row> rows;
+        List<Row> rows = null;
         try
         {
             rows = fetchRows(commands, consistency_level);
         }
         catch (UnavailableException e)
         {
+            readMetrics.unavailables.mark();
             ClientRequestMetrics.readUnavailables.inc();
             throw e;
         }
-        catch (TimeoutException e)
+        catch (ReadTimeoutException e)
         {
+            readMetrics.timeouts.mark();
             ClientRequestMetrics.readTimeouts.inc();
             throw e;
         }
         finally
         {
-            readStats.addNano(System.nanoTime() - startTime);
+            readMetrics.addNano(System.nanoTime() - startTime);
         }
         return rows;
     }
@@ -632,7 +649,8 @@ public class StorageProxy implements StorageProxyMBean
      * 4. If the digests (if any) match the data return the data
      * 5. else carry out read repair by getting data from all the nodes.
      */
-    private static List<Row> fetchRows(List<ReadCommand> initialCommands, ConsistencyLevel consistency_level) throws IOException, UnavailableException, TimeoutException
+    private static List<Row> fetchRows(List<ReadCommand> initialCommands, ConsistencyLevel consistency_level)
+    throws IOException, UnavailableException, ReadTimeoutException
     {
         List<Row> rows = new ArrayList<Row>(initialCommands.size());
         List<ReadCommand> commandsToRetry = Collections.emptyList();
@@ -640,7 +658,7 @@ public class StorageProxy implements StorageProxyMBean
         do
         {
             List<ReadCommand> commands = commandsToRetry.isEmpty() ? initialCommands : commandsToRetry;
-            ReadCallback<Row>[] readCallbacks = new ReadCallback[commands.size()];
+            ReadCallback<ReadResponse, Row>[] readCallbacks = new ReadCallback[commands.size()];
 
             if (!commandsToRetry.isEmpty())
                 logger.debug("Retrying {} commands", commandsToRetry.size());
@@ -657,7 +675,7 @@ public class StorageProxy implements StorageProxyMBean
                 DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), endpoints);
 
                 RowDigestResolver resolver = new RowDigestResolver(command.table, command.key);
-                ReadCallback<Row> handler = getReadCallback(resolver, command, consistency_level, endpoints);
+                ReadCallback<ReadResponse, Row> handler = getReadCallback(resolver, command, consistency_level, endpoints);
                 handler.assureSufficientLiveNodes();
                 assert !handler.endpoints.isEmpty();
                 readCallbacks[i] = handler;
@@ -672,7 +690,7 @@ public class StorageProxy implements StorageProxyMBean
                 else
                 {
                     logger.debug("reading data from {}", dataPoint);
-                    MessagingService.instance().sendRR(command, dataPoint, handler);
+                    MessagingService.instance().sendRR(command.createMessage(), dataPoint, handler);
                 }
 
                 if (handler.endpoints.size() == 1)
@@ -681,7 +699,7 @@ public class StorageProxy implements StorageProxyMBean
                 // send the other endpoints a digest request
                 ReadCommand digestCommand = command.copy();
                 digestCommand.setDigestQuery(true);
-                MessageProducer producer = null;
+                MessageOut message = null;
                 for (InetAddress digestPoint : handler.endpoints.subList(1, handler.endpoints.size()))
                 {
                     if (digestPoint.equals(FBUtilities.getBroadcastAddress()))
@@ -694,9 +712,9 @@ public class StorageProxy implements StorageProxyMBean
                         logger.debug("reading digest from {}", digestPoint);
                         // (We lazy-construct the digest Message object since it may not be necessary if we
                         // are doing a local digest read, or no digest reads at all.)
-                        if (producer == null)
-                            producer = new CachingMessageProducer(digestCommand);
-                        MessagingService.instance().sendRR(producer, digestPoint, handler);
+                        if (message == null)
+                            message = digestCommand.createMessage();
+                        MessagingService.instance().sendRR(message, digestPoint, handler);
                     }
                 }
             }
@@ -706,7 +724,7 @@ public class StorageProxy implements StorageProxyMBean
             List<RepairCallback> repairResponseHandlers = null;
             for (int i = 0; i < commands.size(); i++)
             {
-                ReadCallback<Row> handler = readCallbacks[i];
+                ReadCallback<ReadResponse, Row> handler = readCallbacks[i];
                 ReadCommand command = commands.get(i);
                 try
                 {
@@ -721,7 +739,7 @@ public class StorageProxy implements StorageProxyMBean
                     if (logger.isDebugEnabled())
                         logger.debug("Read: " + (System.currentTimeMillis() - startTime2) + " ms.");
                 }
-                catch (TimeoutException ex)
+                catch (ReadTimeoutException ex)
                 {
                     if (logger.isDebugEnabled())
                         logger.debug("Read timeout: {}", ex.toString());
@@ -742,9 +760,11 @@ public class StorageProxy implements StorageProxyMBean
                     repairCommands.add(command);
                     repairResponseHandlers.add(repairHandler);
 
-                    MessageProducer producer = new CachingMessageProducer(command);
                     for (InetAddress endpoint : handler.endpoints)
-                        MessagingService.instance().sendRR(producer, endpoint, repairHandler);
+                    {
+                        MessageOut<ReadCommand> message = command.createMessage();
+                        MessagingService.instance().sendRR(message, endpoint, repairHandler);
+                    }
                 }
             }
 
@@ -758,9 +778,17 @@ public class StorageProxy implements StorageProxyMBean
                 {
                     ReadCommand command = repairCommands.get(i);
                     RepairCallback handler = repairResponseHandlers.get(i);
-                    // wait for the repair writes to be acknowledged, to minimize impact on any replica that's
-                    // behind on writes in case the out-of-sync row is read multiple times in quick succession
-                    FBUtilities.waitOnFutures(handler.resolver.repairResults, DatabaseDescriptor.getRpcTimeout());
+                    try
+                    {
+                        // wait for the repair writes to be acknowledged, to minimize impact on any replica that's
+                        // behind on writes in case the out-of-sync row is read multiple times in quick succession
+                        FBUtilities.waitOnFutures(handler.resolver.repairResults, DatabaseDescriptor.getWriteRpcTimeout());
+                    }
+                    catch (TimeoutException e)
+                    {
+                        int blockFor = consistency_level.blockFor(command.getKeyspace());
+                        throw new ReadTimeoutException(consistency_level, blockFor, blockFor, true);
+                    }
 
                     Row row;
                     try
@@ -797,12 +825,12 @@ public class StorageProxy implements StorageProxyMBean
     static class LocalReadRunnable extends DroppableRunnable
     {
         private final ReadCommand command;
-        private final ReadCallback<Row> handler;
+        private final ReadCallback<ReadResponse, Row> handler;
         private final long start = System.currentTimeMillis();
 
-        LocalReadRunnable(ReadCommand command, ReadCallback<Row> handler)
+        LocalReadRunnable(ReadCommand command, ReadCallback<ReadResponse, Row> handler)
         {
-            super(StorageService.Verb.READ);
+            super(MessagingService.Verb.READ);
             this.command = command;
             this.handler = handler;
         }
@@ -820,7 +848,31 @@ public class StorageProxy implements StorageProxyMBean
         }
     }
 
-    static <T> ReadCallback<T> getReadCallback(IResponseResolver<T> resolver, IReadCommand command, ConsistencyLevel consistencyLevel, List<InetAddress> endpoints)
+    static class LocalRangeSliceRunnable extends DroppableRunnable
+    {
+        private final RangeSliceCommand command;
+        private final ReadCallback<RangeSliceReply, Iterable<Row>> handler;
+        private final long start = System.currentTimeMillis();
+
+        LocalRangeSliceRunnable(RangeSliceCommand command, ReadCallback<RangeSliceReply, Iterable<Row>> handler)
+        {
+            super(MessagingService.Verb.READ);
+            this.command = command;
+            this.handler = handler;
+        }
+
+        protected void runMayThrow() throws ExecutionException, InterruptedException
+        {
+            if (logger.isDebugEnabled())
+                logger.debug("LocalReadRunnable reading " + command);
+
+            RangeSliceReply result = new RangeSliceReply(RangeSliceVerbHandler.executeLocally(command));
+            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), System.currentTimeMillis() - start);
+            handler.response(result);
+        }
+    }
+
+    static <TMessage, TResolved> ReadCallback<TMessage, TResolved> getReadCallback(IResponseResolver<TMessage, TResolved> resolver, IReadCommand command, ConsistencyLevel consistencyLevel, List<InetAddress> endpoints)
     {
         if (consistencyLevel == ConsistencyLevel.LOCAL_QUORUM || consistencyLevel == ConsistencyLevel.EACH_QUORUM)
         {
@@ -830,7 +882,7 @@ public class StorageProxy implements StorageProxyMBean
     }
 
     public static List<Row> getRangeSlice(RangeSliceCommand command, ConsistencyLevel consistency_level)
-    throws IOException, UnavailableException, TimeoutException
+    throws IOException, UnavailableException, ReadTimeoutException
     {
         if (logger.isDebugEnabled())
             logger.debug("Command/ConsistencyLevel is {}/{}", command.toString(), consistency_level);
@@ -857,60 +909,48 @@ public class StorageProxy implements StorageProxyMBean
                 List<InetAddress> liveEndpoints = StorageService.instance.getLiveNaturalEndpoints(nodeCmd.keyspace, range.right);
                 DatabaseDescriptor.getEndpointSnitch().sortByProximity(FBUtilities.getBroadcastAddress(), liveEndpoints);
 
-                if (consistency_level == ConsistencyLevel.ONE && !liveEndpoints.isEmpty() && liveEndpoints.get(0).equals(FBUtilities.getBroadcastAddress()))
+                // collect replies and resolve according to consistency level
+                RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(nodeCmd.keyspace);
+                ReadCallback<RangeSliceReply, Iterable<Row>> handler = getReadCallback(resolver, nodeCmd, consistency_level, liveEndpoints);
+                handler.assureSufficientLiveNodes();
+                resolver.setSources(handler.endpoints);
+                if (handler.endpoints.size() == 1 && handler.endpoints.get(0).equals(FBUtilities.getBroadcastAddress()))
                 {
-                    if (logger.isDebugEnabled())
-                        logger.debug("local range slice");
-
-                    try
-                    {
-                        rows.addAll(RangeSliceVerbHandler.executeLocally(nodeCmd));
-                        for (Row row : rows)
-                            columnsCount += row.getLiveColumnCount();
-                    }
-                    catch (ExecutionException e)
-                    {
-                        throw new RuntimeException(e.getCause());
-                    }
-                    catch (InterruptedException e)
-                    {
-                        throw new AssertionError(e);
-                    }
+                    logger.debug("reading data locally");
+                    StageManager.getStage(Stage.READ).execute(new LocalRangeSliceRunnable(nodeCmd, handler));
                 }
                 else
                 {
-                    // collect replies and resolve according to consistency level
-                    RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(nodeCmd.keyspace);
-                    ReadCallback<Iterable<Row>> handler = getReadCallback(resolver, nodeCmd, consistency_level, liveEndpoints);
-                    handler.assureSufficientLiveNodes();
-                    resolver.setSources(handler.endpoints);
+                    MessageOut<RangeSliceCommand> message = nodeCmd.createMessage();
                     for (InetAddress endpoint : handler.endpoints)
                     {
-                        MessagingService.instance().sendRR(nodeCmd, endpoint, handler);
+                        MessagingService.instance().sendRR(message, endpoint, handler);
                         if (logger.isDebugEnabled())
                             logger.debug("reading " + nodeCmd + " from " + endpoint);
                     }
+                }
 
-                    try
+                try
+                {
+                    for (Row row : handler.get())
                     {
-                        for (Row row : handler.get())
-                        {
-                            rows.add(row);
-                            columnsCount += row.getLiveColumnCount();
-                            logger.debug("range slices read {}", row.key);
-                        }
-                        FBUtilities.waitOnFutures(resolver.repairResults, DatabaseDescriptor.getRpcTimeout());
+                        rows.add(row);
+                        columnsCount += row.getLiveColumnCount();
+                        logger.debug("range slices read {}", row.key);
                     }
-                    catch (TimeoutException ex)
-                    {
-                        if (logger.isDebugEnabled())
-                            logger.debug("Range slice timeout: {}", ex.toString());
-                        throw ex;
-                    }
-                    catch (DigestMismatchException e)
-                    {
-                        throw new AssertionError(e); // no digests in range slices yet
-                    }
+                    FBUtilities.waitOnFutures(resolver.repairResults, DatabaseDescriptor.getWriteRpcTimeout());
+                }
+                catch (TimeoutException ex)
+                {
+                    if (logger.isDebugEnabled())
+                        logger.debug("Range slice timeout: {}", ex.toString());
+                    // We actually got all response at that point
+                    int blockFor = consistency_level.blockFor(command.keyspace);
+                    throw new ReadTimeoutException(consistency_level, blockFor, blockFor, true);
+                }
+                catch (DigestMismatchException e)
+                {
+                    throw new AssertionError(e); // no digests in range slices yet
                 }
 
                 // if we're done, great, otherwise, move to the next range
@@ -921,7 +961,7 @@ public class StorageProxy implements StorageProxyMBean
         }
         finally
         {
-            rangeStats.addNano(System.nanoTime() - startTime);
+            rangeMetrics.addNano(System.nanoTime() - startTime);
         }
         return trim(command, rows);
     }
@@ -947,14 +987,13 @@ public class StorageProxy implements StorageProxyMBean
         final Set<InetAddress> liveHosts = Gossiper.instance.getLiveMembers();
         final CountDownLatch latch = new CountDownLatch(liveHosts.size());
 
-        IAsyncCallback cb = new IAsyncCallback()
+        IAsyncCallback<UUID> cb = new IAsyncCallback<UUID>()
         {
-            public void response(Message message)
+            public void response(MessageIn<UUID> message)
             {
                 // record the response from the remote node.
-                logger.debug("Received schema check response from {}", message.getFrom().getHostAddress());
-                UUID theirVersion = UUID.fromString(new String(message.getMessageBody()));
-                versions.put(message.getFrom(), theirVersion);
+                logger.debug("Received schema check response from {}", message.from.getHostAddress());
+                versions.put(message.from, message.payload);
                 latch.countDown();
             }
 
@@ -964,14 +1003,9 @@ public class StorageProxy implements StorageProxyMBean
             }
         };
         // an empty message acts as a request to the SchemaCheckVerbHandler.
+        MessageOut message = new MessageOut(MessagingService.Verb.SCHEMA_CHECK);
         for (InetAddress endpoint : liveHosts)
-        {
-            Message message = new Message(FBUtilities.getBroadcastAddress(),
-                                          StorageService.Verb.SCHEMA_CHECK,
-                                          ArrayUtils.EMPTY_BYTE_ARRAY,
-                                          Gossiper.instance.getVersion(endpoint));
             MessagingService.instance().sendRR(message, endpoint, cb);
-        }
 
         try
         {
@@ -1071,105 +1105,105 @@ public class StorageProxy implements StorageProxyMBean
 
     public long getReadOperations()
     {
-        return readStats.getOpCount();
+        return readMetrics.latency.count();
     }
 
     public long getTotalReadLatencyMicros()
     {
-        return readStats.getTotalLatencyMicros();
+        return readMetrics.totalLatency.count();
     }
 
     public double getRecentReadLatencyMicros()
     {
-        return readStats.getRecentLatencyMicros();
+        return readMetrics.getRecentLatency();
     }
 
     public long[] getTotalReadLatencyHistogramMicros()
     {
-        return readStats.getTotalLatencyHistogramMicros();
+        return readMetrics.totalLatencyHistogram.getBuckets(false);
     }
 
     public long[] getRecentReadLatencyHistogramMicros()
     {
-        return readStats.getRecentLatencyHistogramMicros();
+        return readMetrics.recentLatencyHistogram.getBuckets(true);
     }
 
     public long getRangeOperations()
     {
-        return rangeStats.getOpCount();
+        return rangeMetrics.latency.count();
     }
 
     public long getTotalRangeLatencyMicros()
     {
-        return rangeStats.getTotalLatencyMicros();
+        return rangeMetrics.totalLatency.count();
     }
 
     public double getRecentRangeLatencyMicros()
     {
-        return rangeStats.getRecentLatencyMicros();
+        return rangeMetrics.getRecentLatency();
     }
 
     public long[] getTotalRangeLatencyHistogramMicros()
     {
-        return rangeStats.getTotalLatencyHistogramMicros();
+        return rangeMetrics.totalLatencyHistogram.getBuckets(false);
     }
 
     public long[] getRecentRangeLatencyHistogramMicros()
     {
-        return rangeStats.getRecentLatencyHistogramMicros();
+        return rangeMetrics.recentLatencyHistogram.getBuckets(true);
     }
 
     public long getWriteOperations()
     {
-        return writeStats.getOpCount();
+        return writeMetrics.latency.count();
     }
 
     public long getTotalWriteLatencyMicros()
     {
-        return writeStats.getTotalLatencyMicros();
+        return writeMetrics.totalLatency.count();
     }
 
     public double getRecentWriteLatencyMicros()
     {
-        return writeStats.getRecentLatencyMicros();
+        return writeMetrics.getRecentLatency();
     }
 
     public long[] getTotalWriteLatencyHistogramMicros()
     {
-        return writeStats.getTotalLatencyHistogramMicros();
+        return writeMetrics.totalLatencyHistogram.getBuckets(false);
     }
 
     public long[] getRecentWriteLatencyHistogramMicros()
     {
-        return writeStats.getRecentLatencyHistogramMicros();
+        return writeMetrics.recentLatencyHistogram.getBuckets(true);
     }
 
     public boolean getHintedHandoffEnabled()
     {
-        return hintedHandoffEnabled;
+        return DatabaseDescriptor.hintedHandoffEnabled();
     }
 
     public void setHintedHandoffEnabled(boolean b)
     {
-        hintedHandoffEnabled = b;
+        DatabaseDescriptor.setHintedHandoffEnabled(b);
     }
 
     public int getMaxHintWindow()
     {
-        return maxHintWindow;
+        return DatabaseDescriptor.getMaxHintWindow();
     }
 
     public void setMaxHintWindow(int ms)
     {
-        maxHintWindow = ms;
+        DatabaseDescriptor.setMaxHintWindow(ms);
     }
 
     public static boolean shouldHint(InetAddress ep)
     {
-        if (!hintedHandoffEnabled)
+        if (!DatabaseDescriptor.hintedHandoffEnabled())
             return false;
 
-        boolean hintWindowExpired = Gossiper.instance.getEndpointDowntime(ep) > maxHintWindow;
+        boolean hintWindowExpired = Gossiper.instance.getEndpointDowntime(ep) > DatabaseDescriptor.getMaxHintWindow();
         if (hintWindowExpired)
             logger.debug("not hinting {} which has been down {}ms", ep, Gossiper.instance.getEndpointDowntime(ep));
         return !hintWindowExpired;
@@ -1193,7 +1227,8 @@ public class StorageProxy implements StorageProxyMBean
             // Since the truncate operation is so aggressive and is typically only
             // invoked by an admin, for simplicity we require that all nodes are up
             // to perform the operation.
-            throw new UnavailableException();
+            int liveMembers = Gossiper.instance.getLiveMembers().size();
+            throw new UnavailableException(ConsistencyLevel.ALL, liveMembers + Gossiper.instance.getUnreachableMembers().size(), liveMembers);
         }
 
         Set<InetAddress> allEndpoints = Gossiper.instance.getLiveMembers();
@@ -1203,9 +1238,9 @@ public class StorageProxy implements StorageProxyMBean
         // Send out the truncate calls and track the responses with the callbacks.
         logger.debug("Starting to send truncate messages to hosts {}", allEndpoints);
         final Truncation truncation = new Truncation(keyspace, cfname);
-        MessageProducer producer = new CachingMessageProducer(truncation);
+        MessageOut<Truncation> message = truncation.createMessage();
         for (InetAddress endpoint : allEndpoints)
-            MessagingService.instance().sendRR(producer, endpoint, responseHandler);
+            MessagingService.instance().sendRR(message, endpoint, responseHandler);
 
         // Wait for all
         logger.debug("Sent all truncate messages, now waiting for {} responses", blockFor);
@@ -1224,22 +1259,22 @@ public class StorageProxy implements StorageProxyMBean
 
     public interface WritePerformer
     {
-        public void apply(IMutation mutation, Collection<InetAddress> targets, IWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws IOException, TimeoutException;
+        public void apply(IMutation mutation, Collection<InetAddress> targets, IWriteResponseHandler responseHandler, String localDataCenter, ConsistencyLevel consistency_level) throws IOException, OverloadedException;
     }
 
     private static abstract class DroppableRunnable implements Runnable
     {
         private final long constructionTime = System.currentTimeMillis();
-        private final StorageService.Verb verb;
+        private final MessagingService.Verb verb;
 
-        public DroppableRunnable(StorageService.Verb verb)
+        public DroppableRunnable(MessagingService.Verb verb)
         {
             this.verb = verb;
         }
 
         public final void run()
         {
-            if (System.currentTimeMillis() > constructionTime + DatabaseDescriptor.getRpcTimeout())
+            if (System.currentTimeMillis() > constructionTime + DatabaseDescriptor.getTimeout(verb))
             {
                 MessagingService.instance().incrementDroppedMessages(verb);
                 return;
@@ -1284,13 +1319,18 @@ public class StorageProxy implements StorageProxyMBean
             logger.warn("Some hints were not written before shutdown.  This is not supposed to happen.  You should (a) run repair, and (b) file a bug report");
     }
 
-    public Long getRpcTimeout()
-    {
-        return DatabaseDescriptor.getRpcTimeout();
-    }
+    public Long getRpcTimeout() { return DatabaseDescriptor.getRpcTimeout(); }
+    public void setRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setRpcTimeout(timeoutInMillis); }
 
-    public void setRpcTimeout(Long timeoutInMillis)
-    {
-        DatabaseDescriptor.setRpcTimeout(timeoutInMillis);
-    }
+    public Long getReadRpcTimeout() { return DatabaseDescriptor.getReadRpcTimeout(); }
+    public void setReadRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setReadRpcTimeout(timeoutInMillis); }
+
+    public Long getWriteRpcTimeout() { return DatabaseDescriptor.getWriteRpcTimeout(); }
+    public void setWriteRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setWriteRpcTimeout(timeoutInMillis); }
+
+    public Long getRangeRpcTimeout() { return DatabaseDescriptor.getRangeRpcTimeout(); }
+    public void setRangeRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setRangeRpcTimeout(timeoutInMillis); }
+
+    public Long getTruncateRpcTimeout() { return DatabaseDescriptor.getTruncateRpcTimeout(); }
+    public void setTruncateRpcTimeout(Long timeoutInMillis) { DatabaseDescriptor.setTruncateRpcTimeout(timeoutInMillis); }
 }

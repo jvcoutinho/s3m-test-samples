@@ -5,6 +5,7 @@ import redis.clients.util.Hashing;
 import redis.clients.util.Sharded;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -180,12 +181,12 @@ public class BinaryShardedJedis extends Sharded<Jedis, JedisShardInfo>
         return j.hgetAll(key);
     }
 
-    public Long rpush(byte[] key, byte[] string) {
+    public Long rpush(byte[] key, byte[]... string) {
         Jedis j = getShard(key);
         return j.rpush(key, string);
     }
 
-    public Long lpush(byte[] key, byte[] string) {
+    public Long lpush(byte[] key, byte[]... string) {
         Jedis j = getShard(key);
         return j.lpush(key, string);
     }

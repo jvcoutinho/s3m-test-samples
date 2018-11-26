@@ -105,11 +105,11 @@ public class CompactionTask extends AbstractCompactionTask
         assert sstables != null && dataDirectory != null;
 
         if (DatabaseDescriptor.isSnapshotBeforeCompaction())
-            cfs.snapshotWithoutFlush(System.currentTimeMillis() + "-compact-" + cfs.columnFamily);
+            cfs.snapshotWithoutFlush(System.currentTimeMillis() + "-compact-" + cfs.name);
 
         // sanity check: all sstables must belong to the same cfs
         for (SSTableReader sstable : toCompact)
-            assert sstable.descriptor.cfname.equals(cfs.columnFamily);
+            assert sstable.descriptor.cfname.equals(cfs.name);
 
         CompactionController controller = new CompactionController(cfs, toCompact, gcBefore);
         // new sstables from flush can be added during a compaction, but only the compaction can remove them,
@@ -121,7 +121,7 @@ public class CompactionTask extends AbstractCompactionTask
         long totalkeysWritten = 0;
 
         AbstractCompactionStrategy strategy = cfs.getCompactionStrategy();
-        long estimatedTotalKeys = Math.max(DatabaseDescriptor.getIndexInterval(), SSTableReader.getApproximateKeyCount(toCompact));
+        long estimatedTotalKeys = Math.max(cfs.metadata.getIndexInterval(), SSTableReader.getApproximateKeyCount(toCompact, cfs.metadata));
         long estimatedSSTables = Math.max(1, SSTable.getTotalBytes(toCompact) / strategy.getMaxSSTableSize());
         long keysPerSSTable = (long) Math.ceil((double) estimatedTotalKeys / estimatedSSTables);
         if (logger.isDebugEnabled())

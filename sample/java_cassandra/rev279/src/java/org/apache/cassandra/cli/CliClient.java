@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,28 +21,26 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.util.*;
 
+import com.google.common.base.Charsets;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Collections2;
 import org.apache.commons.lang.StringUtils;
-import com.google.common.base.Charsets;
-import com.google.common.base.Joiner;
 
 import org.antlr.runtime.tree.Tree;
 import org.apache.cassandra.auth.IAuthenticator;
-import org.apache.cassandra.config.ConfigurationException;
+import org.apache.cassandra.exceptions.RequestValidationException;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
 import org.apache.cassandra.db.compaction.OperationType;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.SimpleSnitch;
-import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.thrift.*;
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -50,16 +48,11 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.thrift.TBaseHelper;
 import org.apache.thrift.TException;
-import org.codehaus.jackson.JsonEncoding;
-import org.codehaus.jackson.JsonFactory;
-import org.codehaus.jackson.JsonGenerator;
-import org.codehaus.jackson.JsonParser;
-import org.codehaus.jackson.JsonToken;
-import org.codehaus.jackson.type.TypeReference;
-import org.yaml.snakeyaml.constructor.Constructor;
+import org.codehaus.jackson.*;
 import org.yaml.snakeyaml.Loader;
 import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.Constructor;
 
 // Cli Client Side Library
 public class CliClient
@@ -149,12 +142,12 @@ public class CliClient
     private final String NEWLINE = System.getProperty("line.separator");
     private final String TAB = "  ";
 
-    private Cassandra.Client thriftClient = null;
-    private CliSessionState sessionState  = null;
+    private final Cassandra.Client thriftClient;
+    private final CliSessionState sessionState;
     private String keySpace = null;
     private String username = null;
-    private Map<String, KsDef> keyspacesMap = new HashMap<String, KsDef>();
-    private Map<String, AbstractType<?>> cfKeysComparators;
+    private final Map<String, KsDef> keyspacesMap = new HashMap<String, KsDef>();
+    private final Map<String, AbstractType<?>> cfKeysComparators;
     private ConsistencyLevel consistencyLevel = ConsistencyLevel.ONE;
     private final CfAssumptions assumptions = new CfAssumptions();
     private CliUserHelp help;
@@ -199,7 +192,7 @@ public class CliClient
     }
 
     // Execute a CLI Statement
-    public void executeCLIStatement(String statement) throws CharacterCodingException, TException, TimedOutException, NotFoundException, NoSuchFieldException, InvalidRequestException, UnavailableException, InstantiationException, IllegalAccessException, ClassNotFoundException, SchemaDisagreementException
+    public void executeCLIStatement(String statement) throws CharacterCodingException, TException, TimedOutException, NotFoundException, NoSuchFieldException, InvalidRequestException, UnavailableException, InstantiationException, IllegalAccessException, ClassNotFoundException
     {
         Tree tree = CliCompiler.compileQuery(statement);
         try
@@ -265,6 +258,9 @@ public class CliClient
                     break;
                 case CliParser.NODE_USE_TABLE:
                     executeUseKeySpace(tree);
+                    break;
+                case CliParser.NODE_TRACE_NEXT_QUERY:
+                    executeTraceNextQuery();
                     break;
                 case CliParser.NODE_CONNECT:
                     executeConnect(tree);
@@ -402,6 +398,8 @@ public class CliClient
             return;
         }
 
+        long startTime = System.currentTimeMillis();
+
         Tree columnTree = (columnSpecCnt >= 1)
                            ? columnFamilySpec.getChild(2)
                            : null;
@@ -455,6 +453,7 @@ public class CliClient
             thriftClient.remove(key, path, FBUtilities.timestampMicros(), consistencyLevel);
         }
         sessionState.out.println(String.format("%s removed.", (columnSpecCnt == 0) ? "row" : "column"));
+        elapsedTime(startTime);
     }
 
     private void doSlice(String keyspace, ByteBuffer key, String columnFamily, byte[] superColumnName, int limit)
@@ -548,7 +547,7 @@ public class CliClient
             {
                 return TypeParser.parse(compareWith);
             }
-            catch (ConfigurationException ce)
+            catch (RequestValidationException ce)
             {
                 StringBuilder errorMessage = new StringBuilder("Unknown comparator '" + compareWith + "'. ");
                 errorMessage.append("Available functions: ");
@@ -1004,7 +1003,6 @@ public class CliClient
         {
             String mySchemaVersion = thriftClient.system_add_keyspace(updateKsDefAttributes(statement, ksDef));
             sessionState.out.println(mySchemaVersion);
-            validateSchemaIsSettled(mySchemaVersion);
 
             keyspacesMap.put(keyspaceName, thriftClient.describe_keyspace(keyspaceName));
         }
@@ -1035,7 +1033,6 @@ public class CliClient
         {
             String mySchemaVersion = thriftClient.system_add_column_family(updateCfDefAttributes(statement, cfDef));
             sessionState.out.println(mySchemaVersion);
-            validateSchemaIsSettled(mySchemaVersion);
             keyspacesMap.put(keySpace, thriftClient.describe_keyspace(keySpace));
         }
         catch (InvalidRequestException e)
@@ -1066,7 +1063,6 @@ public class CliClient
 
             String mySchemaVersion = thriftClient.system_update_keyspace(updatedKsDef);
             sessionState.out.println(mySchemaVersion);
-            validateSchemaIsSettled(mySchemaVersion);
             keyspacesMap.remove(keyspaceName);
             getKSMetaData(keySpace);
         }
@@ -1101,7 +1097,6 @@ public class CliClient
 
             String mySchemaVersion = thriftClient.system_update_column_family(updateCfDefAttributes(statement, cfDef));
             sessionState.out.println(mySchemaVersion);
-            validateSchemaIsSettled(mySchemaVersion);
             keyspacesMap.put(keySpace, thriftClient.describe_keyspace(keySpace));
         }
         catch (InvalidRequestException e)
@@ -1291,7 +1286,6 @@ public class CliClient
         String keyspaceName = CliCompiler.getKeySpace(statement, thriftClient.describe_keyspaces());
         String version = thriftClient.system_drop_keyspace(keyspaceName);
         sessionState.out.println(version);
-        validateSchemaIsSettled(version);
 
         if (keyspaceName.equals(keySpace)) //we just deleted the keyspace we were authenticated too
             keySpace = null;
@@ -1314,7 +1308,6 @@ public class CliClient
         String cfName = CliCompiler.getColumnFamily(statement, keyspacesMap.get(keySpace).cf_defs);
         String mySchemaVersion = thriftClient.system_drop_column_family(cfName);
         sessionState.out.println(mySchemaVersion);
-        validateSchemaIsSettled(mySchemaVersion);
     }
 
     private void executeList(Tree statement)
@@ -1464,7 +1457,6 @@ public class CliClient
 
         String mySchemaVersion = thriftClient.system_update_column_family(cfDef);
         sessionState.out.println(mySchemaVersion);
-        validateSchemaIsSettled(mySchemaVersion);
         keyspacesMap.put(keySpace, thriftClient.describe_keyspace(keySpace));
     }
 
@@ -1525,14 +1517,14 @@ public class CliClient
 
         // Could be UTF8Type, IntegerType, LexicalUUIDType etc.
         String defaultType = CliUtils.unescapeSQLString(statement.getChild(2).getText());
-        
+
         if (applyAssumption(cfName, assumptionElement, defaultType))
         {
             assumptions.addAssumption(keySpace, cfName, assumptionElement, defaultType);
             sessionState.out.println(String.format("Assumption for column family '%s' added successfully.", cfName));
         }
     }
-    
+
     private boolean applyAssumption(String cfName, String assumptionElement, String defaultType)
     {
         CfDef columnFamily;
@@ -1548,12 +1540,12 @@ public class CliClient
 
         // used to store in this.cfKeysComparator
         AbstractType<?> comparator;
-        
+
         try
         {
             comparator = TypeParser.parse(defaultType);
         }
-        catch (ConfigurationException e)
+        catch (RequestValidationException e)
         {
             try
             {
@@ -1881,7 +1873,7 @@ public class CliClient
      */
     private boolean hasKeySpace()
     {
-    	if (keySpace == null)
+        if (keySpace == null)
         {
             sessionState.out.println("Not authenticated to a working keyspace.");
             return false;
@@ -1938,22 +1930,22 @@ public class CliClient
 
         try
         {
-        	AuthenticationRequest authRequest;
-        	Map<String, String> credentials = new HashMap<String, String>();
+            AuthenticationRequest authRequest;
+            Map<String, String> credentials = new HashMap<String, String>();
 
             keySpaceName = CliCompiler.getKeySpace(keySpaceName, thriftClient.describe_keyspaces());
 
             thriftClient.set_keyspace(keySpaceName);
 
-        	if (username != null && password != null)
-        	{
-        	    /* remove quotes */
-        	    password = password.replace("\'", "");
-        	    credentials.put(IAuthenticator.USERNAME_KEY, username);
+            if (username != null && password != null)
+            {
+                /* remove quotes */
+                password = password.replace("\'", "");
+                credentials.put(IAuthenticator.USERNAME_KEY, username);
                 credentials.put(IAuthenticator.PASSWORD_KEY, password);
                 authRequest = new AuthenticationRequest(credentials);
                 thriftClient.login(authRequest);
-        	}
+            }
 
             keySpace = keySpaceName;
             this.username = username != null ? username : "default";
@@ -1965,7 +1957,7 @@ public class CliClient
         catch (AuthenticationException e)
         {
             sessionState.err.println("Exception during authentication to the cassandra node: " +
-            		                 "verify keyspace exists, and you are using correct credentials.");
+                                     "verify keyspace exists, and you are using correct credentials.");
         }
         catch (AuthorizationException e)
         {
@@ -1986,6 +1978,16 @@ public class CliClient
 
             sessionState.err.println("Login failure. Did you specify 'keyspace', 'username' and 'password'?");
         }
+    }
+
+    private void executeTraceNextQuery() throws TException, CharacterCodingException
+    {
+        if (!CliMain.isConnected())
+            return;
+
+        UUID sessionId = TimeUUIDType.instance.compose(thriftClient.trace_next_query());
+
+        sessionState.out.println("Will trace next query. Session ID: " + sessionId.toString());
     }
 
     private void describeKeySpace(String keySpaceName, KsDef metadata) throws TException
@@ -2142,7 +2144,7 @@ public class CliClient
             return;
 
         int argCount = statement.getChildCount();
-        
+
         keyspacesMap.remove(keySpace);
         KsDef currentKeySpace = getKSMetaData(keySpace);
 
@@ -2896,46 +2898,6 @@ public class CliClient
         }
     }
 
-    /** validates schema is propagated to all nodes */
-    private void validateSchemaIsSettled(String currentVersionId)
-    {
-        sessionState.out.println("Waiting for schema agreement...");
-        Map<String, List<String>> versions = null;
-
-        long limit = System.currentTimeMillis() + sessionState.schema_mwt;
-        boolean inAgreement = false;
-        outer:
-        while (limit - System.currentTimeMillis() >= 0 && !inAgreement)
-        {
-            try
-            {
-                versions = thriftClient.describe_schema_versions(); // getting schema version for nodes of the ring
-            }
-            catch (Exception e)
-            {
-                sessionState.err.println((e instanceof InvalidRequestException) ? ((InvalidRequestException) e).getWhy() : e.getMessage());
-                continue;
-            }
-
-            for (String version : versions.keySet())
-            {
-                if (!version.equals(currentVersionId) && !version.equals(StorageProxy.UNREACHABLE))
-                    continue outer;
-            }
-            inAgreement = true;
-        }
-
-        if (versions.containsKey(StorageProxy.UNREACHABLE))
-            sessionState.err.printf("Warning: unreachable nodes %s", Joiner.on(", ").join(versions.get(StorageProxy.UNREACHABLE)));
-        if (!inAgreement)
-        {
-            sessionState.err.printf("The schema has not settled in %d seconds; further migrations are ill-advised until it does.%nVersions are %s%n",
-                                    sessionState.schema_mwt / 1000, FBUtilities.toString(versions));
-            System.exit(-1);
-        }
-        sessionState.out.println("... schemas agree across the cluster");
-    }
-
     private static class CfDefNamesComparator implements Comparator<CfDef>
     {
         public int compare(CfDef a, CfDef b)
@@ -2958,14 +2920,14 @@ public class CliClient
     {
         sessionState.out.println("Elapsed time: " + (System.currentTimeMillis() - startTime) + " msec(s).");
     }
-    
+
     class CfAssumptions
     {
         //Map<KeySpace, Map<ColumnFamily, Map<Property, Value>>>
         private Map<String, Map<String, Map<String, String>>> assumptions;
         private boolean assumptionsChanged;
         private File assumptionDirectory;
-        
+
         public CfAssumptions()
         {
             assumptions = new HashMap<String, Map<String, Map<String, String>>>();
@@ -2973,7 +2935,7 @@ public class CliClient
             assumptionDirectory = new File(System.getProperty("user.home"), ".cassandra-cli");
             assumptionDirectory.mkdirs();
         }
-        
+
         public void addAssumption(String keyspace, String columnFamily, String property, String value)
         {
             Map<String, Map<String, String>> ksAssumes = assumptions.get(keyspace);
@@ -2982,23 +2944,23 @@ public class CliClient
                 ksAssumes = new HashMap<String, Map<String, String>>();
                 assumptions.put(keyspace, ksAssumes);
             }
-            
+
             Map<String, String> cfAssumes = ksAssumes.get(columnFamily);
             if (cfAssumes == null)
             {
                 cfAssumes = new HashMap<String, String>();
                 ksAssumes.put(columnFamily, cfAssumes);
             }
-            
+
             cfAssumes.put(property, value);
             assumptionsChanged = true;
         }
-        
+
         public void replayAssumptions(String keyspace)
         {
             if (!CliMain.isConnected() || !hasKeySpace())
                 return;
-            
+
             Map<String, Map<String, String>> cfAssumes = assumptions.get(keyspace);
             if (cfAssumes != null)
             {
@@ -3006,7 +2968,7 @@ public class CliClient
                 {
                     String columnFamily = cfEntry.getKey();
                     Map<String, String> props = cfEntry.getValue();
-                    
+
                     for (Map.Entry<String, String> propEntry : props.entrySet())
                     {
                         applyAssumption(columnFamily, propEntry.getKey(), propEntry.getValue());
@@ -3014,7 +2976,7 @@ public class CliClient
                 }
             }
         }
-        
+
         private void readAssumptions()
         {
             File assumptionFile = new File(assumptionDirectory, "assumptions.json");
@@ -3048,7 +3010,7 @@ public class CliClient
                                         cfAssumes = new HashMap<String, String>();
                                         ksAssumes.put(columnFamily, cfAssumes);
                                     }
-                                    
+
                                     token = p.nextToken();
                                     while (token != JsonToken.END_ARRAY)
                                     {
@@ -3059,7 +3021,7 @@ public class CliClient
                                             String value = p.getText();
                                             cfAssumes.put(prop, value);
                                         }
-                                        
+
                                         token = p.nextToken();
                                     }
                                 }
@@ -3076,7 +3038,7 @@ public class CliClient
                 }
             }
         }
-        
+
         private void writeAssumptions()
         {
             if (assumptionsChanged)

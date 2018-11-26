@@ -3125,6 +3125,15 @@ public class BinaryJedis implements BasicCommands, BinaryJedisCommands,
 	client.getbit(key, offset);
 	return client.getIntegerReply() == 1;
     }
+    
+    public Long bitpos(final byte[] key, final boolean value) {
+	return bitpos(key, value, new BitPosParams());
+    }
+    
+    public Long bitpos(final byte[] key, final boolean value, final BitPosParams params) {
+	client.bitpos(key, value, params);
+	return client.getIntegerReply();
+    }
 
     public Long setrange(byte[] key, long offset, byte[] value) {
 	client.setrange(key, offset, value);
@@ -3415,6 +3424,34 @@ public class BinaryJedis implements BasicCommands, BinaryJedisCommands,
 	checkIsInMulti();
 	client.waitReplicas(replicas, timeout);
 	return client.getIntegerReply();
+    }
+
+    @Override
+    public Long pfadd(final byte[] key, final byte[]... elements) {
+	checkIsInMulti();
+	client.pfadd(key, elements);
+	return client.getIntegerReply();
+    }
+
+    @Override
+    public long pfcount(final byte[] key) {
+	checkIsInMulti();
+	client.pfcount(key);
+	return client.getIntegerReply();
+    }
+
+    @Override
+    public String pfmerge(final byte[] destkey, final byte[]... sourcekeys) {
+	checkIsInMulti();
+	client.pfmerge(destkey, sourcekeys);
+	return client.getStatusCodeReply();
+    }
+
+    @Override
+    public Long pfcount(byte[]... keys) {
+        checkIsInMulti();
+        client.pfcount(keys);
+        return client.getIntegerReply();
     }
 
 }

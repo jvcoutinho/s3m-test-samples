@@ -28,14 +28,12 @@ import com.google.common.base.Objects;
 import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.io.ISerializer;
 import org.apache.cassandra.io.ISSTableSerializer;
+import org.apache.cassandra.io.ISerializer;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.IntervalTree;
-import org.apache.cassandra.utils.ObjectSizes;
 
 public class DeletionInfo
 {
@@ -52,8 +50,12 @@ public class DeletionInfo
     {
         // Pre-1.1 node may return MIN_VALUE for non-deleted container, but the new default is MAX_VALUE
         // (see CASSANDRA-3872)
-        this(new DeletionTime(markedForDeleteAt, localDeletionTime == Integer.MIN_VALUE ? Integer.MAX_VALUE : localDeletionTime),
-             IntervalTree.<ByteBuffer, DeletionTime, RangeTombstone>emptyTree());
+        this(new DeletionTime(markedForDeleteAt, localDeletionTime == Integer.MIN_VALUE ? Integer.MAX_VALUE : localDeletionTime));
+    }
+
+    public DeletionInfo(DeletionTime topLevel)
+    {
+        this(topLevel, IntervalTree.<ByteBuffer, DeletionTime, RangeTombstone>emptyTree());
     }
 
     public DeletionInfo(ByteBuffer start, ByteBuffer end, Comparator<ByteBuffer> comparator, long markedForDeleteAt, int localDeletionTime)
@@ -65,11 +67,6 @@ public class DeletionInfo
     {
         this(DeletionTime.LIVE, IntervalTree.build(Collections.<RangeTombstone>singletonList(rangeTombstone), comparator));
         assert comparator != null;
-    }
-
-    public DeletionInfo(DeletionTime topLevel)
-    {
-        this(topLevel, IntervalTree.<ByteBuffer, DeletionTime, RangeTombstone>emptyTree());
     }
 
     private DeletionInfo(DeletionTime topLevel, IntervalTree<ByteBuffer, DeletionTime, RangeTombstone> ranges)
@@ -100,9 +97,9 @@ public class DeletionInfo
      * @param column the column to check.
      * @return true if the column is deleted, false otherwise
      */
-    public boolean isDeleted(IColumn column)
+    public boolean isDeleted(Column column)
     {
-        return isDeleted(column.name(), column.mostRecentLiveChangeAt());
+        return isDeleted(column.name(), column.timestamp());
     }
 
     public boolean isDeleted(ByteBuffer name, long timestamp)
@@ -217,6 +214,11 @@ public class DeletionInfo
         return ranges.iterator();
     }
 
+    public List<DeletionTime> rangeCovering(ByteBuffer name)
+    {
+        return ranges.search(name);
+    }
+
     public int dataSize()
     {
         int size = TypeSizes.NATIVE.sizeof(topLevel.markedForDeleteAt);
@@ -273,14 +275,14 @@ public class DeletionInfo
     {
         private final static ISerializer<ByteBuffer> bbSerializer = new ISerializer<ByteBuffer>()
         {
-            public void serialize(ByteBuffer bb, DataOutput dos) throws IOException
+            public void serialize(ByteBuffer bb, DataOutput out) throws IOException
             {
-                ByteBufferUtil.writeWithShortLength(bb, dos);
+                ByteBufferUtil.writeWithShortLength(bb, out);
             }
 
-            public ByteBuffer deserialize(DataInput dis) throws IOException
+            public ByteBuffer deserialize(DataInput in) throws IOException
             {
-                return ByteBufferUtil.readWithShortLength(dis);
+                return ByteBufferUtil.readWithShortLength(in);
             }
 
             public long serializedSize(ByteBuffer bb, TypeSizes typeSizes)
@@ -307,18 +309,7 @@ public class DeletionInfo
         public void serialize(DeletionInfo info, DataOutput out, int version) throws IOException
         {
             DeletionTime.serializer.serialize(info.topLevel, out);
-            // Pre-1.2 version don't know about range tombstones and thus users should upgrade all
-            // nodes before using them. If they didn't, better fail early that propagating bad info
-            if (version < MessagingService.VERSION_12)
-            {
-                if (!info.ranges.isEmpty())
-                    throw new RuntimeException("Cannot send range tombstone to pre-1.2 node. You should upgrade all node to Cassandra 1.2+ before using range tombstone.");
-                // Otherwise we're done
-            }
-            else
-            {
-                itSerializer.serialize(info.ranges, out, version);
-            }
+            itSerializer.serialize(info.ranges, out, version);
         }
 
         public void serializeForSSTable(DeletionInfo info, DataOutput out) throws IOException
@@ -337,11 +328,7 @@ public class DeletionInfo
 
         public DeletionInfo deserialize(DataInput in, int version, Comparator<ByteBuffer> comparator) throws IOException
         {
-            assert comparator != null;
             DeletionTime topLevel = DeletionTime.serializer.deserialize(in);
-            if (version < MessagingService.VERSION_12)
-                return new DeletionInfo(topLevel, IntervalTree.<ByteBuffer, DeletionTime, RangeTombstone>emptyTree());
-
             IntervalTree<ByteBuffer, DeletionTime, RangeTombstone> ranges = itSerializer.deserialize(in, version, comparator);
             return new DeletionInfo(topLevel, ranges);
         }
@@ -355,9 +342,6 @@ public class DeletionInfo
         public long serializedSize(DeletionInfo info, TypeSizes typeSizes, int version)
         {
             long size = DeletionTime.serializer.serializedSize(info.topLevel, typeSizes);
-            if (version < MessagingService.VERSION_12)
-                return size;
-
             return size + itSerializer.serializedSize(info.ranges, typeSizes, version);
         }
 

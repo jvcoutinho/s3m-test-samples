@@ -69,6 +69,7 @@ import org.apache.cassandra.db.HintedHandOffManager;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.ReadRepairVerbHandler;
 import org.apache.cassandra.db.ReadVerbHandler;
+import org.apache.cassandra.db.ReplicateOnWriteVerbHandler;
 import org.apache.cassandra.db.Row;
 import org.apache.cassandra.db.RowMutationVerbHandler;
 import org.apache.cassandra.db.SchemaCheckVerbHandler;
@@ -101,6 +102,7 @@ import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ResponseVerbHandler;
 import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
+import org.apache.cassandra.streaming.OperationType;
 import org.apache.cassandra.streaming.ReplicationFinishedVerbHandler;
 import org.apache.cassandra.streaming.StreamIn;
 import org.apache.cassandra.streaming.StreamOut;
@@ -165,6 +167,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         INDEX_SCAN,
         REPLICATION_FINISHED,
         INTERNAL_RESPONSE, // responses to internal calls
+        REPLICATE_ON_WRITE,
         ;
         // remember to add new verbs at the end, since we serialize by ordinal
     }
@@ -193,6 +196,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         put(Verb.INDEX_SCAN, Stage.READ);
         put(Verb.REPLICATION_FINISHED, Stage.MISC);
         put(Verb.INTERNAL_RESPONSE, Stage.INTERNAL_RESPONSE);
+        put(Verb.REPLICATE_ON_WRITE, Stage.REPLICATE_ON_WRITE);
     }};
 
 
@@ -278,6 +282,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance.registerVerbHandlers(Verb.MUTATION, new RowMutationVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.READ_REPAIR, new ReadRepairVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.READ, new ReadVerbHandler());
+        MessagingService.instance.registerVerbHandlers(Verb.REPLICATE_ON_WRITE, new ReplicateOnWriteVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.RANGE_SLICE, new RangeSliceVerbHandler());
         MessagingService.instance.registerVerbHandlers(Verb.INDEX_SCAN, new IndexScanVerbHandler());
         // see BootStrapper for a summary of how the bootstrap verbs interact
@@ -398,6 +403,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.info("This node will not auto bootstrap because it is configured to be a seed node.");
 
         Token token;
+        boolean bootstrapped = false;
         if (DatabaseDescriptor.isAutoBootstrap()
             && !(DatabaseDescriptor.getSeeds().contains(FBUtilities.getLocalAddress()) || SystemTable.isBootstrapped()))
         {
@@ -417,6 +423,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             {
                 bootstrap(token);
                 assert !isBootstrapMode; // bootstrap will block until finished
+                bootstrapped = true;
+                SystemTable.setBootstrapped(true); // first startup is only chance to bootstrap
             }
             // else nothing to do, go directly to participating in ring
         }
@@ -445,7 +453,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         SystemTable.setBootstrapped(true); // first startup is only chance to bootstrap
         setToken(token);
-
         assert tokenMetadata_.sortedTokens().size() > 0;
     }
 
@@ -1002,7 +1009,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 };
                 if (logger_.isDebugEnabled())
                     logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(ranges, ", "));
-                StreamIn.requestRanges(source, table, ranges, callback);
+                StreamIn.requestRanges(source, table, ranges, callback, OperationType.RESTORE_REPLICA_COUNT);
             }
         }
     }
@@ -1394,11 +1401,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return getNaturalEndpoints(table, partitioner_.getToken(key));
     }
 
-    public List<InetAddress> getNaturalEndpoints(String table, byte[] key)
-    {
-        return getNaturalEndpoints(table, ByteBuffer.wrap(key));
-    }
-
     /**
      * This method returns the N endpoints that are responsible for storing the
      * specified key i.e for replication.
@@ -1611,7 +1613,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                     public void run()
                     {
                         // TODO each call to transferRanges re-flushes, this is potentially a lot of waste
-                        StreamOut.transferRanges(newEndpoint, table, Arrays.asList(range), callback);
+                        StreamOut.transferRanges(newEndpoint, table, Arrays.asList(range), callback, OperationType.UNBOOTSTRAP);
                     }
                 });
             }
@@ -1982,6 +1984,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 rcf.comment = cfm.getComment();
                 rcf.keys_cached = cfm.getKeyCacheSize();
                 rcf.read_repair_chance = cfm.getReadRepairChance();
+                rcf.replicate_on_write = cfm.getReplicateOnWrite();
                 rcf.gc_grace_seconds = cfm.getGcGraceSeconds();
                 rcf.rows_cached = cfm.getRowCacheSize();
                 rcf.column_metadata = new RawColumnDefinition[cfm.getColumn_metadata().size()];

@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -6,30 +6,26 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * <p/>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOError;
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
@@ -38,31 +34,43 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.exceptions.AlreadyExistsException;
+import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.*;
-import org.apache.cassandra.io.util.FastByteArrayInputStream;
-import org.apache.cassandra.io.util.FastByteArrayOutputStream;
-import org.apache.cassandra.net.IAsyncCallback;
-import org.apache.cassandra.net.Message;
+import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.cassandra.utils.WrappedRunnable;
-import org.apache.commons.lang.ArrayUtils;
 
 public class MigrationManager implements IEndpointStateChangeSubscriber
 {
     private static final Logger logger = LoggerFactory.getLogger(MigrationManager.class);
 
-    // try that many times to send migration request to the node before giving up
-    private static final int MIGRATION_REQUEST_RETRIES = 3;
     private static final ByteBuffer LAST_MIGRATION_KEY = ByteBufferUtil.bytes("Last Migration");
+
+    public static final MigrationManager instance = new MigrationManager();
+
+    private final List<IMigrationListener> listeners = new CopyOnWriteArrayList<IMigrationListener>();
+
+    private MigrationManager() {}
+
+    public void register(IMigrationListener listener)
+    {
+        listeners.add(listener);
+    }
+
+    public void unregister(IMigrationListener listener)
+    {
+        listeners.remove(listener);
+    }
 
     public void onJoin(InetAddress endpoint, EndpointState epState)
     {}
@@ -95,7 +103,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
     private static void maybeScheduleSchemaPull(final UUID theirVersion, final InetAddress endpoint)
     {
         // Can't request migrations from nodes with versions younger than 1.1.7
-        if (Gossiper.instance.getVersion(endpoint) < MessagingService.VERSION_117)
+        if (MessagingService.instance().getVersion(endpoint) < MessagingService.VERSION_117)
             return;
 
         if (Schema.instance.getVersion().equals(theirVersion))
@@ -131,12 +139,48 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         return StageManager.getStage(Stage.MIGRATION).getActiveCount() == 0;
     }
 
+    public void notifyCreateKeyspace(KSMetaData ksm)
+    {
+        for (IMigrationListener listener : listeners)
+            listener.onCreateKeyspace(ksm.name);
+    }
+
+    public void notifyCreateColumnFamily(CFMetaData cfm)
+    {
+        for (IMigrationListener listener : listeners)
+            listener.onCreateColumnFamly(cfm.ksName, cfm.cfName);
+    }
+
+    public void notifyUpdateKeyspace(KSMetaData ksm)
+    {
+        for (IMigrationListener listener : listeners)
+            listener.onUpdateKeyspace(ksm.name);
+    }
+
+    public void notifyUpdateColumnFamily(CFMetaData cfm)
+    {
+        for (IMigrationListener listener : listeners)
+            listener.onUpdateColumnFamly(cfm.ksName, cfm.cfName);
+    }
+
+    public void notifyDropKeyspace(KSMetaData ksm)
+    {
+        for (IMigrationListener listener : listeners)
+            listener.onDropKeyspace(ksm.name);
+    }
+
+    public void notifyDropColumnFamily(CFMetaData cfm)
+    {
+        for (IMigrationListener listener : listeners)
+            listener.onDropColumnFamly(cfm.ksName, cfm.cfName);
+    }
+
     public static void announceNewKeyspace(KSMetaData ksm) throws ConfigurationException
     {
         ksm.validate();
 
         if (Schema.instance.getTableDefinition(ksm.name) != null)
-            throw new ConfigurationException(String.format("Cannot add already existing keyspace '%s'.", ksm.name));
+            throw new AlreadyExistsException(ksm.name);
 
         logger.info(String.format("Create new Keyspace: %s", ksm));
         announce(ksm.toSchema(FBUtilities.timestampMicros()));
@@ -150,7 +194,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         if (ksm == null)
             throw new ConfigurationException(String.format("Cannot add column family '%s' to non existing keyspace '%s'.", cfm.cfName, cfm.ksName));
         else if (ksm.cfMetaData().containsKey(cfm.cfName))
-            throw new ConfigurationException(String.format("Cannot add already existing column family '%s' to keyspace '%s'.", cfm.cfName, cfm.ksName));
+            throw new AlreadyExistsException(cfm.cfName, cfm.ksName);
 
         logger.info(String.format("Create new ColumnFamily: %s", cfm));
         announce(cfm.toSchema(FBUtilities.timestampMicros()));
@@ -175,6 +219,8 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         CFMetaData oldCfm = Schema.instance.getCFMetaData(cfm.ksName, cfm.cfName);
         if (oldCfm == null)
             throw new ConfigurationException(String.format("Cannot update non existing column family '%s' in keyspace '%s'.", cfm.cfName, cfm.ksName));
+
+        oldCfm.validateCompatility(cfm);
 
         logger.info(String.format("Update ColumnFamily '%s/%s' From %s To %s", cfm.ksName, cfm.cfName, oldCfm, cfm));
         announce(oldCfm.toSchemaUpdate(cfm, FBUtilities.timestampMicros()));
@@ -211,15 +257,10 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
 
     private static void pushSchemaMutation(InetAddress endpoint, Collection<RowMutation> schema)
     {
-        try
-        {
-            Message msg = makeMigrationMessage(schema, Gossiper.instance.getVersion(endpoint));
-            MessagingService.instance().sendOneWay(msg, endpoint);
-        }
-        catch (IOException ex)
-        {
-            throw new IOError(ex);
-        }
+        MessageOut<Collection<RowMutation>> msg = new MessageOut<Collection<RowMutation>>(MessagingService.Verb.DEFINITIONS_UPDATE,
+                                                                                          schema,
+                                                                                          MigrationsSerializer.instance);
+        MessagingService.instance().sendOneWay(msg, endpoint);
     }
 
     // Returns a future on the local application of the schema
@@ -239,7 +280,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
                 continue; // we've delt with localhost already
 
             // don't send migrations to the nodes with the versions older than < 1.1
-            if (Gossiper.instance.getVersion(endpoint) < MessagingService.VERSION_11)
+            if (MessagingService.instance().getVersion(endpoint) < MessagingService.VERSION_11)
                 continue;
 
             pushSchemaMutation(endpoint, schema);
@@ -258,69 +299,6 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
         assert Gossiper.instance.isEnabled();
         Gossiper.instance.addLocalApplicationState(ApplicationState.SCHEMA, StorageService.instance.valueFactory.schema(version));
         logger.debug("Gossiping my schema version " + version);
-    }
-
-    /**
-     * Serialize given row mutations into raw bytes and make a migration message
-     * (other half of transformation is in DefinitionsUpdateResponseVerbHandler.)
-     *
-     * @param schema The row mutations to send to remote nodes
-     * @param version The version to use for message
-     *
-     * @return Serialized migration containing schema mutations
-     *
-     * @throws IOException on failed serialization
-     */
-    private static Message makeMigrationMessage(Collection<RowMutation> schema, int version) throws IOException
-    {
-        return new Message(FBUtilities.getBroadcastAddress(), StorageService.Verb.DEFINITIONS_UPDATE, serializeSchema(schema, version), version);
-    }
-
-    /**
-     * Serialize given row mutations into raw bytes
-     *
-     * @param schema The row mutations to serialize
-     * @param version The version of the message service to use for serialization
-     *
-     * @return serialized mutations
-     *
-     * @throws IOException on failed serialization
-     */
-    public static byte[] serializeSchema(Collection<RowMutation> schema, int version) throws IOException
-    {
-        FastByteArrayOutputStream bout = new FastByteArrayOutputStream();
-        DataOutputStream dout = new DataOutputStream(bout);
-        dout.writeInt(schema.size());
-
-        for (RowMutation mutation : schema)
-            RowMutation.serializer().serialize(mutation, dout, version);
-
-        dout.close();
-
-        return bout.toByteArray();
-    }
-
-    /**
-     * Deserialize migration message considering data compatibility starting from version 1.1
-     *
-     * @param data The data of the message from coordinator which hold schema mutations to apply
-     * @param version The version of the message
-     *
-     * @return The collection of the row mutations to apply on the node (aka schema)
-     *
-     * @throws IOException if message is of incompatible version or data is corrupted
-     */
-    public static Collection<RowMutation> deserializeMigrationMessage(byte[] data, int version) throws IOException
-    {
-        Collection<RowMutation> schema = new ArrayList<RowMutation>();
-        DataInputStream in = new DataInputStream(new FastByteArrayInputStream(data));
-
-        int count = in.readInt();
-
-        for (int i = 0; i < count; i++)
-            schema.add(RowMutation.serializer().deserialize(in, version));
-
-        return schema;
     }
 
     /**
@@ -360,7 +338,7 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
             // and due to broken timestamps in versions prior to 1.1.7
             for (InetAddress node : liveEndpoints)
             {
-                if (Gossiper.instance.getVersion(node) >= MessagingService.VERSION_117)
+                if (MessagingService.instance().getVersion(node) >= MessagingService.VERSION_117)
                 {
                     if (logger.isDebugEnabled())
                         logger.debug("Requesting schema from " + node);
@@ -389,8 +367,8 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
     @Deprecated
     public static UUID getLastMigrationId()
     {
-        DecoratedKey<?> dkey = StorageService.getPartitioner().decorateKey(LAST_MIGRATION_KEY);
-        Table defs = Table.open(Table.SYSTEM_TABLE);
+        DecoratedKey dkey = StorageService.getPartitioner().decorateKey(LAST_MIGRATION_KEY);
+        Table defs = Table.open(Table.SYSTEM_KS);
         ColumnFamilyStore cfStore = defs.getColumnFamilyStore(DefsTable.OLD_SCHEMA_CF);
         QueryFilter filter = QueryFilter.getNamesFilter(dkey, new QueryPath(DefsTable.OLD_SCHEMA_CF), LAST_MIGRATION_KEY);
         ColumnFamily cf = cfStore.getColumnFamily(filter);
@@ -400,53 +378,34 @@ public class MigrationManager implements IEndpointStateChangeSubscriber
             return UUIDGen.getUUID(cf.getColumn(LAST_MIGRATION_KEY).value());
     }
 
-    static class MigrationTask extends WrappedRunnable
+    public static class MigrationsSerializer implements IVersionedSerializer<Collection<RowMutation>>
     {
-        private final InetAddress endpoint;
+        public static MigrationsSerializer instance = new MigrationsSerializer();
 
-        MigrationTask(InetAddress endpoint)
+        public void serialize(Collection<RowMutation> schema, DataOutput out, int version) throws IOException
         {
-            this.endpoint = endpoint;
+            out.writeInt(schema.size());
+            for (RowMutation rm : schema)
+                RowMutation.serializer.serialize(rm, out, version);
         }
 
-        public void runMayThrow() throws Exception
+        public Collection<RowMutation> deserialize(DataInput in, int version) throws IOException
         {
-            Message message = new Message(FBUtilities.getBroadcastAddress(),
-                                          StorageService.Verb.MIGRATION_REQUEST,
-                                          ArrayUtils.EMPTY_BYTE_ARRAY,
-                                          Gossiper.instance.getVersion(endpoint));
+            int count = in.readInt();
+            Collection<RowMutation> schema = new ArrayList<RowMutation>(count);
 
-            if (!FailureDetector.instance.isAlive(endpoint))
-            {
-                logger.error("Can't send migration request: node {} is down.", endpoint);
-                return;
-            }
+            for (int i = 0; i < count; i++)
+                schema.add(RowMutation.serializer.deserialize(in, version));
 
-            IAsyncCallback cb = new IAsyncCallback()
-            {
-                public void response(Message message)
-                {
-                    try
-                    {
-                        DefsTable.mergeRemoteSchema(message.getMessageBody(), message.getVersion());
-                    }
-                    catch (IOException e)
-                    {
-                        logger.error("IOException merging remote schema", e);
-                    }
-                    catch (ConfigurationException e)
-                    {
-                        logger.error("Configuration exception merging remote schema", e);
-                    }
-                }
+            return schema;
+        }
 
-                public boolean isLatencyForSnitch()
-                {
-                    return false;
-                }
-            };
-
-            MessagingService.instance().sendRR(message, endpoint, cb);
+        public long serializedSize(Collection<RowMutation> schema, int version)
+        {
+            int size = TypeSizes.NATIVE.sizeof(schema.size());
+            for (RowMutation rm : schema)
+                size += RowMutation.serializer.serializedSize(rm, version);
+            return size;
         }
     }
 }

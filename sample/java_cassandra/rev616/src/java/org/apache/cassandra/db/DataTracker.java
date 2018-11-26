@@ -33,7 +33,6 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.cache.AutoSavingCache;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.notifications.INotification;
 import org.apache.cassandra.notifications.INotificationConsumer;
@@ -79,6 +78,11 @@ public class DataTracker
     public List<SSTableReader> getSSTables()
     {
         return view.get().sstables;
+    }
+
+    public Set<SSTableReader> getUncompactingSSTables()
+    {
+        return view.get().nonCompactingSStables();
     }
 
     public View getView()
@@ -130,6 +134,18 @@ public class DataTracker
 
     public void replaceFlushed(Memtable memtable, SSTableReader sstable)
     {
+        if (!cfstore.isValid())
+        {
+            View currentView, newView;
+            do
+            {
+                currentView = view.get();
+                newView = currentView.replaceFlushed(memtable, sstable).replace(Arrays.asList(sstable), Collections.<SSTableReader>emptyList());
+            }
+            while (!view.compareAndSet(currentView, newView));
+            return;
+        }
+
         View currentView, newView;
         do
         {
@@ -147,7 +163,7 @@ public class DataTracker
 
     public void incrementallyBackup(final SSTableReader sstable)
     {
-        if (!DatabaseDescriptor.incrementalBackupsEnabled())
+        if (!DatabaseDescriptor.isIncrementalBackupsEnabled())
             return;
 
         Runnable runnable = new WrappedRunnable()
@@ -213,6 +229,16 @@ public class DataTracker
      */
     public void unmarkCompacting(Collection<SSTableReader> unmark)
     {
+        if (!cfstore.isValid())
+        {
+            // We don't know if the original compaction suceeded or failed, which makes it difficult to know
+            // if the sstable reference has already been released.
+            // A "good enough" approach is to mark the sstables involved compacted, which if compaction succeeded
+            // is harmlessly redundant, and if it failed ensures that at least the sstable will get deleted on restart.
+            for (SSTableReader sstable : unmark)
+                sstable.markCompacted();
+        }
+
         View currentView, newView;
         do
         {
@@ -244,9 +270,23 @@ public class DataTracker
         notifyAdded(sstable);
     }
 
-    public void removeAllSSTables()
+    /**
+     * removes all sstables that are not busy compacting.
+     */
+    public void unreferenceSSTables()
     {
-        replace(getSSTables(), Collections.<SSTableReader>emptyList());
+        Set<SSTableReader> notCompacting;
+
+        View currentView, newView;
+        do
+        {
+            currentView = view.get();
+            notCompacting = currentView.nonCompactingSStables();
+            newView = currentView.replace(notCompacting, Collections.<SSTableReader>emptySet());
+        }
+        while (!view.compareAndSet(currentView, newView));
+
+        postReplace(notCompacting, Collections.<SSTableReader>emptySet());
     }
 
     /** (Re)initializes the tracker, purging all references. */
@@ -261,6 +301,12 @@ public class DataTracker
 
     private void replace(Collection<SSTableReader> oldSSTables, Iterable<SSTableReader> replacements)
     {
+        if (!cfstore.isValid())
+        {
+            removeOldSSTablesSize(replacements);
+            replacements = Collections.emptyList();
+        }
+
         View currentView, newView;
         do
         {
@@ -269,6 +315,11 @@ public class DataTracker
         }
         while (!view.compareAndSet(currentView, newView));
 
+        postReplace(oldSSTables, replacements);
+    }
+
+    private void postReplace(Collection<SSTableReader> oldSSTables, Iterable<SSTableReader> replacements)
+    {
         addNewSSTablesSize(replacements);
         removeOldSSTablesSize(oldSSTables);
 
@@ -299,7 +350,8 @@ public class DataTracker
                 logger.debug(String.format("removing %s from list of files tracked for %s.%s",
                             sstable.descriptor, cfstore.table.name, cfstore.getColumnFamilyName()));
             liveSize.addAndGet(-sstable.bytesOnDisk());
-            sstable.markCompacted();
+            boolean firstToCompact = sstable.markCompacted();
+            assert firstToCompact : sstable + " was already marked compacted";
             sstable.releaseReference();
         }
     }
@@ -527,6 +579,11 @@ public class DataTracker
             this.sstables = sstables;
             this.compacting = compacting;
             this.intervalTree = intervalTree;
+        }
+
+        public Sets.SetView<SSTableReader> nonCompactingSStables()
+        {
+            return Sets.difference(ImmutableSet.copyOf(sstables), compacting);
         }
 
         private IntervalTree buildIntervalTree(List<SSTableReader> sstables)

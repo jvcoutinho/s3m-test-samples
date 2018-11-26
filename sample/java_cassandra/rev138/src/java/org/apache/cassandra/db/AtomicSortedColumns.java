@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.google.common.base.Function;
 import edu.stanford.ppl.concurrent.SnapTreeMap;
 
+import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.utils.Allocator;
 
@@ -105,27 +106,29 @@ public class AtomicSortedColumns implements ISortedColumns
     public void delete(DeletionInfo info)
     {
         // Keeping deletion info for max markedForDeleteAt value
-        Holder current;
-        do
+        while (true)
         {
-            current = ref.get();
-            if (current.deletionInfo.markedForDeleteAt >= info.markedForDeleteAt)
+            Holder current = ref.get();
+            DeletionInfo newDelInfo = current.deletionInfo.add(info);
+            if (newDelInfo == current.deletionInfo || ref.compareAndSet(current, current.with(newDelInfo)))
                 break;
         }
-        while (!ref.compareAndSet(current, current.with(info)));
+    }
+
+    public void setDeletionInfo(DeletionInfo newInfo)
+    {
+        ref.set(ref.get().with(newInfo));
     }
 
     public void maybeResetDeletionTimes(int gcBefore)
     {
-        Holder current;
-        do
+        while (true)
         {
-            current = ref.get();
-            // Stop if we don't need to change the deletion info (not expired yet)
-            if (current.deletionInfo.localDeletionTime > gcBefore)
+            Holder current = ref.get();
+            DeletionInfo purgedInfo = current.deletionInfo.purge(gcBefore);
+            if (purgedInfo == current.deletionInfo || ref.compareAndSet(current, current.with(DeletionInfo.LIVE)))
                 break;
         }
-        while (!ref.compareAndSet(current, current.with(new DeletionInfo())));
     }
 
     public void retainAll(ISortedColumns columns)
@@ -178,9 +181,7 @@ public class AtomicSortedColumns implements ISortedColumns
         {
             sizeDelta = 0;
             current = ref.get();
-            DeletionInfo newDelInfo = current.deletionInfo;
-            if (newDelInfo.markedForDeleteAt < cm.getDeletionInfo().markedForDeleteAt)
-                newDelInfo = cm.getDeletionInfo();
+            DeletionInfo newDelInfo = current.deletionInfo.add(cm.getDeletionInfo());
             modified = new Holder(current.map.clone(), newDelInfo);
 
             for (IColumn column : cm.getSortedColumns())
@@ -276,19 +277,14 @@ public class AtomicSortedColumns implements ISortedColumns
         return getSortedColumns().iterator();
     }
 
-    public Iterator<IColumn> reverseIterator()
+    public Iterator<IColumn> iterator(ColumnSlice[] slices)
     {
-        return getReverseSortedColumns().iterator();
+        return new ColumnSlice.NavigableMapIterator(ref.get().map, slices);
     }
 
-    public Iterator<IColumn> iterator(ByteBuffer start)
+    public Iterator<IColumn> reverseIterator(ColumnSlice[] slices)
     {
-        return ref.get().map.tailMap(start).values().iterator();
-    }
-
-    public Iterator<IColumn> reverseIterator(ByteBuffer start)
-    {
-        return ref.get().map.descendingMap().tailMap(start).values().iterator();
+        return new ColumnSlice.NavigableMapIterator(ref.get().map.descendingMap(), slices);
     }
 
     public boolean isInsertReversed()
@@ -303,12 +299,12 @@ public class AtomicSortedColumns implements ISortedColumns
 
         Holder(AbstractType<?> comparator)
         {
-            this(new SnapTreeMap<ByteBuffer, IColumn>(comparator), new DeletionInfo());
+            this(new SnapTreeMap<ByteBuffer, IColumn>(comparator), DeletionInfo.LIVE);
         }
 
         Holder(SortedMap<ByteBuffer, IColumn> columns)
         {
-            this(new SnapTreeMap<ByteBuffer, IColumn>(columns), new DeletionInfo());
+            this(new SnapTreeMap<ByteBuffer, IColumn>(columns), DeletionInfo.LIVE);
         }
 
         Holder(SnapTreeMap<ByteBuffer, IColumn> map, DeletionInfo deletionInfo)
@@ -342,41 +338,30 @@ public class AtomicSortedColumns implements ISortedColumns
         long addColumn(IColumn column, Allocator allocator)
         {
             ByteBuffer name = column.name();
-            IColumn oldColumn;
-            long sizeDelta = 0;
             while (true)
             {
-                oldColumn = map.putIfAbsent(name, column);
+                IColumn oldColumn = map.putIfAbsent(name, column);
                 if (oldColumn == null)
-                {
-                    sizeDelta += column.serializedSize();
-                    break;
-                }
+                    return column.dataSize();
 
                 if (oldColumn instanceof SuperColumn)
                 {
                     assert column instanceof SuperColumn;
-                    long previousSize = oldColumn.serializedSize();
+                    long previousSize = oldColumn.dataSize();
                     ((SuperColumn) oldColumn).putColumn((SuperColumn)column, allocator);
-                    sizeDelta += oldColumn.serializedSize() - previousSize;
-                    break;  // Delegated to SuperColumn
+                    return oldColumn.dataSize() - previousSize;
                 }
                 else
                 {
                     // calculate reconciled col from old (existing) col and new col
                     IColumn reconciledColumn = column.reconcile(oldColumn, allocator);
                     if (map.replace(name, oldColumn, reconciledColumn))
-                    {
-                        sizeDelta += reconciledColumn.serializedSize() - oldColumn.serializedSize();
-                        break;
-                    }
+                        return reconciledColumn.dataSize() - oldColumn.dataSize();
 
                     // We failed to replace column due to a concurrent update or a concurrent removal. Keep trying.
                     // (Currently, concurrent removal should not happen (only updates), but let us support that anyway.)
                 }
             }
-
-            return sizeDelta;
         }
 
         void retainAll(ISortedColumns columns)

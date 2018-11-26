@@ -18,6 +18,9 @@
 package org.apache.cassandra.config;
 
 import org.apache.cassandra.cache.SerializingCacheProvider;
+import org.apache.cassandra.config.EncryptionOptions.ClientEncryptionOptions;
+import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
+import org.apache.cassandra.io.util.NativeAllocator;
 
 /**
  * A class that contains configuration properties for the cassandra node it runs within.
@@ -126,10 +129,10 @@ public class Config
     public RequestSchedulerId request_scheduler_id;
     public RequestSchedulerOptions request_scheduler_options;
 
-    public EncryptionOptions server_encryption_options = new EncryptionOptions();
-    public EncryptionOptions client_encryption_options = new EncryptionOptions();
+    public ServerEncryptionOptions server_encryption_options = new ServerEncryptionOptions();
+    public ClientEncryptionOptions client_encryption_options = new ClientEncryptionOptions();
     // this encOptions is for backward compatibility (a warning is logged by DatabaseDescriptor)
-    public EncryptionOptions encryption_options;
+    public ServerEncryptionOptions encryption_options;
 
     public InternodeCompression internode_compression = InternodeCompression.none;
 
@@ -155,6 +158,7 @@ public class Config
     public volatile int row_cache_save_period = 0;
     public int row_cache_keys_to_save = Integer.MAX_VALUE;
     public String row_cache_provider = SerializingCacheProvider.class.getSimpleName();
+    public String memory_allocator = NativeAllocator.class.getSimpleName();
     public boolean populate_io_cache_on_flush = false;
 
     private static boolean loadYaml = true;

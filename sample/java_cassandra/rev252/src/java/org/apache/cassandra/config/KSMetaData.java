@@ -26,7 +26,6 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.locator.*;
 import org.apache.cassandra.service.StorageService;
@@ -85,15 +84,14 @@ public final class KSMetaData
                                                 CFMetaData.PeerEventsCf,
                                                 CFMetaData.HintsCf,
                                                 CFMetaData.IndexCf,
+                                                CFMetaData.SchemaTriggersCf,
                                                 CFMetaData.CounterIdCf,
                                                 CFMetaData.SchemaKeyspacesCf,
                                                 CFMetaData.SchemaColumnFamiliesCf,
                                                 CFMetaData.SchemaColumnsCf,
-                                                CFMetaData.OldStatusCf,
-                                                CFMetaData.OldHintsCf,
-                                                CFMetaData.OldMigrationsCf,
-                                                CFMetaData.OldSchemaCf);
-        return new KSMetaData(Table.SYSTEM_KS, LocalStrategy.class, Collections.<String, String>emptyMap(), true, cfDefs);
+                                                CFMetaData.CompactionLogCf,
+                                                CFMetaData.PaxosCf);
+        return new KSMetaData(Keyspace.SYSTEM_KS, LocalStrategy.class, Collections.<String, String>emptyMap(), true, cfDefs);
     }
 
     public static KSMetaData traceKeyspace()
@@ -183,7 +181,7 @@ public final class KSMetaData
         for (CFMetaData cfm : cfMetaData().values())
         {
             // Don't expose CF that cannot be correctly handle by thrift; see CASSANDRA-4377 for further details
-            if (!cfm.isThriftIncompatible())
+            if (cfm.isThriftCompatible())
                 cfDefs.add(cfm.toThrift());
         }
         KsDef ksdef = new KsDef(name, strategyClass.getName(), cfDefs);
@@ -206,7 +204,7 @@ public final class KSMetaData
         // Attempt to instantiate the ARS, which will throw a ConfigException if the strategy_options aren't fully formed
         TokenMetadata tmd = StorageService.instance.getTokenMetadata();
         IEndpointSnitch eps = DatabaseDescriptor.getEndpointSnitch();
-        AbstractReplicationStrategy.validateReplicationStrategyIgnoreUnexpected(name, strategyClass, tmd, eps, strategyOptions);
+        AbstractReplicationStrategy.validateReplicationStrategy(name, strategyClass, tmd, eps, strategyOptions);
 
         for (CFMetaData cfm : cfMetaData.values())
             cfm.validate();
@@ -217,28 +215,29 @@ public final class KSMetaData
 
     public KSMetaData reloadAttributes()
     {
-        Row ksDefRow = SystemTable.readSchemaRow(name);
+        Row ksDefRow = SystemKeyspace.readSchemaRow(name);
 
         if (ksDefRow.cf == null)
-            throw new RuntimeException(String.format("%s not found in the schema definitions table (%s).", name, SystemTable.SCHEMA_KEYSPACES_CF));
+            throw new RuntimeException(String.format("%s not found in the schema definitions keyspaceName (%s).", name, SystemKeyspace.SCHEMA_KEYSPACES_CF));
 
         return fromSchema(ksDefRow, Collections.<CFMetaData>emptyList());
     }
 
     public RowMutation dropFromSchema(long timestamp)
     {
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, SystemTable.getSchemaKSKey(name));
-        rm.delete(new QueryPath(SystemTable.SCHEMA_KEYSPACES_CF), timestamp);
-        rm.delete(new QueryPath(SystemTable.SCHEMA_COLUMNFAMILIES_CF), timestamp);
-        rm.delete(new QueryPath(SystemTable.SCHEMA_COLUMNS_CF), timestamp);
+        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, SystemKeyspace.getSchemaKSKey(name));
+        rm.delete(SystemKeyspace.SCHEMA_KEYSPACES_CF, timestamp);
+        rm.delete(SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF, timestamp);
+        rm.delete(SystemKeyspace.SCHEMA_COLUMNS_CF, timestamp);
+        rm.delete(SystemKeyspace.SCHEMA_TRIGGERS_CF, timestamp);
 
         return rm;
     }
 
     public RowMutation toSchema(long timestamp)
     {
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, SystemTable.getSchemaKSKey(name));
-        ColumnFamily cf = rm.addOrGet(SystemTable.SCHEMA_KEYSPACES_CF);
+        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, SystemKeyspace.getSchemaKSKey(name));
+        ColumnFamily cf = rm.addOrGet(SystemKeyspace.SCHEMA_KEYSPACES_CF);
 
         cf.addColumn(Column.create(durableWrites, timestamp, "durable_writes"));
         cf.addColumn(Column.create(strategyClass.getName(), timestamp, "strategy_class"));
@@ -311,7 +310,12 @@ public final class KSMetaData
         {
             Row columnRow = ColumnDefinition.readSchema(cfm.ksName, cfm.cfName);
             for (ColumnDefinition cd : ColumnDefinition.fromSchema(columnRow, cfm))
-                cfm.column_metadata.put(cd.name, cd);
+            {
+                // This may replace some existing definition coming from the old key, column and
+                // value aliases. But that's what we want (see CFMetaData.fromSchemaNoColumns).
+                cfm.addOrReplaceColumnDefinition(cd);
+            }
+            cfm.rebuild();
         }
 
         return cfms;

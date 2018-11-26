@@ -48,6 +48,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.dht.*;
+import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.gms.*;
 import org.apache.cassandra.io.sstable.SSTableDeletingTask;
 import org.apache.cassandra.io.sstable.SSTableLoader;
@@ -815,7 +816,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         Map<List<String>, List<String>> map = new HashMap<List<String>, List<String>>();
         for (Map.Entry<Range<Token>, List<InetAddress>> entry : getRangeToAddressMap(keyspace).entrySet())
         {
-            List<String> rpcaddrs = new ArrayList<String>();
+            List<String> rpcaddrs = new ArrayList<String>(entry.getValue().size());
             for (InetAddress endpoint: entry.getValue())
             {
                 rpcaddrs.add(getRpcaddress(endpoint));
@@ -863,9 +864,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public List<String> describeRingJMX(String keyspace) throws InvalidRequestException
     {
-        List<String> result = new ArrayList<String>();
+        List<TokenRange> tokenRanges = describeRing(keyspace);
+        List<String> result = new ArrayList<String>(tokenRanges.size());
 
-        for (TokenRange tokenRange : describeRing(keyspace))
+        for (TokenRange tokenRange : tokenRanges)
             result.add(tokenRange.toString());
 
         return result;
@@ -891,11 +893,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         for (Map.Entry<Range<Token>, List<InetAddress>> entry : getRangeToAddressMap(keyspace).entrySet())
         {
             Range range = entry.getKey();
-            List<String> endpoints = new ArrayList<String>();
-            List<String> rpc_endpoints = new ArrayList<String>();
-            List<EndpointDetails> epDetails = new ArrayList<EndpointDetails>();
+            List<InetAddress> addresses = entry.getValue();
+            List<String> endpoints = new ArrayList<String>(addresses.size());
+            List<String> rpc_endpoints = new ArrayList<String>(addresses.size());
+            List<EndpointDetails> epDetails = new ArrayList<EndpointDetails>(addresses.size());
 
-            for (InetAddress endpoint : entry.getValue())
+            for (InetAddress endpoint : addresses)
             {
                 EndpointDetails details = new EndpointDetails();
                 details.host = endpoint.getHostAddress();
@@ -1758,7 +1761,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
         else
         {
-            ArrayList<Table> t = new ArrayList<Table>();
+            ArrayList<Table> t = new ArrayList<Table>(tableNames.length);
             for (String table : tableNames)
                 t.add(getValidTable(table));
             tables = t;
@@ -1799,7 +1802,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
         else
         {
-            ArrayList<Table> tempTables = new ArrayList<Table>();
+            ArrayList<Table> tempTables = new ArrayList<Table>(tableNames.length);
             for(String table : tableNames)
                 tempTables.add(getValidTable(table));
             tables = tempTables;
@@ -1858,11 +1861,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * @param columnFamilies
      * @throws IOException
      */
-    public void forceTableRepair(final String tableName, final String... columnFamilies) throws IOException
+    public void forceTableRepair(final String tableName, boolean isSequential, final String... columnFamilies) throws IOException
     {
         if (Table.SYSTEM_TABLE.equals(tableName))
             return;
-
 
         Collection<Range<Token>> ranges = getLocalRanges(tableName);
         int cmd = nextRepairCommand.incrementAndGet();
@@ -1871,7 +1873,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         List<AntiEntropyService.RepairFuture> futures = new ArrayList<AntiEntropyService.RepairFuture>(ranges.size());
         for (Range<Token> range : ranges)
         {
-            AntiEntropyService.RepairFuture future = forceTableRepair(range, tableName, columnFamilies);
+            AntiEntropyService.RepairFuture future = forceTableRepair(range, tableName, isSequential, columnFamilies);
             futures.add(future);
             // wait for a session to be done with its differencing before starting the next one
             try
@@ -1906,12 +1908,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.info("Repair command #{} completed successfully", cmd);
     }
 
-    public void forceTableRepairPrimaryRange(final String tableName, final String... columnFamilies) throws IOException
+    public void forceTableRepairPrimaryRange(final String tableName, boolean isSequential, final String... columnFamilies) throws IOException
     {
         if (Table.SYSTEM_TABLE.equals(tableName))
             return;
 
-        AntiEntropyService.RepairFuture future = forceTableRepair(getLocalPrimaryRange(), tableName, columnFamilies);
+        AntiEntropyService.RepairFuture future = forceTableRepair(getLocalPrimaryRange(), tableName, isSequential, columnFamilies);
         try
         {
             future.get();
@@ -1923,7 +1925,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
     }
 
-    public AntiEntropyService.RepairFuture forceTableRepair(final Range<Token> range, final String tableName, final String... columnFamilies) throws IOException
+    public AntiEntropyService.RepairFuture forceTableRepair(final Range<Token> range, final String tableName, boolean isSequential, final String... columnFamilies) throws IOException
     {
         ArrayList<String> names = new ArrayList<String>();
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(tableName, columnFamilies))
@@ -1931,7 +1933,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             names.add(cfStore.getColumnFamilyName());
         }
 
-        return AntiEntropyService.instance.submitRepairSession(range, tableName, names.toArray(new String[names.size()]));
+        return AntiEntropyService.instance.submitRepairSession(range, tableName, isSequential, names.toArray(new String[names.size()]));
     }
 
     public void forceTerminateAllRepairSessions() {
@@ -1993,8 +1995,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         if (sortedTokens.isEmpty())
             return Collections.emptyList();
-        List<Range<Token>> ranges = new ArrayList<Range<Token>>();
         int size = sortedTokens.size();
+        List<Range<Token>> ranges = new ArrayList<Range<Token>>(size + 1);
         for (int i = 1; i < size; ++i)
         {
             Range<Token> range = new Range<Token>(sortedTokens.get(i - 1), sortedTokens.get(i));
@@ -2054,8 +2056,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public List<InetAddress> getLiveNaturalEndpoints(String table, RingPosition pos)
     {
-        List<InetAddress> liveEps = new ArrayList<InetAddress>();
         List<InetAddress> endpoints = Table.open(table).getReplicationStrategy().getNaturalEndpoints(pos);
+        List<InetAddress> liveEps = new ArrayList<InetAddress>(endpoints.size());
 
         for (InetAddress endpoint : endpoints)
         {
@@ -2678,10 +2680,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         if (list.isEmpty())
             return false;
+
         for (int i = 0; i < list.size() -1; i++)
         {
-            KSMetaData ksm1 = Schema.instance.getKSMetaData(Schema.instance.getNonSystemTables().get(i));
-            KSMetaData ksm2 = Schema.instance.getKSMetaData(Schema.instance.getNonSystemTables().get(i + 1));
+            KSMetaData ksm1 = Schema.instance.getKSMetaData(list.get(i));
+            KSMetaData ksm2 = Schema.instance.getKSMetaData(list.get(i + 1));
             if (!ksm1.strategyClass.equals(ksm2.strategyClass) ||
                     !Iterators.elementsEqual(ksm1.strategyOptions.entrySet().iterator(),
                                              ksm2.strategyOptions.entrySet().iterator()))
@@ -2973,7 +2976,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         List<DecoratedKey> keys = keySamples(ColumnFamilyStore.allUserDefined(), getLocalPrimaryRange());
 
-        List<String> sampledKeys = new ArrayList<String>();
+        List<String> sampledKeys = new ArrayList<String>(keys.size());
         for (DecoratedKey key : keys)
             sampledKeys.add(key.getToken().toString());
         return sampledKeys;

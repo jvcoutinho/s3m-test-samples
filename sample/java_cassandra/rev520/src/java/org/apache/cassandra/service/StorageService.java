@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,27 +15,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.service;
 
 import java.io.File;
-import java.io.IOError;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.Map.Entry;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
-import com.google.common.base.Supplier;
 import com.google.common.collect.*;
-
-import org.apache.cassandra.metrics.ClientRequestMetrics;
 import org.apache.log4j.Level;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
@@ -54,22 +48,17 @@ import org.apache.cassandra.gms.*;
 import org.apache.cassandra.io.sstable.SSTableDeletingTask;
 import org.apache.cassandra.io.sstable.SSTableLoader;
 import org.apache.cassandra.io.util.FileUtils;
-import org.apache.cassandra.locator.AbstractReplicationStrategy;
-import org.apache.cassandra.locator.DynamicEndpointSnitch;
-import org.apache.cassandra.locator.IEndpointSnitch;
-import org.apache.cassandra.locator.TokenMetadata;
+import org.apache.cassandra.locator.*;
+import org.apache.cassandra.metrics.ClientRequestMetrics;
 import org.apache.cassandra.net.IAsyncResult;
-import org.apache.cassandra.net.Message;
+import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.net.ResponseVerbHandler;
+import org.apache.cassandra.service.AntiEntropyService.RepairFuture;
 import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
 import org.apache.cassandra.streaming.*;
 import org.apache.cassandra.thrift.*;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.NodeId;
-import org.apache.cassandra.utils.Pair;
-import org.apache.cassandra.utils.OutputHandler;
-import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.cassandra.utils.*;
 
 /**
  * This abstraction contains the token/identifier of this node
@@ -79,91 +68,16 @@ import org.apache.cassandra.utils.WrappedRunnable;
  */
 public class StorageService implements IEndpointStateChangeSubscriber, StorageServiceMBean
 {
-    private static Logger logger_ = LoggerFactory.getLogger(StorageService.class);
+    private static final Logger logger = LoggerFactory.getLogger(StorageService.class);
 
     public static final int RING_DELAY = getRingDelay(); // delay after which we assume ring has stablized
-
-    /* All verb handler identifiers */
-    public enum Verb
-    {
-        MUTATION,
-        BINARY, // Deprecated
-        READ_REPAIR,
-        READ,
-        REQUEST_RESPONSE, // client-initiated reads and writes
-        STREAM_INITIATE, // Deprecated
-        STREAM_INITIATE_DONE, // Deprecated
-        STREAM_REPLY,
-        STREAM_REQUEST,
-        RANGE_SLICE,
-        BOOTSTRAP_TOKEN,
-        TREE_REQUEST,
-        TREE_RESPONSE,
-        JOIN, // Deprecated
-        GOSSIP_DIGEST_SYN,
-        GOSSIP_DIGEST_ACK,
-        GOSSIP_DIGEST_ACK2,
-        DEFINITIONS_ANNOUNCE, // Deprecated
-        DEFINITIONS_UPDATE,
-        TRUNCATE,
-        SCHEMA_CHECK,
-        INDEX_SCAN, // Deprecated
-        REPLICATION_FINISHED,
-        INTERNAL_RESPONSE, // responses to internal calls
-        COUNTER_MUTATION,
-        STREAMING_REPAIR_REQUEST,
-        STREAMING_REPAIR_RESPONSE,
-        SNAPSHOT, // Similar to nt snapshot
-        MIGRATION_REQUEST,
-        GOSSIP_SHUTDOWN,
-        // use as padding for backwards compatability where a previous version needs to validate a verb from the future.
-        UNUSED_1,
-        UNUSED_2,
-        UNUSED_3,
-        ;
-        // remember to add new verbs at the end, since we serialize by ordinal
-    }
-    public static final Verb[] VERBS = Verb.values();
-
-    public static final EnumMap<StorageService.Verb, Stage> verbStages = new EnumMap<StorageService.Verb, Stage>(StorageService.Verb.class)
-    {{
-        put(Verb.MUTATION, Stage.MUTATION);
-        put(Verb.BINARY, Stage.MUTATION);
-        put(Verb.READ_REPAIR, Stage.MUTATION);
-        put(Verb.TRUNCATE, Stage.MUTATION);
-        put(Verb.READ, Stage.READ);
-        put(Verb.REQUEST_RESPONSE, Stage.REQUEST_RESPONSE);
-        put(Verb.STREAM_REPLY, Stage.MISC); // TODO does this really belong on misc? I've just copied old behavior here
-        put(Verb.STREAM_REQUEST, Stage.STREAM);
-        put(Verb.RANGE_SLICE, Stage.READ);
-        put(Verb.BOOTSTRAP_TOKEN, Stage.MISC);
-        put(Verb.TREE_REQUEST, Stage.ANTI_ENTROPY);
-        put(Verb.TREE_RESPONSE, Stage.ANTI_ENTROPY);
-        put(Verb.STREAMING_REPAIR_REQUEST, Stage.ANTI_ENTROPY);
-        put(Verb.STREAMING_REPAIR_RESPONSE, Stage.ANTI_ENTROPY);
-        put(Verb.GOSSIP_DIGEST_ACK, Stage.GOSSIP);
-        put(Verb.GOSSIP_DIGEST_ACK2, Stage.GOSSIP);
-        put(Verb.GOSSIP_DIGEST_SYN, Stage.GOSSIP);
-        put(Verb.GOSSIP_SHUTDOWN, Stage.GOSSIP);
-        put(Verb.DEFINITIONS_UPDATE, Stage.MIGRATION);
-        put(Verb.SCHEMA_CHECK, Stage.MIGRATION);
-        put(Verb.MIGRATION_REQUEST, Stage.MIGRATION);
-        put(Verb.INDEX_SCAN, Stage.READ);
-        put(Verb.REPLICATION_FINISHED, Stage.MISC);
-        put(Verb.INTERNAL_RESPONSE, Stage.INTERNAL_RESPONSE);
-        put(Verb.COUNTER_MUTATION, Stage.MUTATION);
-        put(Verb.SNAPSHOT, Stage.MISC);
-        put(Verb.UNUSED_1, Stage.INTERNAL_RESPONSE);
-        put(Verb.UNUSED_2, Stage.INTERNAL_RESPONSE);
-        put(Verb.UNUSED_3, Stage.INTERNAL_RESPONSE);
-    }};
 
     private static int getRingDelay()
     {
         String newdelay = System.getProperty("cassandra.ring_delay_ms");
         if (newdelay != null)
         {
-            logger_.info("Overriding RING_DELAY to {}ms", newdelay);
+            logger.info("Overriding RING_DELAY to {}ms", newdelay);
             return Integer.parseInt(newdelay);
         }
         else
@@ -179,8 +93,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * This pool is used by tasks that can have longer execution times, and usually are non periodic.
      */
     public static final DebuggableScheduledThreadPoolExecutor tasks = new DebuggableScheduledThreadPoolExecutor("NonPeriodicTasks");
-
-    /**
+/**
      * tasks that do not need to be waited for on shutdown/drain
      */
     public static final DebuggableScheduledThreadPoolExecutor optionalTasks = new DebuggableScheduledThreadPoolExecutor("OptionalTasks");
@@ -190,7 +103,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /* This abstraction maintains the token/endpoint metadata information */
-    private TokenMetadata tokenMetadata_ = new TokenMetadata();
+    private TokenMetadata tokenMetadata = new TokenMetadata();
 
     public VersionedValue.VersionedValueFactory valueFactory = new VersionedValue.VersionedValueFactory(getPartitioner());
 
@@ -206,6 +119,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return getRangesForEndpoint(table, FBUtilities.getBroadcastAddress());
     }
 
+    public Collection<Range<Token>> getLocalPrimaryRanges()
+    {
+        return getPrimaryRangesForEndpoint(FBUtilities.getBroadcastAddress());
+    }
+
+    @Deprecated
     public Range<Token> getLocalPrimaryRange()
     {
         return getPrimaryRangeForEndpoint(FBUtilities.getBroadcastAddress());
@@ -249,13 +168,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /** This method updates the local token on disk  */
-    public void setToken(Token token)
+    public void setTokens(Collection<Token> tokens)
     {
-        if (logger_.isDebugEnabled())
-            logger_.debug("Setting token to {}", token);
-        SystemTable.updateToken(token);
-        tokenMetadata_.updateNormalToken(token, FBUtilities.getBroadcastAddress());
-        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.normal(getLocalToken()));
+        if (logger.isDebugEnabled())
+            logger.debug("Setting tokens to {}", tokens);
+        SystemTable.updateTokens(tokens);
+        tokenMetadata.updateNormalTokens(tokens, FBUtilities.getBroadcastAddress());
+        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS,
+                                                   valueFactory.normal(getLocalTokens(), SystemTable.getLocalHostId()));
         setMode(Mode.NORMAL, false);
     }
 
@@ -272,36 +192,36 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
 
         /* register the verb handlers */
-        MessagingService.instance().registerVerbHandlers(Verb.MUTATION, new RowMutationVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.READ_REPAIR, new ReadRepairVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.READ, new ReadVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.RANGE_SLICE, new RangeSliceVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.INDEX_SCAN, new IndexScanVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.COUNTER_MUTATION, new CounterMutationVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.TRUNCATE, new TruncateVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.MUTATION, new RowMutationVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.READ_REPAIR, new ReadRepairVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.READ, new ReadVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.RANGE_SLICE, new RangeSliceVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.INDEX_SCAN, new IndexScanVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.COUNTER_MUTATION, new CounterMutationVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.TRUNCATE, new TruncateVerbHandler());
 
         // see BootStrapper for a summary of how the bootstrap verbs interact
-        MessagingService.instance().registerVerbHandlers(Verb.BOOTSTRAP_TOKEN, new BootStrapper.BootstrapTokenVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.STREAM_REQUEST, new StreamRequestVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.STREAM_REPLY, new StreamReplyVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.REPLICATION_FINISHED, new ReplicationFinishedVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.REQUEST_RESPONSE, new ResponseVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.INTERNAL_RESPONSE, new ResponseVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.TREE_REQUEST, new TreeRequestVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.TREE_RESPONSE, new AntiEntropyService.TreeResponseVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.STREAMING_REPAIR_REQUEST, new StreamingRepairTask.StreamingRepairRequest());
-        MessagingService.instance().registerVerbHandlers(Verb.STREAMING_REPAIR_RESPONSE, new StreamingRepairTask.StreamingRepairResponse());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.BOOTSTRAP_TOKEN, new BootStrapper.BootstrapTokenVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.STREAM_REQUEST, new StreamRequestVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.STREAM_REPLY, new StreamReplyVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.REPLICATION_FINISHED, new ReplicationFinishedVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.REQUEST_RESPONSE, new ResponseVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.INTERNAL_RESPONSE, new ResponseVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.TREE_REQUEST, new TreeRequestVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.TREE_RESPONSE, new AntiEntropyService.TreeResponseVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.STREAMING_REPAIR_REQUEST, new StreamingRepairTask.StreamingRepairRequest());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.STREAMING_REPAIR_RESPONSE, new StreamingRepairTask.StreamingRepairResponse());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.GOSSIP_SHUTDOWN, new GossipShutdownVerbHandler());
 
-        MessagingService.instance().registerVerbHandlers(Verb.GOSSIP_DIGEST_SYN, new GossipDigestSynVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK, new GossipDigestAckVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK2, new GossipDigestAck2VerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.GOSSIP_SHUTDOWN, new GossipShutdownVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.GOSSIP_DIGEST_SYN, new GossipDigestSynVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.GOSSIP_DIGEST_ACK, new GossipDigestAckVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.GOSSIP_DIGEST_ACK2, new GossipDigestAck2VerbHandler());
 
-        MessagingService.instance().registerVerbHandlers(Verb.DEFINITIONS_UPDATE, new DefinitionsUpdateVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.SCHEMA_CHECK, new SchemaCheckVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.MIGRATION_REQUEST, new MigrationRequestVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.DEFINITIONS_UPDATE, new DefinitionsUpdateVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.SCHEMA_CHECK, new SchemaCheckVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.MIGRATION_REQUEST, new MigrationRequestVerbHandler());
 
-        MessagingService.instance().registerVerbHandlers(Verb.SNAPSHOT, new SnapshotVerbHandler());
+        MessagingService.instance().registerVerbHandlers(MessagingService.Verb.SNAPSHOT, new SnapshotVerbHandler());
 
         // spin up the streaming service so it is available for jmx tools.
         if (StreamingService.instance == null)
@@ -318,7 +238,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         if (initialized)
         {
-            logger_.warn("Stopping gossip by operator request");
+            logger.warn("Stopping gossip by operator request");
             Gossiper.instance.stop();
             initialized = false;
         }
@@ -329,7 +249,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         if (!initialized)
         {
-            logger_.warn("Starting gossip by operator request");
+            logger.warn("Starting gossip by operator request");
             Gossiper.instance.start((int)(System.currentTimeMillis() / 1000));
             initialized = true;
         }
@@ -340,18 +260,18 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         if (daemon == null)
         {
-            throw new IllegalStateException("No configured RPC daemon");
+            throw new IllegalStateException("No configured daemon");
         }
-        daemon.startRPCServer();
+        daemon.thriftServer.start();
     }
 
     public void stopRPCServer()
     {
         if (daemon == null)
         {
-            throw new IllegalStateException("No configured RPC daemon");
+            throw new IllegalStateException("No configured daemon");
         }
-        daemon.stopRPCServer();
+        daemon.thriftServer.stop();
     }
 
     public boolean isRPCServerRunning()
@@ -360,7 +280,34 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             return false;
         }
-        return daemon.isRPCServerRunning();
+        return daemon.thriftServer.isRunning();
+    }
+
+    public void startNativeTransport()
+    {
+        if (daemon == null)
+        {
+            throw new IllegalStateException("No configured daemon");
+        }
+        daemon.nativeServer.start();
+    }
+
+    public void stopNativeTransport()
+    {
+        if (daemon == null)
+        {
+            throw new IllegalStateException("No configured  daemon");
+        }
+        daemon.nativeServer.stop();
+    }
+
+    public boolean isNativeTransportRunning()
+    {
+        if (daemon == null)
+        {
+            return false;
+        }
+        return daemon.nativeServer.isRunning();
     }
 
     public void stopClient()
@@ -394,10 +341,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
         initialized = true;
         isClientMode = true;
-        logger_.info("Starting up client gossip");
+        logger.info("Starting up client gossip");
         setMode(Mode.CLIENT, false);
         Gossiper.instance.register(this);
         Gossiper.instance.start((int)(System.currentTimeMillis() / 1000)); // needed for node-ring gathering.
+        Gossiper.instance.addLocalApplicationState(ApplicationState.NET_VERSION, valueFactory.networkVersion());
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
 
         // sleep a while to allow gossip to warm up (the other nodes need to know about this one before they can reply).
@@ -405,9 +353,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             Thread.sleep(delay);
         }
-        catch (Exception ex)
+        catch (InterruptedException e)
         {
-            throw new IOError(ex);
+            throw new AssertionError(e);
         }
 
         Schema.instance.updateVersionAndAnnounce();
@@ -420,9 +368,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public synchronized void initServer(int delay) throws IOException, ConfigurationException
     {
-        logger_.info("Cassandra version: " + FBUtilities.getReleaseVersionString());
-        logger_.info("Thrift API version: " + Constants.VERSION);
-        logger_.info("CQL supported versions: " + StringUtils.join(ClientState.getCQLSupportedVersion(), ",") + " (default: " + ClientState.DEFAULT_CQL_VERSION + ")");
+        logger.info("Cassandra version: " + FBUtilities.getReleaseVersionString());
+        logger.info("Thrift API version: " + Constants.VERSION);
+        logger.info("CQL supported versions: " + StringUtils.join(ClientState.getCQLSupportedVersion(), ",") + " (default: " + ClientState.DEFAULT_CQL_VERSION + ")");
 
         if (initialized)
         {
@@ -452,25 +400,26 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         if (Boolean.parseBoolean(System.getProperty("cassandra.load_ring_state", "true")))
         {
-            logger_.info("Loading persisted ring state");
-            for (Map.Entry<Token, InetAddress> entry : SystemTable.loadTokens().entrySet())
+            logger.info("Loading persisted ring state");
+            Multimap<InetAddress, Token> loadedTokens = SystemTable.loadTokens();
+            for (InetAddress ep : loadedTokens.keySet())
             {
-                if (entry.getValue() == FBUtilities.getLocalAddress())
+                if (ep.equals(FBUtilities.getBroadcastAddress()))
                 {
                     // entry has been mistakenly added, delete it
-                    SystemTable.removeToken(entry.getKey());
+                    SystemTable.removeTokens(loadedTokens.get(ep));
                 }
                 else
                 {
-                    tokenMetadata_.updateNormalToken(entry.getKey(), entry.getValue());
-                    Gossiper.instance.addSavedEndpoint(entry.getValue());
+                    tokenMetadata.updateNormalTokens(loadedTokens.get(ep), ep);
+                    Gossiper.instance.addSavedEndpoint(ep);
                 }
             }
         }
 
         if (Boolean.parseBoolean(System.getProperty("cassandra.renew_counter_id", "false")))
         {
-            logger_.info("Renewing local node id (as requested)");
+            logger.info("Renewing local node id (as requested)");
             NodeId.renewLocalId();
         }
 
@@ -516,7 +465,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 // wait for miscellaneous tasks like sstable and commitlog segment deletion
                 tasks.shutdown();
                 if (!tasks.awaitTermination(1, TimeUnit.MINUTES))
-                    logger_.warn("Miscellaneous task executor still busy after one minute; proceeding with shutdown");
+                    logger.warn("Miscellaneous task executor still busy after one minute; proceeding with shutdown");
             }
         }, "StorageServiceShutdownHook");
         Runtime.getRuntime().addShutdownHook(drainOnShutdown);
@@ -527,15 +476,17 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
         else
         {
-            logger_.info("Not joining ring as requested. Use JMX (StorageService->joinRing()) to initiate ring joining");
+            logger.info("Not joining ring as requested. Use JMX (StorageService->joinRing()) to initiate ring joining");
         }
     }
 
     private void joinTokenRing(int delay) throws IOException, org.apache.cassandra.config.ConfigurationException
     {
-        logger_.info("Starting up server gossip");
+        logger.info("Starting up server gossip");
         joined = true;
 
+        // Seed the host ID-to-endpoint map with our own ID.
+        getTokenMetadata().updateHostId(SystemTable.getLocalHostId(), FBUtilities.getBroadcastAddress());
 
         // have to start the gossip service before we can see any info on other nodes.  this is necessary
         // for bootstrap to get the load info it needs.
@@ -543,11 +494,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         Gossiper.instance.register(this);
         Gossiper.instance.register(migrationManager);
         Gossiper.instance.start(SystemTable.incrementAndGetGeneration()); // needed for node-ring gathering.
+        // gossip network proto version
+        Gossiper.instance.addLocalApplicationState(ApplicationState.NET_VERSION, valueFactory.networkVersion());
         // gossip schema version when gossiper is running
         Schema.instance.updateVersionAndAnnounce();
         // add rpc listening info
         Gossiper.instance.addLocalApplicationState(ApplicationState.RPC_ADDRESS, valueFactory.rpcaddress(DatabaseDescriptor.getRpcAddress()));
-        if (null != DatabaseDescriptor.getReplaceToken())
+        if (0 != DatabaseDescriptor.getReplaceTokens().size())
             Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.hibernate(true));
 
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
@@ -563,7 +516,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             // wait a couple gossip rounds so our schema check has something to go by
             FBUtilities.sleep(2 * Gossiper.intervalInMillis);
         }
-        for (Entry<InetAddress, EndpointState> entry : Gossiper.instance.getEndpointStates())
+        for (Map.Entry<InetAddress, EndpointState> entry : Gossiper.instance.getEndpointStates())
         {
             if (entry.getKey().equals(FBUtilities.getBroadcastAddress()))
             {
@@ -586,15 +539,15 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // The one exception is if after the above sleep we still have no schema information, we'll assume
         // we're part of a fresh cluster start, and also skip bootstrap.  This is less confusing for new users,
         // as well as avoiding the nonsensical state of trying to stream from cluster with no active peers.
-        Token<?> token;
-        InetAddress current = null;
-        logger_.debug("Bootstrap variables: %s %s %s %s",
+        Set<InetAddress> current = new HashSet<InetAddress>();
+        Collection<Token> tokens;
+        logger.debug("Bootstrap variables: %s %s %s %s",
                       new Object[] {DatabaseDescriptor.isAutoBootstrap(), SystemTable.bootstrapInProgress(), SystemTable.bootstrapComplete(), schemaPresent});
         if (DatabaseDescriptor.isAutoBootstrap()
             && (SystemTable.bootstrapInProgress() || (!SystemTable.bootstrapComplete() && schemaPresent)))
         {
             if (SystemTable.bootstrapInProgress())
-                logger_.warn("Detected previous bootstrap failure; retrying");
+                logger.warn("Detected previous bootstrap failure; retrying");
             else
                 SystemTable.setBootstrapState(SystemTable.BootstrapState.IN_PROGRESS);
             setMode(Mode.JOINING, "waiting for ring information", true);
@@ -624,18 +577,18 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             setMode(Mode.JOINING, "schema complete, ready to bootstrap", true);
 
 
-            if (logger_.isDebugEnabled())
-                logger_.debug("... got ring + schema info");
+            if (logger.isDebugEnabled())
+                logger.debug("... got ring + schema info");
 
-            if (DatabaseDescriptor.getReplaceToken() == null)
+            if (DatabaseDescriptor.getReplaceTokens().size() == 0)
             {
-                if (tokenMetadata_.isMember(FBUtilities.getBroadcastAddress()))
+                if (tokenMetadata.isMember(FBUtilities.getBroadcastAddress()))
                 {
                     String s = "This node is already a member of the token ring; bootstrap aborted. (If replacing a dead node, remove the old one from the ring first.)";
                     throw new UnsupportedOperationException(s);
                 }
                 setMode(Mode.JOINING, "getting bootstrap token", true);
-                token = BootStrapper.getBootstrapToken(tokenMetadata_, LoadBroadcaster.instance.getLoadInfo());
+                tokens = BootStrapper.getBootstrapTokens(tokenMetadata, LoadBroadcaster.instance.getLoadInfo());
             }
             else
             {
@@ -649,37 +602,104 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 {
                     throw new AssertionError(e);
                 }
-                token = StorageService.getPartitioner().getTokenFactory().fromString(DatabaseDescriptor.getReplaceToken());
+                tokens = new ArrayList<Token>();
+                for (String token : DatabaseDescriptor.getReplaceTokens())
+                    tokens.add(StorageService.getPartitioner().getTokenFactory().fromString(token));
+
                 // check for operator errors...
-                current = tokenMetadata_.getEndpoint(token);
-                if (null != current && Gossiper.instance.getEndpointStateForEndpoint(current).getUpdateTimestamp() > (System.currentTimeMillis() - delay))
-                    throw new UnsupportedOperationException("Cannnot replace a token for a Live node... ");
-                setMode(Mode.JOINING, "Replacing a node with token: " + token, true);
+                for (Token token : tokens)
+                {
+                    InetAddress existing = tokenMetadata.getEndpoint(token);
+                    if (existing != null)
+                    {
+                        if (Gossiper.instance.getEndpointStateForEndpoint(existing).getUpdateTimestamp() > (System.currentTimeMillis() - delay))
+                            throw new UnsupportedOperationException("Cannnot replace a token for a Live node... ");
+                        current.add(existing);
+                    }
+                }
+
+                setMode(Mode.JOINING, "Replacing a node with token: " + tokens, true);
             }
 
-            bootstrap(token);
+            bootstrap(tokens);
             assert !isBootstrapMode; // bootstrap will block until finished
         }
         else
         {
-            token = SystemTable.getSavedToken();
-            if (token == null)
+            tokens = SystemTable.getSavedTokens();
+            if (tokens.isEmpty())
             {
-                String initialToken = DatabaseDescriptor.getInitialToken();
-                if (initialToken == null)
+                Collection<String> initialTokens = DatabaseDescriptor.getInitialTokens();
+                if (initialTokens.size() < 1)
                 {
-                    token = getPartitioner().getRandomToken();
-                    logger_.warn("Generated random token " + token + ". Random tokens will result in an unbalanced ring; see http://wiki.apache.org/cassandra/Operations");
+                    tokens = BootStrapper.getRandomTokens(tokenMetadata, DatabaseDescriptor.getNumTokens());
+                    if (DatabaseDescriptor.getNumTokens() == 1)
+                        logger.warn("Generated random token " + tokens + ". Random tokens will result in an unbalanced ring; see http://wiki.apache.org/cassandra/Operations");
+                    else
+                        logger.info("Generated random tokens.");
                 }
                 else
                 {
-                    token = getPartitioner().getTokenFactory().fromString(initialToken);
-                    logger_.info("Saved token not found. Using " + token + " from configuration");
+                    tokens = new ArrayList<Token>();
+                    for (String token : initialTokens)
+                        tokens.add(getPartitioner().getTokenFactory().fromString(token));
+                    logger.info("Saved token not found. Using " + tokens + " from configuration");
                 }
             }
             else
             {
-                logger_.info("Using saved token " + token);
+                // if we were already bootstrapped with 1 token but num_tokens is set higher in the config,
+                // then we need to migrate to multi-token
+                if (tokens.size() == 1 && DatabaseDescriptor.getNumTokens() > 1)
+                {
+                    // wait for ring info
+                    logger.info("Sleeping for ring delay (" + delay + "ms)");
+                    try
+                    {
+                        Thread.sleep(delay);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        throw new AssertionError(e);
+                    }
+                    logger.info("Calculating new tokens");
+                    // calculate num_tokens tokens evenly spaced in the range (left, right]
+                    Token right = tokens.iterator().next();
+                    TokenMetadata clone = tokenMetadata.cloneOnlyTokenMap();
+                    clone.updateNormalToken(right, FBUtilities.getBroadcastAddress());
+                    Token left = clone.getPredecessor(right);
+
+                    // get (num_tokens - 1) tokens spaced evenly, and the last token will be our current token (right)
+                    for (int tok = 1; tok < DatabaseDescriptor.getNumTokens(); ++tok)
+                    {
+                        Token l = left;
+                        Token r = right;
+                        // iteratively calculate the location of the token using midpoint
+                        // num iterations is number of bits in IEE754 mantissa (including implicit leading 1)
+                        // we stop early for terminating fractions
+                        // TODO: alternatively we could add an interpolate() method to IPartitioner
+                        double frac = (double)tok / (double)DatabaseDescriptor.getNumTokens();
+                        Token midpoint = getPartitioner().midpoint(l, r);
+                        for (int i = 0; i < 53; ++i)
+                        {
+                            frac *= 2;
+                            if (frac == 1.0) /* not a bug */
+                                break;
+                            else if (frac > 1.0)
+                            {
+                                l = midpoint;
+                                frac -= 1.0;
+                            }
+                            else
+                                r = midpoint;
+                            midpoint = getPartitioner().midpoint(l, r);
+                        }
+                        tokens.add(midpoint);
+                    }
+                    logger.info("Split previous range (" + left + ", " + right + "] into " + tokens);
+                }
+                else
+                    logger.info("Using saved token " + tokens);
             }
         }
 
@@ -687,33 +707,34 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             // start participating in the ring.
             SystemTable.setBootstrapState(SystemTable.BootstrapState.COMPLETED);
-            setToken(token);
+            setTokens(tokens);
             // remove the existing info about the replaced node.
-            if (current != null)
-                Gossiper.instance.replacedEndpoint(current);
-            logger_.info("Bootstrap/Replace/Move completed! Now serving reads.");
-            assert tokenMetadata_.sortedTokens().size() > 0;
+            if (!current.isEmpty())
+                for (InetAddress existing : current)
+                    Gossiper.instance.replacedEndpoint(existing);
+            logger.info("Bootstrap/Replace/Move completed! Now serving reads.");
+            assert tokenMetadata.sortedTokens().size() > 0;
         }
         else
         {
-            logger_.info("Bootstrap complete, but write survey mode is active, not becoming an active ring member. Use JMX (StorageService->joinRing()) to finalize ring joining.");
+            logger.info("Bootstrap complete, but write survey mode is active, not becoming an active ring member. Use JMX (StorageService->joinRing()) to finalize ring joining.");
         }
     }
 
-    public synchronized void joinRing() throws IOException, org.apache.cassandra.config.ConfigurationException
+    public synchronized void joinRing() throws IOException, ConfigurationException
     {
         if (!joined)
         {
-            logger_.info("Joining ring by operator request");
+            logger.info("Joining ring by operator request");
             joinTokenRing(0);
         }
         else if (isSurveyMode)
         {
-            setToken(SystemTable.getSavedToken());
+            setTokens(SystemTable.getSavedTokens());
             SystemTable.setBootstrapState(SystemTable.BootstrapState.COMPLETED);
             isSurveyMode = false;
-            logger_.info("Leaving write survey mode and joining ring at operator request");
-            assert tokenMetadata_.sortedTokens().size() > 0;
+            logger.info("Leaving write survey mode and joining ring at operator request");
+            assert tokenMetadata.sortedTokens().size() > 0;
         }
     }
 
@@ -724,9 +745,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public void rebuild(String sourceDc)
     {
-        logger_.info("rebuild from dc: {}", sourceDc == null ? "(any dc)" : sourceDc);
+        logger.info("rebuild from dc: {}", sourceDc == null ? "(any dc)" : sourceDc);
 
-        RangeStreamer streamer = new RangeStreamer(tokenMetadata_, FBUtilities.getBroadcastAddress(), OperationType.REBUILD);
+        RangeStreamer streamer = new RangeStreamer(tokenMetadata, FBUtilities.getBroadcastAddress(), OperationType.REBUILD);
         streamer.addSourceFilter(new RangeStreamer.FailureDetectorSourceFilter(FailureDetector.instance));
         if (sourceDc != null)
             streamer.addSourceFilter(new RangeStreamer.SingleDatacenterFilter(DatabaseDescriptor.getEndpointSnitch(), sourceDc));
@@ -740,7 +761,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     public void setStreamThroughputMbPerSec(int value)
     {
         DatabaseDescriptor.setStreamThroughputOutboundMegabitsPerSec(value);
-        logger_.info("setstreamthroughput: throttle set to {}", value);
+        logger.info("setstreamthroughput: throttle set to {}", value);
     }
 
     public int getStreamThroughputMbPerSec()
@@ -778,19 +799,20 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         operationMode = m;
         String logMsg = msg == null ? m.toString() : String.format("%s: %s", m, msg);
         if (log)
-            logger_.info(logMsg);
+            logger.info(logMsg);
         else
-            logger_.debug(logMsg);
+            logger.debug(logMsg);
     }
 
-    private void bootstrap(Token token) throws IOException
+    private void bootstrap(Collection<Token> tokens) throws IOException
     {
         isBootstrapMode = true;
-        SystemTable.updateToken(token); // DON'T use setToken, that makes us part of the ring locally which is incorrect until we are done bootstrapping
-        if (null == DatabaseDescriptor.getReplaceToken())
+        SystemTable.updateTokens(tokens); // DON'T use setToken, that makes us part of the ring locally which is incorrect until we are done bootstrapping
+        if (0 == DatabaseDescriptor.getReplaceTokens().size())
         {
             // if not an existing token then bootstrap
-            Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.bootstrapping(token));
+            Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS,
+                                                       valueFactory.bootstrapping(tokens, SystemTable.getLocalHostId()));
             setMode(Mode.JOINING, "sleeping " + RING_DELAY + " ms for pending range setup", true);
             try
             {
@@ -804,10 +826,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         else
         {
             // Dont set any state for the node which is bootstrapping the existing token...
-            tokenMetadata_.updateNormalToken(token, FBUtilities.getBroadcastAddress());
+            tokenMetadata.updateNormalTokens(tokens, FBUtilities.getBroadcastAddress());
         }
         setMode(Mode.JOINING, "Starting to bootstrap...", true);
-        new BootStrapper(FBUtilities.getBroadcastAddress(), token, tokenMetadata_).bootstrap(); // handles token update
+        new BootStrapper(FBUtilities.getBroadcastAddress(), tokens, tokenMetadata).bootstrap(); // handles token update
     }
 
     public boolean isBootstrapMode()
@@ -817,7 +839,29 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public TokenMetadata getTokenMetadata()
     {
-        return tokenMetadata_;
+        return tokenMetadata;
+    }
+
+    /**
+     * Gossip about the known severity of the events in this node
+     */
+    public synchronized boolean reportSeverity(double incr)
+    {
+        if (!Gossiper.instance.isEnabled())
+            return false;
+        double update = getSeverity(FBUtilities.getBroadcastAddress()) + incr;
+        VersionedValue updated = StorageService.instance.valueFactory.severity(update);
+        Gossiper.instance.addLocalApplicationState(ApplicationState.SEVERITY, updated);
+        return true;
+    }
+    
+    public double getSeverity(InetAddress endpoint)
+    {
+        VersionedValue event;
+        EndpointState state = Gossiper.instance.getEndpointStateForEndpoint(endpoint);
+        if (state != null && (event = state.getApplicationState(ApplicationState.SEVERITY)) != null)
+            return Double.parseDouble(event.value);
+        return 0.0;
     }
 
     /**
@@ -880,7 +924,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             keyspace = Schema.instance.getNonSystemTables().get(0);
 
         Map<List<String>, List<String>> map = new HashMap<List<String>, List<String>>();
-        for (Map.Entry<Range<Token>, Collection<InetAddress>> entry : tokenMetadata_.getPendingRanges(keyspace).entrySet())
+        for (Map.Entry<Range<Token>, Collection<InetAddress>> entry : tokenMetadata.getPendingRanges(keyspace).entrySet())
         {
             List<InetAddress> l = new ArrayList<InetAddress>(entry.getValue());
             map.put(entry.getKey().asList(), stringify(l));
@@ -895,7 +939,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (keyspace == null)
             keyspace = Schema.instance.getNonSystemTables().get(0);
 
-        List<Range<Token>> ranges = getAllRanges(tokenMetadata_.sortedTokens());
+        List<Range<Token>> ranges = getAllRanges(tokenMetadata.sortedTokens());
         return constructRangeToEndpointMap(keyspace, ranges);
     }
 
@@ -969,7 +1013,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public Map<String, String> getTokenToEndpointMap()
     {
-        Map<Token, InetAddress> mapInetAddress = tokenMetadata_.getNormalAndBootstrappingTokenToEndpointMap();
+        Map<Token, InetAddress> mapInetAddress = tokenMetadata.getNormalAndBootstrappingTokenToEndpointMap();
         // in order to preserve tokens in ascending order, we use LinkedHashMap here
         Map<String, String> mapString = new LinkedHashMap<String, String>(mapInetAddress.size());
         List<Token> tokens = new ArrayList<Token>(mapInetAddress.keySet());
@@ -979,6 +1023,19 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             mapString.put(token.toString(), mapInetAddress.get(token).getHostAddress());
         }
         return mapString;
+    }
+
+    public String getLocalHostId()
+    {
+        return getTokenMetadata().getHostId(FBUtilities.getBroadcastAddress()).toString();
+    }
+
+    public Map<String, String> getHostIdMap()
+    {
+        Map<String, String> mapOut = new HashMap<String, String>();
+        for (Map.Entry<InetAddress, UUID> entry : getTokenMetadata().getEndpointToHostIdMapForReading().entrySet())
+            mapOut.put(entry.getKey().getHostAddress(), entry.getValue().toString());
+        return mapOut;
     }
 
     /**
@@ -995,25 +1052,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             rangeToEndpointMap.put(range, Table.open(keyspace).getReplicationStrategy().getNaturalEndpoints(range.right));
         }
         return rangeToEndpointMap;
-    }
-
-    private Map<InetAddress, Collection<Range<Token>>> constructEndpointToRangeMap(String keyspace)
-    {
-        Multimap<InetAddress, Range<Token>> endpointToRangeMap = Multimaps.newListMultimap(new HashMap<InetAddress, Collection<Range<Token>>>(), new Supplier<List<Range<Token>>>()
-        {
-            public List<Range<Token>> get()
-            {
-                return Lists.newArrayList();
-            }
-        });
-
-        List<Range<Token>> ranges = getAllRanges(tokenMetadata_.sortedTokens());
-        for (Range<Token> range : ranges)
-        {
-            for (InetAddress endpoint : Table.open(keyspace).getReplicationStrategy().getNaturalEndpoints(range.left))
-                endpointToRangeMap.put(endpoint, range);
-        }
-        return endpointToRangeMap.asMap();
     }
 
     /*
@@ -1075,6 +1113,21 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /**
+     * Checks MS for the version, provided MS _really_ knows it (has directly communicated with the node) otherwise falls back to checking the gossipped version (learned about this node indirectly)
+     * If both fail, the node is too old to use hostid-style status serialization
+     * @param endpoint
+     * @return boolean whether or not to use hostid
+     */
+    private boolean usesHostId(InetAddress endpoint)
+    {
+        if (MessagingService.instance().knowsVersion(endpoint) && MessagingService.instance().getVersion(endpoint) >= MessagingService.VERSION_12)
+            return true;
+        else  if (Gossiper.instance.getEndpointStateForEndpoint(endpoint).getApplicationState(ApplicationState.NET_VERSION) != null && Integer.valueOf(Gossiper.instance.getEndpointStateForEndpoint(endpoint).getApplicationState(ApplicationState.NET_VERSION).value) >= MessagingService.VERSION_12)
+                return true;
+        return false;
+    }
+
+    /**
      * Handle node bootstrap
      *
      * @param endpoint bootstrapping node
@@ -1083,28 +1136,45 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private void handleStateBootstrap(InetAddress endpoint, String[] pieces)
     {
         assert pieces.length >= 2;
-        Token token = getPartitioner().getTokenFactory().fromString(pieces[1]);
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Node " + endpoint + " state bootstrapping, token " + token);
+        // Parse versioned values according to end-point version:
+        //   versions  < 1.2 .....: STATUS,TOKEN
+        //   versions >= 1.2 .....: STATUS,HOST_ID,TOKEN,TOKEN,...
+        int tokenPos;
+        if (usesHostId(endpoint))
+        {
+            assert pieces.length >= 3;
+            tokenPos = 2;
+        }
+            else tokenPos = 1;
+
+        Collection<Token> tokens = new ArrayList<Token>();
+        for (int i = tokenPos; i < pieces.length; ++i)
+            tokens.add(getPartitioner().getTokenFactory().fromString(pieces[i]));
+
+        if (logger.isDebugEnabled())
+            logger.debug("Node " + endpoint + " state bootstrapping, token " + tokens);
 
         // if this node is present in token metadata, either we have missed intermediate states
         // or the node had crashed. Print warning if needed, clear obsolete stuff and
         // continue.
-        if (tokenMetadata_.isMember(endpoint))
+        if (tokenMetadata.isMember(endpoint))
         {
             // If isLeaving is false, we have missed both LEAVING and LEFT. However, if
             // isLeaving is true, we have only missed LEFT. Waiting time between completing
             // leave operation and rebootstrapping is relatively short, so the latter is quite
             // common (not enough time for gossip to spread). Therefore we report only the
             // former in the log.
-            if (!tokenMetadata_.isLeaving(endpoint))
-                logger_.info("Node " + endpoint + " state jump to bootstrap");
-            tokenMetadata_.removeEndpoint(endpoint);
+            if (!tokenMetadata.isLeaving(endpoint))
+                logger.info("Node " + endpoint + " state jump to bootstrap");
+            tokenMetadata.removeEndpoint(endpoint);
         }
 
-        tokenMetadata_.addBootstrapToken(token, endpoint);
+        tokenMetadata.addBootstrapTokens(tokens, endpoint);
         calculatePendingRanges();
+
+        if (usesHostId(endpoint))
+            tokenMetadata.updateHostId(UUID.fromString(pieces[1]), endpoint);
     }
 
     /**
@@ -1117,46 +1187,91 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private void handleStateNormal(InetAddress endpoint, String[] pieces)
     {
         assert pieces.length >= 2;
-        Token token = getPartitioner().getTokenFactory().fromString(pieces[1]);
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Node " + endpoint + " state normal, token " + token);
-
-        if (tokenMetadata_.isMember(endpoint))
-            logger_.info("Node " + endpoint + " state jump to normal");
-
-        // we don't want to update if this node is responsible for the token and it has a later startup time than endpoint.
-        InetAddress currentOwner = tokenMetadata_.getEndpoint(token);
-        if (currentOwner == null)
+        // Parse versioned values according to end-point version:
+        //   versions  < 1.2 .....: STATUS,TOKEN
+        //   versions >= 1.2 .....: STATUS,HOST_ID,TOKEN,TOKEN,...
+        int tokensPos;
+        if (usesHostId(endpoint))
         {
-            logger_.debug("New node " + endpoint + " at token " + token);
-            tokenMetadata_.updateNormalToken(token, endpoint);
-            if (!isClientMode)
-                SystemTable.updateToken(endpoint, token);
-        }
-        else if (endpoint.equals(currentOwner))
-        {
-            // set state back to normal, since the node may have tried to leave, but failed and is now back up
-            // no need to persist, token/ip did not change
-            tokenMetadata_.updateNormalToken(token, endpoint);
-        }
-        else if (Gossiper.instance.compareEndpointStartup(endpoint, currentOwner) > 0)
-        {
-            logger_.info(String.format("Nodes %s and %s have the same token %s.  %s is the new owner",
-                                       endpoint, currentOwner, token, endpoint));
-            tokenMetadata_.updateNormalToken(token, endpoint);
-            Gossiper.instance.removeEndpoint(currentOwner);
-            if (!isClientMode)
-                SystemTable.updateToken(endpoint, token);
+            assert pieces.length >= 3;
+            tokensPos = 2;
         }
         else
+            tokensPos = 1;
+        logger.debug("Using token position {} for {}", tokensPos, endpoint);
+
+        Collection<Token> tokens = new ArrayList<Token>();
+        for (int i = tokensPos; i < pieces.length; ++i)
+            tokens.add(getPartitioner().getTokenFactory().fromString(pieces[i]));
+
+        if (logger.isDebugEnabled())
+            logger.debug("Node " + endpoint + " state normal, token " + tokens);
+
+        if (tokenMetadata.isMember(endpoint))
+            logger.info("Node " + endpoint + " state jump to normal");
+
+        // Order Matters, TM.updateHostID() should be called before TM.updateNormalToken(), (see CASSANDRA-4300).
+        if (usesHostId(endpoint))
+            tokenMetadata.updateHostId(UUID.fromString(pieces[1]), endpoint);
+
+        Set<Token> tokensToUpdateInMetadata = new HashSet<Token>();
+        Set<Token> tokensToUpdateInSystemTable = new HashSet<Token>();
+        Set<InetAddress> endpointsToRemove = new HashSet<InetAddress>();
+        Multimap<InetAddress, Token> epToTokenCopy = getTokenMetadata().getEndpointToTokenMapForReading();
+
+        for (Token token : tokens)
         {
-            logger_.info(String.format("Nodes %s and %s have the same token %s.  Ignoring %s",
-                                       endpoint, currentOwner, token, endpoint));
+            // we don't want to update if this node is responsible for the token and it has a later startup time than endpoint.
+            InetAddress currentOwner = tokenMetadata.getEndpoint(token);
+            if (currentOwner == null)
+            {
+                logger.debug("New node " + endpoint + " at token " + token);
+                tokensToUpdateInMetadata.add(token);
+                if (!isClientMode)
+                    tokensToUpdateInSystemTable.add(token);
+            }
+            else if (endpoint.equals(currentOwner))
+            {
+                // set state back to normal, since the node may have tried to leave, but failed and is now back up
+                // no need to persist, token/ip did not change
+                tokensToUpdateInMetadata.add(token);
+            }
+            else if (Gossiper.instance.compareEndpointStartup(endpoint, currentOwner) > 0)
+            {
+                tokensToUpdateInMetadata.add(token);
+                if (!isClientMode)
+                    tokensToUpdateInSystemTable.add(token);
+
+                // currentOwner is no longer current, endpoint is.  Keep track of these moves, because when
+                // a host no longer has any tokens, we'll want to remove it.
+                epToTokenCopy.get(currentOwner).remove(token);
+                if (epToTokenCopy.get(currentOwner).size() < 1)
+                    endpointsToRemove.add(currentOwner);
+
+                logger.info(String.format("Nodes %s and %s have the same token %s.  %s is the new owner",
+                                          endpoint,
+                                          currentOwner,
+                                          token,
+                                          endpoint));
+            }
+            else
+            {
+                logger.info(String.format("Nodes %s and %s have the same token %s.  Ignoring %s",
+                                           endpoint,
+                                           currentOwner,
+                                           token,
+                                           endpoint));
+            }
         }
 
-        if (tokenMetadata_.isMoving(endpoint)) // if endpoint was moving to a new token
-            tokenMetadata_.removeFromMoving(endpoint);
+        tokenMetadata.updateNormalTokens(tokensToUpdateInMetadata, endpoint);
+        for (InetAddress ep : endpointsToRemove)
+            Gossiper.instance.removeEndpoint(ep);
+        SystemTable.updateTokens(endpoint, tokensToUpdateInSystemTable);
+
+        if (tokenMetadata.isMoving(endpoint)) // if endpoint was moving to a new token
+            tokenMetadata.removeFromMoving(endpoint);
 
         calculatePendingRanges();
     }
@@ -1170,29 +1285,30 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private void handleStateLeaving(InetAddress endpoint, String[] pieces)
     {
         assert pieces.length >= 2;
-        String moveValue = pieces[1];
-        Token token = getPartitioner().getTokenFactory().fromString(moveValue);
+        Collection<Token> tokens = new ArrayList<Token>();
+        for (int i = 1; i < pieces.length; ++i)
+            tokens.add(getPartitioner().getTokenFactory().fromString(pieces[i]));
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Node " + endpoint + " state leaving, token " + token);
+        if (logger.isDebugEnabled())
+            logger.debug("Node " + endpoint + " state leaving, tokens " + tokens);
 
         // If the node is previously unknown or tokens do not match, update tokenmetadata to
         // have this node as 'normal' (it must have been using this token before the
         // leave). This way we'll get pending ranges right.
-        if (!tokenMetadata_.isMember(endpoint))
+        if (!tokenMetadata.isMember(endpoint))
         {
-            logger_.info("Node " + endpoint + " state jump to leaving");
-            tokenMetadata_.updateNormalToken(token, endpoint);
+            logger.info("Node " + endpoint + " state jump to leaving");
+            tokenMetadata.updateNormalTokens(tokens, endpoint);
         }
-        else if (!tokenMetadata_.getToken(endpoint).equals(token))
+        else if (!tokenMetadata.getTokens(endpoint).containsAll(tokens))
         {
-            logger_.warn("Node " + endpoint + " 'leaving' token mismatch. Long network partition?");
-            tokenMetadata_.updateNormalToken(token, endpoint);
+            logger.warn("Node " + endpoint + " 'leaving' token mismatch. Long network partition?");
+            tokenMetadata.updateNormalTokens(tokens, endpoint);
         }
 
         // at this point the endpoint is certainly a member with this token, so let's proceed
         // normally
-        tokenMetadata_.addLeavingEndpoint(endpoint);
+        tokenMetadata.addLeavingEndpoint(endpoint);
         calculatePendingRanges();
     }
 
@@ -1205,12 +1321,21 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private void handleStateLeft(InetAddress endpoint, String[] pieces)
     {
         assert pieces.length >= 2;
-        Token token = getPartitioner().getTokenFactory().fromString(pieces[1]);
+        Collection<Token> tokens = null;
+        Integer version = MessagingService.instance().getVersion(endpoint);
+        if (version < MessagingService.VERSION_12)
+            tokens = Arrays.asList(getPartitioner().getTokenFactory().fromString(pieces[1]));
+        else
+        {
+            tokens = new ArrayList<Token>(pieces.length - 2);
+            for (int i = 2; i < pieces.length; ++i)
+                tokens.add(getPartitioner().getTokenFactory().fromString(pieces[i]));
+        }
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Node " + endpoint + " state left, token " + token);
+        if (logger.isDebugEnabled())
+            logger.debug("Node " + endpoint + " state left, tokens " + tokens);
 
-        excise(token, endpoint, extractExpireTime(pieces));
+        excise(tokens, endpoint, extractExpireTime(pieces, version));
     }
 
     /**
@@ -1224,10 +1349,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         assert pieces.length >= 2;
         Token token = getPartitioner().getTokenFactory().fromString(pieces[1]);
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Node " + endpoint + " state moving, new token " + token);
+        if (logger.isDebugEnabled())
+            logger.debug("Node " + endpoint + " state moving, new token " + token);
 
-        tokenMetadata_.addMovingEndpoint(token, endpoint);
+        tokenMetadata.addMovingEndpoint(token, endpoint);
 
         calculatePendingRanges();
     }
@@ -1244,7 +1369,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         if (endpoint.equals(FBUtilities.getBroadcastAddress()))
         {
-            logger_.info("Received removeToken gossip about myself. Is this node rejoining after an explicit removetoken?");
+            logger.info("Received removeToken gossip about myself. Is this node rejoining after an explicit removetoken?");
             try
             {
                 drain();
@@ -1255,51 +1380,51 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
             return;
         }
-        if (tokenMetadata_.isMember(endpoint))
+        if (tokenMetadata.isMember(endpoint))
         {
             String state = pieces[0];
-            Token removeToken = tokenMetadata_.getToken(endpoint);
+            Collection<Token> removeTokens = tokenMetadata.getTokens(endpoint);
 
             if (VersionedValue.REMOVED_TOKEN.equals(state))
             {
-                excise(removeToken, endpoint, extractExpireTime(pieces));
+                excise(removeTokens, endpoint, extractExpireTime(pieces, MessagingService.instance().getVersion(endpoint)));
             }
             else if (VersionedValue.REMOVING_TOKEN.equals(state))
             {
-                if (logger_.isDebugEnabled())
-                    logger_.debug("Token " + removeToken + " removed manually (endpoint was " + endpoint + ")");
+                if (logger.isDebugEnabled())
+                    logger.debug("Tokens " + removeTokens + " removed manually (endpoint was " + endpoint + ")");
 
                 // Note that the endpoint is being removed
-                tokenMetadata_.addLeavingEndpoint(endpoint);
+                tokenMetadata.addLeavingEndpoint(endpoint);
                 calculatePendingRanges();
 
                 // find the endpoint coordinating this removal that we need to notify when we're done
                 String[] coordinator = Gossiper.instance.getEndpointStateForEndpoint(endpoint).getApplicationState(ApplicationState.REMOVAL_COORDINATOR).value.split(VersionedValue.DELIMITER_STR, -1);
-                Token coordtoken = getPartitioner().getTokenFactory().fromString(coordinator[1]);
+                UUID hostId = UUID.fromString(coordinator[1]);
                 // grab any data we are now responsible for and notify responsible node
-                restoreReplicaCount(endpoint, tokenMetadata_.getEndpoint(coordtoken));
+                restoreReplicaCount(endpoint, tokenMetadata.getEndpointForHostId(hostId));
             }
         } // not a member, nothing to do
     }
 
-    private void excise(Token token, InetAddress endpoint)
+    private void excise(Collection<Token> tokens, InetAddress endpoint)
     {
         HintedHandOffManager.instance.deleteHintsForEndpoint(endpoint);
         Gossiper.instance.removeEndpoint(endpoint);
-        tokenMetadata_.removeEndpoint(endpoint);
-        tokenMetadata_.removeBootstrapToken(token);
+        tokenMetadata.removeEndpoint(endpoint);
+        tokenMetadata.removeBootstrapTokens(tokens);
         calculatePendingRanges();
         if (!isClientMode)
         {
-            logger_.info("Removing token " + token + " for " + endpoint);
-            SystemTable.removeToken(token);
+            logger.info("Removing tokens " + tokens + " for " + endpoint);
+            SystemTable.removeTokens(tokens);
         }
     }
 
-    private void excise(Token token, InetAddress endpoint, long expireTime)
+    private void excise(Collection<Token> tokens, InetAddress endpoint, long expireTime)
     {
         addExpireTimeIfFound(endpoint, expireTime);
-        excise(token, endpoint);
+        excise(tokens, endpoint);
     }
 
     protected void addExpireTimeIfFound(InetAddress endpoint, long expireTime)
@@ -1310,14 +1435,21 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
     }
 
-    protected long extractExpireTime(String[] pieces)
+    protected long extractExpireTime(String[] pieces, int version)
     {
-        long expireTime = 0L;
-        if (pieces.length >= 3)
+        if (version < MessagingService.VERSION_12)
         {
-            expireTime = Long.parseLong(pieces[2]);
+            if (pieces.length >= 3)
+                return Long.parseLong(pieces[2]);
+            else
+                return 0L;
+        } else
+        {
+            if (VersionedValue.STATUS_LEFT.equals(pieces[0]))
+                return Long.parseLong(pieces[1]);
+            else
+                return Long.parseLong(pieces[2]);
         }
-        return expireTime;
     }
 
     /**
@@ -1354,13 +1486,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         TokenMetadata tm = StorageService.instance.getTokenMetadata();
         Multimap<Range<Token>, InetAddress> pendingRanges = HashMultimap.create();
-        Map<Token, InetAddress> bootstrapTokens = tm.getBootstrapTokens();
+        BiMultiValMap<Token, InetAddress> bootstrapTokens = tm.getBootstrapTokens();
         Set<InetAddress> leavingEndpoints = tm.getLeavingEndpoints();
 
         if (bootstrapTokens.isEmpty() && leavingEndpoints.isEmpty() && tm.getMovingEndpoints().isEmpty())
         {
-            if (logger_.isDebugEnabled())
-                logger_.debug("No bootstrapping, leaving or moving nodes -> empty pending ranges for {}", table);
+            if (logger.isDebugEnabled())
+                logger.debug("No bootstrapping, leaving or moving nodes -> empty pending ranges for {}", table);
             tm.setPendingRanges(table, pendingRanges);
             return;
         }
@@ -1379,7 +1511,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // all leaving nodes are gone.
         for (Range<Token> range : affectedRanges)
         {
-            Set<InetAddress> currentEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(range.right, tm));
+            Set<InetAddress> currentEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(range.right, tm.cloneOnlyTokenMap()));
             Set<InetAddress> newEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(range.right, allLeftMetadata));
             pendingRanges.putAll(range, Sets.difference(newEndpoints, currentEndpoints));
         }
@@ -1389,17 +1521,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         // For each of the bootstrapping nodes, simply add and remove them one by one to
         // allLeftMetadata and check in between what their ranges would be.
-        synchronized (bootstrapTokens)
+        for (InetAddress endpoint : bootstrapTokens.inverse().keySet())
         {
-            for (Map.Entry<Token, InetAddress> entry : bootstrapTokens.entrySet())
-            {
-                InetAddress endpoint = entry.getValue();
-
-                allLeftMetadata.updateNormalToken(entry.getKey(), endpoint);
-                for (Range<Token> range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
-                    pendingRanges.put(range, endpoint);
-                allLeftMetadata.removeEndpoint(endpoint);
-            }
+            Collection<Token> tokens = bootstrapTokens.inverse().get(endpoint);
+            
+            allLeftMetadata.updateNormalTokens(tokens, endpoint);
+            for (Range<Token> range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
+                pendingRanges.put(range, endpoint);
+            allLeftMetadata.removeEndpoint(endpoint);
         }
 
         // At this stage pendingRanges has been updated according to leaving and bootstrapping nodes.
@@ -1424,8 +1553,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         tm.setPendingRanges(table, pendingRanges);
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Pending ranges:\n" + (pendingRanges.isEmpty() ? "<empty>" : tm.printPendingRanges()));
+        if (logger.isDebugEnabled())
+            logger.debug("Pending ranges:\n" + (pendingRanges.isEmpty() ? "<empty>" : tm.printPendingRanges()));
     }
 
     /**
@@ -1438,7 +1567,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private Multimap<InetAddress, Range<Token>> getNewSourceRanges(String table, Set<Range<Token>> ranges)
     {
         InetAddress myAddress = FBUtilities.getBroadcastAddress();
-        Multimap<Range<Token>, InetAddress> rangeAddresses = Table.open(table).getReplicationStrategy().getRangeAddresses(tokenMetadata_);
+        Multimap<Range<Token>, InetAddress> rangeAddresses = Table.open(table).getReplicationStrategy().getRangeAddresses(tokenMetadata.cloneOnlyTokenMap());
         Multimap<InetAddress, Range<Token>> sourceRanges = HashMultimap.create();
         IFailureDetector failureDetector = FailureDetector.instance;
 
@@ -1466,16 +1595,15 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     /**
      * Sends a notification to a node indicating we have finished replicating data.
      *
-     * @param local the local address
      * @param remote node to send notification to
      */
-    private void sendReplicationNotification(InetAddress local, InetAddress remote)
+    private void sendReplicationNotification(InetAddress remote)
     {
         // notify the remote token
-        Message msg = new Message(local, StorageService.Verb.REPLICATION_FINISHED, new byte[0], Gossiper.instance.getVersion(remote));
+        MessageOut msg = new MessageOut(MessagingService.Verb.REPLICATION_FINISHED);
         IFailureDetector failureDetector = FailureDetector.instance;
-        if (logger_.isDebugEnabled())
-            logger_.debug("Notifying " + remote.toString() + " of replication completion\n");
+        if (logger.isDebugEnabled())
+            logger.debug("Notifying " + remote.toString() + " of replication completion\n");
         while (failureDetector.isAlive(remote))
         {
             IAsyncResult iar = MessagingService.instance().sendRR(msg, remote);
@@ -1539,18 +1667,18 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                         {
                             fetchSources.remove(source, table);
                             if (fetchSources.isEmpty())
-                                sendReplicationNotification(myAddress, notifyEndpoint);
+                                sendReplicationNotification(notifyEndpoint);
                         }
                     }
 
                     public void onFailure()
                     {
-                        logger_.warn("Streaming from " + source + " failed");
+                        logger.warn("Streaming from " + source + " failed");
                         onSuccess(); // calling onSuccess to send notification
                     }
                 };
-                if (logger_.isDebugEnabled())
-                    logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(ranges, ", "));
+                if (logger.isDebugEnabled())
+                    logger.debug("Requesting from " + source + " ranges " + StringUtils.join(ranges, ", "));
                 StreamIn.requestRanges(source, table, ranges, callback, OperationType.RESTORE_REPLICA_COUNT);
             }
         }
@@ -1562,16 +1690,16 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // First get all ranges the leaving endpoint is responsible for
         Collection<Range<Token>> ranges = getRangesForEndpoint(table, endpoint);
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Node " + endpoint + " ranges [" + StringUtils.join(ranges, ", ") + "]");
+        if (logger.isDebugEnabled())
+            logger.debug("Node " + endpoint + " ranges [" + StringUtils.join(ranges, ", ") + "]");
 
         Map<Range<Token>, List<InetAddress>> currentReplicaEndpoints = new HashMap<Range<Token>, List<InetAddress>>();
 
         // Find (for each range) all nodes that store replicas for these ranges as well
         for (Range<Token> range : ranges)
-            currentReplicaEndpoints.put(range, Table.open(table).getReplicationStrategy().calculateNaturalEndpoints(range.right, tokenMetadata_));
+            currentReplicaEndpoints.put(range, Table.open(table).getReplicationStrategy().calculateNaturalEndpoints(range.right, tokenMetadata.cloneOnlyTokenMap()));
 
-        TokenMetadata temp = tokenMetadata_.cloneAfterAllLeft();
+        TokenMetadata temp = tokenMetadata.cloneAfterAllLeft();
 
         // endpoint might or might not be 'leaving'. If it was not leaving (that is, removetoken
         // command was used), it is still present in temp and must be removed.
@@ -1589,11 +1717,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             Collection<InetAddress> newReplicaEndpoints = Table.open(table).getReplicationStrategy().calculateNaturalEndpoints(range.right, temp);
             newReplicaEndpoints.removeAll(currentReplicaEndpoints.get(range));
-            if (logger_.isDebugEnabled())
+            if (logger.isDebugEnabled())
                 if (newReplicaEndpoints.isEmpty())
-                    logger_.debug("Range " + range + " already in all replicas");
+                    logger.debug("Range " + range + " already in all replicas");
                 else
-                    logger_.debug("Range " + range + " will be responsibility of " + StringUtils.join(newReplicaEndpoints, ", "));
+                    logger.debug("Range " + range + " will be responsibility of " + StringUtils.join(newReplicaEndpoints, ", "));
             changedRanges.putAll(range, newReplicaEndpoints);
         }
 
@@ -1616,7 +1744,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public void onRemove(InetAddress endpoint)
     {
-        tokenMetadata_.removeEndpoint(endpoint);
+        tokenMetadata.removeEndpoint(endpoint);
         calculatePendingRanges();
     }
 
@@ -1667,18 +1795,31 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         HintedHandOffManager.instance.scheduleHintDelivery(host);
     }
 
-    public Token getLocalToken()
+    public Collection<Token> getLocalTokens()
     {
-        Token token = SystemTable.getSavedToken();
-        assert token != null; // should not be called before initServer sets this
-        return token;
+        Collection<Token> tokens = SystemTable.getSavedTokens();
+        assert tokens != null && !tokens.isEmpty(); // should not be called before initServer sets this
+        return tokens;
     }
 
     /* These methods belong to the MBean interface */
 
-    public String getToken()
+    public List<String> getTokens()
     {
-        return getLocalToken().toString();
+        return getTokens(FBUtilities.getBroadcastAddress());
+    }
+
+    public List<String> getTokens(String endpoint) throws UnknownHostException
+    {
+        return getTokens(InetAddress.getByName(endpoint));
+    }
+
+    private List<String> getTokens(InetAddress endpoint)
+    {
+        List<String> strTokens = new ArrayList<String>();
+        for (Token tok : getTokenMetadata().getTokens(endpoint))
+            strTokens.add(tok.toString());
+        return strTokens;
     }
 
     public String getReleaseVersion()
@@ -1693,14 +1834,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public List<String> getLeavingNodes()
     {
-        return stringify(tokenMetadata_.getLeavingEndpoints());
+        return stringify(tokenMetadata.getLeavingEndpoints());
     }
 
     public List<String> getMovingNodes()
     {
         List<String> endpoints = new ArrayList<String>();
 
-        for (Pair<Token, InetAddress> node : tokenMetadata_.getMovingEndpoints())
+        for (Pair<Token, InetAddress> node : tokenMetadata.getMovingEndpoints())
         {
             endpoints.add(node.right.getHostAddress());
         }
@@ -1710,7 +1851,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public List<String> getJoiningNodes()
     {
-        return stringify(tokenMetadata_.getBootstrapTokens().values());
+        return stringify(tokenMetadata.getBootstrapTokens().values());
     }
 
     public List<String> getLiveNodes()
@@ -1723,34 +1864,22 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return stringify(Gossiper.instance.getUnreachableMembers());
     }
 
-    private static String getCanonicalPath(String filename)
-    {
-        try
-        {
-            return new File(filename).getCanonicalPath();
-        }
-        catch (IOException e)
-        {
-            throw new IOError(e);
-        }
-    }
-
     public String[] getAllDataFileLocations()
     {
         String[] locations = DatabaseDescriptor.getAllDataFileLocations();
         for (int i = 0; i < locations.length; i++)
-            locations[i] = getCanonicalPath(locations[i]);
+            locations[i] = FileUtils.getCanonicalPath(locations[i]);
         return locations;
     }
 
     public String getCommitLogLocation()
     {
-        return getCanonicalPath(DatabaseDescriptor.getCommitLogLocation());
+        return FileUtils.getCanonicalPath(DatabaseDescriptor.getCommitLogLocation());
     }
 
     public String getSavedCachesLocation()
     {
-        return getCanonicalPath(DatabaseDescriptor.getSavedCachesLocation());
+        return FileUtils.getCanonicalPath(DatabaseDescriptor.getSavedCachesLocation());
     }
 
     private List<String> stringify(Iterable<InetAddress> endpoints)
@@ -1893,8 +2022,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         for (Table table : tables)
             table.clearSnapshot(tag);
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Cleared out snapshot directories");
+        if (logger.isDebugEnabled())
+            logger.debug("Cleared out snapshot directories");
     }
 
     public Iterable<ColumnFamilyStore> getValidColumnFamilies(String tableName, String... cfNames) throws IOException
@@ -1913,7 +2042,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             if (cfStore == null)
             {
                 // this means there was a cf passed in that is not recognized in the keyspace. report it and continue.
-                logger_.warn(String.format("Invalid column family specified: %s. Proceeding with others.", cfName));
+                logger.warn(String.format("Invalid column family specified: %s. Proceeding with others.", cfName));
                 continue;
             }
             valid.add(cfStore);
@@ -1932,7 +2061,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(tableName, columnFamilies))
         {
-            logger_.debug("Forcing flush on keyspace " + tableName + ", CF " + cfStore.getColumnFamilyName());
+            logger.debug("Forcing flush on keyspace " + tableName + ", CF " + cfStore.getColumnFamilyName());
             cfStore.forceBlockingFlush();
         }
     }
@@ -1950,7 +2079,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         Collection<Range<Token>> ranges = getLocalRanges(tableName);
         int cmd = nextRepairCommand.incrementAndGet();
-        logger_.info("Starting repair command #{}, repairing {} ranges.", cmd, ranges.size());
+        logger.info("Starting repair command #{}, repairing {} ranges.", cmd, ranges.size());
 
         List<AntiEntropyService.RepairFuture> futures = new ArrayList<AntiEntropyService.RepairFuture>(ranges.size());
         for (Range<Token> range : ranges)
@@ -1966,7 +2095,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
             catch (InterruptedException e)
             {
-                logger_.error("Interrupted while waiting for the differencing of repair session " + future.session + " to be done. Repair may be imprecise.", e);
+                logger.error("Interrupted while waiting for the differencing of repair session " + future.session + " to be done. Repair may be imprecise.", e);
             }
         }
 
@@ -1981,7 +2110,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
             catch (Exception e)
             {
-                logger_.error("Repair session " + future.session.getName() + " failed.", e);
+                logger.error("Repair session " + future.session.getName() + " failed.", e);
                 failedSession = true;
             }
         }
@@ -1989,7 +2118,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (failedSession)
             throw new IOException("Repair command #" + cmd + ": some repair session(s) failed (see log for details).");
         else
-            logger_.info("Repair command #{} completed successfully", cmd);
+            logger.info("Repair command #{} completed successfully", cmd);
     }
 
     public void forceTableRepairPrimaryRange(final String tableName, boolean isSequential, final String... columnFamilies) throws IOException
@@ -1997,18 +2126,17 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (Table.SYSTEM_TABLE.equals(tableName))
             return;
 
-        AntiEntropyService.RepairFuture future = forceTableRepair(getLocalPrimaryRange(), tableName, isSequential, columnFamilies);
-        if (future == null)
+        List<AntiEntropyService.RepairFuture> futures = new ArrayList<AntiEntropyService.RepairFuture>();
+        for (Range<Token> range : getLocalPrimaryRanges())
+        {
+            RepairFuture future = forceTableRepair(range, tableName, isSequential, columnFamilies);
+            if (future != null)
+                futures.add(future);
+        }
+        if (futures.isEmpty())
             return;
-        try
-        {
-            future.get();
-        }
-        catch (Exception e)
-        {
-            logger_.error("Repair session " + future.session.getName() + " failed.", e);
-            throw new IOException("Some repair session(s) failed (see log for details).");
-        }
+        for (AntiEntropyService.RepairFuture future : futures)
+            FBUtilities.waitOnFuture(future);
     }
 
     public void forceTableRepairRange(String beginToken, String endToken, final String tableName, boolean isSequential, final String... columnFamilies) throws IOException
@@ -2019,7 +2147,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         Token parsedBeginToken = getPartitioner().getTokenFactory().fromString(beginToken);
         Token parsedEndToken = getPartitioner().getTokenFactory().fromString(endToken);
 
-        logger_.info("starting user-requested repair of range ({}, {}] for keyspace {} and column families {}",
+        logger.info("starting user-requested repair of range ({}, {}] for keyspace {} and column families {}",
                      new Object[] {parsedBeginToken, parsedEndToken, tableName, columnFamilies});
         AntiEntropyService.RepairFuture future = forceTableRepair(new Range<Token>(parsedBeginToken, parsedEndToken), tableName, isSequential, columnFamilies);
         if (future == null)
@@ -2030,7 +2158,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
         catch (Exception e)
         {
-            logger_.error("Repair session " + future.session.getName() + " failed.", e);
+            logger.error("Repair session " + future.session.getName() + " failed.", e);
         }
     }
 
@@ -2044,7 +2172,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         if (names.isEmpty())
         {
-            logger_.info("No column family to repair for keyspace " + tableName);
+            logger.info("No column family to repair for keyspace " + tableName);
             return null;
         }
 
@@ -2061,20 +2189,28 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * This method returns the predecessor of the endpoint ep on the identifier
      * space.
      */
-    InetAddress getPredecessor(InetAddress ep)
+    InetAddress getPredecessor(Token token)
     {
-        Token token = tokenMetadata_.getToken(ep);
-        return tokenMetadata_.getEndpoint(tokenMetadata_.getPredecessor(token));
+        return tokenMetadata.getEndpoint(tokenMetadata.getPredecessor(token));
     }
 
     /*
      * This method returns the successor of the endpoint ep on the identifier
      * space.
      */
-    public InetAddress getSuccessor(InetAddress ep)
+    public InetAddress getSuccessor(Token token)
     {
-        Token token = tokenMetadata_.getToken(ep);
-        return tokenMetadata_.getEndpoint(tokenMetadata_.getSuccessor(token));
+        return tokenMetadata.getEndpoint(tokenMetadata.getSuccessor(token));
+    }
+
+    /**
+     * Get the primary ranges for the specified endpoint.
+     * @param ep endpoint we are interested in.
+     * @return collection of ranges for the specified endpoint.
+     */
+    public Collection<Range<Token>> getPrimaryRangesForEndpoint(InetAddress ep)
+    {
+        return tokenMetadata.getPrimaryRangesFor(tokenMetadata.getTokens(ep));
     }
 
     /**
@@ -2082,9 +2218,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * @param ep endpoint we are interested in.
      * @return range for the specified endpoint.
      */
+    @Deprecated
     public Range<Token> getPrimaryRangeForEndpoint(InetAddress ep)
     {
-        return tokenMetadata_.getPrimaryRangeFor(tokenMetadata_.getToken(ep));
+        return tokenMetadata.getPrimaryRangeFor(tokenMetadata.getToken(ep));
     }
 
     /**
@@ -2105,8 +2242,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     */
     public List<Range<Token>> getAllRanges(List<Token> sortedTokens)
     {
-        if (logger_.isDebugEnabled())
-            logger_.debug("computing ranges for " + StringUtils.join(sortedTokens, ", "));
+        if (logger.isDebugEnabled())
+            logger.debug("computing ranges for " + StringUtils.join(sortedTokens, ", "));
 
         if (sortedTokens.isEmpty())
             return Collections.emptyList();
@@ -2187,7 +2324,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         Level level = Level.toLevel(rawLevel);
         org.apache.log4j.Logger.getLogger(classQualifier).setLevel(level);
-        logger_.info("set log level to " + level + " for classes under '" + classQualifier + "' (if the level doesn't look like '" + rawLevel + "' then log4j couldn't parse '" + rawLevel + "')");
+        logger.info("set log level to " + level + " for classes under '" + classQualifier + "' (if the level doesn't look like '" + rawLevel + "' then log4j couldn't parse '" + rawLevel + "')");
     }
 
     /**
@@ -2237,49 +2374,49 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (keys.size() < 3)
         {
             token = getPartitioner().midpoint(range.left, range.right);
-            logger_.debug("Used midpoint to assign token " + token);
+            logger.debug("Used midpoint to assign token " + token);
         }
         else
         {
             token = keys.get(keys.size() / 2).token;
-            logger_.debug("Used key sample of size " + keys.size() + " to assign token " + token);
+            logger.debug("Used key sample of size " + keys.size() + " to assign token " + token);
         }
-        if (tokenMetadata_.getEndpoint(token) != null && tokenMetadata_.isMember(tokenMetadata_.getEndpoint(token)))
-            throw new RuntimeException("Chose token " + token + " which is already in use by " + tokenMetadata_.getEndpoint(token) + " -- specify one manually with initial_token");
+        if (tokenMetadata.getEndpoint(token) != null && tokenMetadata.isMember(tokenMetadata.getEndpoint(token)))
+            throw new RuntimeException("Chose token " + token + " which is already in use by " + tokenMetadata.getEndpoint(token) + " -- specify one manually with initial_token");
         // Hack to prevent giving nodes tokens with DELIMITER_STR in them (which is fine in a row key/token)
         if (token instanceof StringToken)
         {
             token = new StringToken(((String)token.token).replaceAll(VersionedValue.DELIMITER_STR, ""));
-            if (tokenMetadata_.getNormalAndBootstrappingTokenToEndpointMap().containsKey(token))
+            if (tokenMetadata.getNormalAndBootstrappingTokenToEndpointMap().containsKey(token))
                 throw new RuntimeException("Unable to compute unique token for new node -- specify one manually with initial_token");
         }
         return token;
     }
 
     /**
-     * Broadcast leaving status and update local tokenMetadata_ accordingly
+     * Broadcast leaving status and update local tokenMetadata accordingly
      */
     private void startLeaving()
     {
-        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.leaving(getLocalToken()));
-        tokenMetadata_.addLeavingEndpoint(FBUtilities.getBroadcastAddress());
+        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.leaving(getLocalTokens()));
+        tokenMetadata.addLeavingEndpoint(FBUtilities.getBroadcastAddress());
         calculatePendingRanges();
     }
 
     public void decommission() throws InterruptedException
     {
-        if (!tokenMetadata_.isMember(FBUtilities.getBroadcastAddress()))
+        if (!tokenMetadata.isMember(FBUtilities.getBroadcastAddress()))
             throw new UnsupportedOperationException("local node is not a member of the token ring yet");
-        if (tokenMetadata_.cloneAfterAllLeft().sortedTokens().size() < 2)
+        if (tokenMetadata.cloneAfterAllLeft().sortedTokens().size() < 2)
             throw new UnsupportedOperationException("no other normal nodes in the ring; decommission would be pointless");
         for (String table : Schema.instance.getNonSystemTables())
         {
-            if (tokenMetadata_.getPendingRanges(table, FBUtilities.getBroadcastAddress()).size() > 0)
+            if (tokenMetadata.getPendingRanges(table, FBUtilities.getBroadcastAddress()).size() > 0)
                 throw new UnsupportedOperationException("data is currently moving to this node; unable to leave the ring");
         }
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("DECOMMISSIONING");
+        if (logger.isDebugEnabled())
+            logger.debug("DECOMMISSIONING");
         startLeaving();
         setMode(Mode.LEAVING, "sleeping " + RING_DELAY + " ms for pending range setup", true);
         Thread.sleep(RING_DELAY);
@@ -2302,12 +2439,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private void leaveRing()
     {
         SystemTable.setBootstrapState(SystemTable.BootstrapState.NEEDS_BOOTSTRAP);
-        tokenMetadata_.removeEndpoint(FBUtilities.getBroadcastAddress());
+        tokenMetadata.removeEndpoint(FBUtilities.getBroadcastAddress());
         calculatePendingRanges();
 
-        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.left(getLocalToken(),Gossiper.computeExpireTime()));
+        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.left(getLocalTokens(),Gossiper.computeExpireTime()));
         int delay = Math.max(RING_DELAY, Gossiper.intervalInMillis * 2);
-        logger_.info("Announcing that I have left the ring for " + delay + "ms");
+        logger.info("Announcing that I have left the ring for " + delay + "ms");
         try
         {
             Thread.sleep(delay);
@@ -2326,8 +2463,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             Multimap<Range<Token>, InetAddress> rangesMM = getChangedRangesForLeaving(table, FBUtilities.getBroadcastAddress());
 
-            if (logger_.isDebugEnabled())
-                logger_.debug("Ranges needing transfer are [" + StringUtils.join(rangesMM.keySet(), ",") + "]");
+            if (logger.isDebugEnabled())
+                logger.debug("Ranges needing transfer are [" + StringUtils.join(rangesMM.keySet(), ",") + "]");
 
             rangesToStream.put(table, rangesMM);
         }
@@ -2337,7 +2474,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         CountDownLatch latch = streamRanges(rangesToStream);
 
         // wait for the transfer runnables to signal the latch.
-        logger_.debug("waiting for stream aks.");
+        logger.debug("waiting for stream aks.");
         try
         {
             latch.await();
@@ -2346,7 +2483,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             throw new RuntimeException(e);
         }
-        logger_.debug("stream acks all received.");
+        logger.debug("stream acks all received.");
         leaveRing();
         onFinish.run();
     }
@@ -2369,29 +2506,39 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (newToken == null)
             throw new IOException("Can't move to the undefined (null) token.");
 
-        if (tokenMetadata_.sortedTokens().contains(newToken))
+        if (tokenMetadata.sortedTokens().contains(newToken))
             throw new IOException("target token " + newToken + " is already owned by another node.");
 
         // address of the current node
         InetAddress localAddress = FBUtilities.getBroadcastAddress();
+
+        // This doesn't make any sense in a vnodes environment.
+        if (getTokenMetadata().getTokens(localAddress).size() > 1)
+        {
+            logger.error("Invalid request to move(Token); This node has more than one token and cannot be moved thusly.");
+            throw new UnsupportedOperationException("This node has more than one token and cannot be moved thusly.");
+        }
+        
         List<String> tablesToProcess = Schema.instance.getNonSystemTables();
 
         // checking if data is moving to this node
         for (String table : tablesToProcess)
         {
-            if (tokenMetadata_.getPendingRanges(table, localAddress).size() > 0)
+            if (tokenMetadata.getPendingRanges(table, localAddress).size() > 0)
                 throw new UnsupportedOperationException("data is currently moving to this node; unable to leave the ring");
         }
 
         Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.moving(newToken));
-        setMode(Mode.MOVING, String.format("Moving %s from %s to %s.", localAddress, getLocalToken(), newToken), true);
+        setMode(Mode.MOVING, String.format("Moving %s from %s to %s.", localAddress, getLocalTokens().iterator().next(), newToken), true);
 
         IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
 
         Map<String, Multimap<InetAddress, Range<Token>>> rangesToFetch = new HashMap<String, Multimap<InetAddress, Range<Token>>>();
         Map<String, Multimap<Range<Token>, InetAddress>> rangesToStreamByTable = new HashMap<String, Multimap<Range<Token>, InetAddress>>();
 
-        TokenMetadata tokenMetaClone = tokenMetadata_.cloneAfterAllSettled();
+        TokenMetadata tokenMetaCloneAllSettled = tokenMetadata.cloneAfterAllSettled();
+        // clone to avoid concurrent modification in calculateNaturalEndpoints
+        TokenMetadata tokenMetaClone = tokenMetadata.cloneOnlyTokenMap();
 
         // for each of the non system tables calculating new ranges
         // which current node will handle after move to the new token
@@ -2403,11 +2550,11 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             // getting collection of the currently used ranges by this keyspace
             Collection<Range<Token>> currentRanges = getRangesForEndpoint(table, localAddress);
             // collection of ranges which this node will serve after move to the new token
-            Collection<Range<Token>> updatedRanges = strategy.getPendingAddressRanges(tokenMetadata_, newToken, localAddress);
+            Collection<Range<Token>> updatedRanges = strategy.getPendingAddressRanges(tokenMetadata, newToken, localAddress);
 
             // ring ranges and endpoints associated with them
             // this used to determine what nodes should we ping about range data
-            Multimap<Range<Token>, InetAddress> rangeAddresses = strategy.getRangeAddresses(tokenMetadata_);
+            Multimap<Range<Token>, InetAddress> rangeAddresses = strategy.getRangeAddresses(tokenMetaClone);
 
             // calculated parts of the ranges to request/stream from/to nodes in the ring
             Pair<Set<Range<Token>>, Set<Range<Token>>> rangesPerTable = calculateStreamAndFetchRanges(currentRanges, updatedRanges);
@@ -2436,8 +2583,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
             for (Range<Token> toStream : rangesPerTable.left)
             {
-                Set<InetAddress> currentEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(toStream.right, tokenMetadata_));
-                Set<InetAddress> newEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(toStream.right, tokenMetaClone));
+                Set<InetAddress> currentEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(toStream.right, tokenMetaClone));
+                Set<InetAddress> newEndpoints = ImmutableSet.copyOf(strategy.calculateNaturalEndpoints(toStream.right, tokenMetaCloneAllSettled));
                 rangeWithEndpoints.putAll(toStream, Sets.difference(newEndpoints, currentEndpoints));
             }
 
@@ -2447,8 +2594,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             Multimap<InetAddress, Range<Token>> workMap = RangeStreamer.getWorkMap(rangesToFetchWithPreferredEndpoints);
             rangesToFetch.put(table, workMap);
 
-            if (logger_.isDebugEnabled())
-                logger_.debug("Table {}: work map {}.", table, workMap);
+            if (logger.isDebugEnabled())
+                logger.debug("Table {}: work map {}.", table, workMap);
         }
 
         if (!rangesToStreamByTable.isEmpty() || !rangesToFetch.isEmpty())
@@ -2464,13 +2611,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
 
             setMode(Mode.MOVING, "fetching new ranges and streaming old ranges", true);
-            if (logger_.isDebugEnabled())
-                logger_.debug("[Move->STREAMING] Work Map: " + rangesToStreamByTable);
+            if (logger.isDebugEnabled())
+                logger.debug("[Move->STREAMING] Work Map: " + rangesToStreamByTable);
 
             CountDownLatch streamLatch = streamRanges(rangesToStreamByTable);
 
-            if (logger_.isDebugEnabled())
-                logger_.debug("[Move->FETCHING] Work Map: " + rangesToFetch);
+            if (logger.isDebugEnabled())
+                logger.debug("[Move->FETCHING] Work Map: " + rangesToFetch);
 
             CountDownLatch fetchLatch = requestRanges(rangesToFetch);
 
@@ -2485,10 +2632,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
         }
 
-        setToken(newToken); // setting new token as we have everything settled
+        setTokens(Collections.singleton(newToken)); // setting new token as we have everything settled
 
-        if (logger_.isDebugEnabled())
-            logger_.debug("Successfully moved to new token {}", getLocalToken());
+        if (logger.isDebugEnabled())
+            logger.debug("Successfully moved to new token {}", getLocalTokens().iterator().next());
     }
 
     /**
@@ -2500,7 +2647,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             return "No token removals in process.";
         }
         return String.format("Removing token (%s). Waiting for replication confirmation from [%s].",
-                             tokenMetadata_.getToken(removingNode),
+                             tokenMetadata.getToken(removingNode),
                              StringUtils.join(replicatingNodes, ","));
     }
 
@@ -2511,14 +2658,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public void forceRemoveCompletion()
     {
-        if (!replicatingNodes.isEmpty()  || !tokenMetadata_.getLeavingEndpoints().isEmpty())
+        if (!replicatingNodes.isEmpty()  || !tokenMetadata.getLeavingEndpoints().isEmpty())
         {
-            logger_.warn("Removal not confirmed for for " + StringUtils.join(this.replicatingNodes, ","));
-            for (InetAddress endpoint : tokenMetadata_.getLeavingEndpoints())
+            logger.warn("Removal not confirmed for for " + StringUtils.join(this.replicatingNodes, ","));
+            for (InetAddress endpoint : tokenMetadata.getLeavingEndpoints())
             {
-                Token token = tokenMetadata_.getToken(endpoint);
-                Gossiper.instance.advertiseTokenRemoved(endpoint, token);
-                excise(token, endpoint);
+                UUID hostId = tokenMetadata.getHostId(endpoint);
+                Gossiper.instance.advertiseTokenRemoved(endpoint, hostId);
+                excise(tokenMetadata.getTokens(endpoint), endpoint);
             }
             replicatingNodes.clear();
             removingNode = null;
@@ -2536,27 +2683,29 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * restore the replica count, finally forceRemoveCompleteion should be
      * called to forcibly remove the node without regard to replica count.
      *
-     * @param tokenString token for the node
+     * @param hostIdString token for the node
      */
-    public void removeToken(String tokenString)
+    public void removeNode(String hostIdString)
     {
         InetAddress myAddress = FBUtilities.getBroadcastAddress();
-        Token localToken = tokenMetadata_.getToken(myAddress);
-        Token token = getPartitioner().getTokenFactory().fromString(tokenString);
-        InetAddress endpoint = tokenMetadata_.getEndpoint(token);
+        UUID localHostId = tokenMetadata.getHostId(myAddress);
+        UUID hostId = UUID.fromString(hostIdString);
+        InetAddress endpoint = tokenMetadata.getEndpointForHostId(hostId);
 
         if (endpoint == null)
-            throw new UnsupportedOperationException("Token not found.");
+            throw new UnsupportedOperationException("Host ID not found.");
+
+        Collection<Token> tokens = tokenMetadata.getTokens(endpoint);
 
         if (endpoint.equals(myAddress))
-             throw new UnsupportedOperationException("Cannot remove node's own token");
+             throw new UnsupportedOperationException("Cannot remove self");
 
         if (Gossiper.instance.getLiveMembers().contains(endpoint))
-            throw new UnsupportedOperationException("Node " + endpoint + " is alive and owns this token. Use decommission command to remove it from the ring");
+            throw new UnsupportedOperationException("Node " + endpoint + " is alive and owns this ID. Use decommission command to remove it from the ring");
 
         // A leaving endpoint that is dead is already being removed.
-        if (tokenMetadata_.isLeaving(endpoint))
-            logger_.warn("Node " + endpoint + " is already being removed, continuing removal anyway");
+        if (tokenMetadata.isLeaving(endpoint))
+            logger.warn("Node " + endpoint + " is already being removed, continuing removal anyway");
 
         if (!replicatingNodes.isEmpty())
             throw new UnsupportedOperationException("This node is already processing a removal. Wait for it to complete, or use 'removetoken force' if this has failed.");
@@ -2577,16 +2726,16 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 if (failureDetector.isAlive(ep))
                     replicatingNodes.add(ep);
                 else
-                    logger_.warn("Endpoint " + ep + " is down and will not receive data for re-replication of " + endpoint);
+                    logger.warn("Endpoint " + ep + " is down and will not receive data for re-replication of " + endpoint);
             }
         }
         removingNode = endpoint;
 
-        tokenMetadata_.addLeavingEndpoint(endpoint);
+        tokenMetadata.addLeavingEndpoint(endpoint);
         calculatePendingRanges();
         // the gossiper will handle spoofing this node's state to REMOVING_TOKEN for us
         // we add our own token so other nodes to let us know when they're done
-        Gossiper.instance.advertiseRemoving(endpoint, token, localToken);
+        Gossiper.instance.advertiseRemoving(endpoint, hostId, localHostId);
 
         // kick off streaming commands
         restoreReplicaCount(endpoint, myAddress);
@@ -2604,10 +2753,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
         }
 
-        excise(token, endpoint);
+        excise(tokens, endpoint);
 
         // gossiper will indicate the token has left
-        Gossiper.instance.advertiseTokenRemoved(endpoint, token);
+        Gossiper.instance.advertiseTokenRemoved(endpoint, hostId);
 
         replicatingNodes.clear();
         removingNode = null;
@@ -2624,7 +2773,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
         else
         {
-            logger_.info("Received unexpected REPLICATION_FINISHED message from " + node
+            logger.info("Received unexpected REPLICATION_FINISHED message from " + node
                          + ". Was this node recently a removal coordinator?");
         }
     }
@@ -2638,7 +2787,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         if (hasUnreclaimedSpace())
         {
-            logger_.info("requesting GC to free disk space");
+            logger.info("requesting GC to free disk space");
             System.gc();
             try
             {
@@ -2682,7 +2831,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         ExecutorService mutationStage = StageManager.getStage(Stage.MUTATION);
         if (mutationStage.isTerminated())
         {
-            logger_.warn("Cannot drain node (did it already happen?)");
+            logger.warn("Cannot drain node (did it already happen?)");
             return;
         }
         setMode(Mode.DRAINING, "starting drain process", true);
@@ -2723,7 +2872,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // wait for miscellaneous tasks like sstable and commitlog segment deletion
         tasks.shutdown();
         if (!tasks.awaitTermination(1, TimeUnit.MINUTES))
-            logger_.warn("Miscellaneous task executor still busy after one minute; proceeding with shutdown");
+            logger.warn("Miscellaneous task executor still busy after one minute; proceeding with shutdown");
 
         setMode(Mode.DRAINED, true);
     }
@@ -2739,8 +2888,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     TokenMetadata setTokenMetadataUnsafe(TokenMetadata tmd)
     {
-        TokenMetadata old = tokenMetadata_;
-        tokenMetadata_ = tmd;
+        TokenMetadata old = tokenMetadata;
+        tokenMetadata = tmd;
         return old;
     }
 
@@ -2749,45 +2898,71 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         StorageProxy.truncateBlocking(keyspace, columnFamily);
     }
 
-    public Map<String, Float> getOwnership()
+    public boolean isDcAwareReplicationStrategy(String keyspace)
     {
-        List<Token> sortedTokens = new ArrayList<Token>(tokenMetadata_.getTokenToEndpointMapForReading().keySet());
-        Collections.sort(sortedTokens);
-        Map<Token, Float> token_map = getPartitioner().describeOwnership(sortedTokens);
-        Map<String, Float> string_map = new HashMap<String, Float>();
-        for(Map.Entry<Token, Float> entry : token_map.entrySet())
-        {
-            string_map.put(entry.getKey().toString(), entry.getValue());
-        }
-        return string_map;
+        return SimpleStrategy.class != Table.open(keyspace).getReplicationStrategy().getClass();
     }
 
-    public Map<String, Float> effectiveOwnership(String keyspace) throws ConfigurationException
+    public Map<InetAddress, Float> getOwnership()
     {
-        Map<String, Float> effective = Maps.newHashMap();
+        List<Token> sortedTokens = tokenMetadata.sortedTokens();
+        // describeOwnership returns tokens in an unspecified order, let's re-order them
+        Map<Token, Float> tokenMap = new TreeMap<Token, Float>(getPartitioner().describeOwnership(sortedTokens));
+        Map<InetAddress, Float> stringMap = new LinkedHashMap<InetAddress, Float>();
+        for (Map.Entry<Token, Float> entry : tokenMap.entrySet())
+            stringMap.put(tokenMetadata.getEndpoint(entry.getKey()), entry.getValue());
+        return stringMap;
+    }
+
+    /**
+     * Calculates ownership. If there are multiple DC's and the replication strategy is DC aware then ownership will be
+     * calculated per dc, i.e. each DC will have total ring ownership divided amongst its nodes. Without replication
+     * total ownership will be a multiple of the number of DC's and this value will then go up within each DC depending
+     * on the number of replicas within itself. For DC unaware replication strategies, ownership without replication
+     * will be 100%.
+     * 
+     * @throws ConfigurationException
+     */
+    public LinkedHashMap<InetAddress, Float> effectiveOwnership(String keyspace) throws ConfigurationException
+    {
         if (Schema.instance.getNonSystemTables().size() <= 0)
             throw new ConfigurationException("Couldn't find any Non System Keyspaces to infer replication topology");
         if (keyspace == null && !hasSameReplication(Schema.instance.getNonSystemTables()))
             throw new ConfigurationException("Non System keyspaces doesnt have the same topology");
 
+        TokenMetadata metadata = tokenMetadata.cloneOnlyTokenMap();
+        
         if (keyspace == null)
             keyspace = Schema.instance.getNonSystemTables().get(0);
 
-        List<Token> sortedTokens = new ArrayList<Token>(tokenMetadata_.getTokenToEndpointMapForReading().keySet());
-        Collections.sort(sortedTokens);
-        Map<Token, Float> ownership = getPartitioner().describeOwnership(sortedTokens);
+        Collection<Collection<InetAddress>> endpointsGroupedByDc = new ArrayList<Collection<InetAddress>>();
+        // mapping of dc's to nodes, use sorted map so that we get dcs sorted
+        SortedMap<String, Collection<InetAddress>> sortedDcsToEndpoints = new TreeMap<String, Collection<InetAddress>>();
+        sortedDcsToEndpoints.putAll(metadata.getTopology().getDatacenterEndpoints().asMap());
+        for (Collection<InetAddress> endpoints : sortedDcsToEndpoints.values())
+            endpointsGroupedByDc.add(endpoints);
 
-        for (Entry<InetAddress, Collection<Range<Token>>> ranges : constructEndpointToRangeMap(keyspace).entrySet())
+        Map<Token, Float> tokenOwnership = getPartitioner().describeOwnership(tokenMetadata.sortedTokens());
+        LinkedHashMap<InetAddress, Float> finalOwnership = Maps.newLinkedHashMap();
+
+        // calculate ownership per dc
+        for (Collection<InetAddress> endpoints : endpointsGroupedByDc)
         {
-            Token token = tokenMetadata_.getToken(ranges.getKey());
-            for (Range<Token> range: ranges.getValue())
+            // calculate the ownership with replication and add the endpoint to the final ownership map
+            for (InetAddress endpoint : endpoints)
             {
-                float value = effective.get(token.toString()) == null ? 0.0F : effective.get(token.toString());
-                effective.put(token.toString(), value + ownership.get(range.left));
+                float ownership = 0.0f;
+                for (Range<Token> range : getRangesForEndpoint(keyspace, endpoint))
+                {
+                    if (tokenOwnership.containsKey(range.right))
+                        ownership += tokenOwnership.get(range.right);
+                }
+                finalOwnership.put(endpoint, ownership);
             }
         }
-        return effective;
+        return finalOwnership;
     }
+
 
     private boolean hasSameReplication(List<String> list)
     {
@@ -2849,17 +3024,17 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
             if (total > 0 && (largest == null || total > largest.getTotalMemtableLiveSize()))
             {
-                logger_.debug(total + " estimated memtable size for " + cfs);
+                logger.debug(total + " estimated memtable size for " + cfs);
                 largest = cfs;
             }
         }
         if (largest == null)
         {
-            logger_.info("Unable to reduce heap usage since there are no dirty column families");
+            logger.info("Unable to reduce heap usage since there are no dirty column families");
             return;
         }
 
-        logger_.warn("Flushing " + largest + " to relieve memory pressure");
+        logger.warn("Flushing " + largest + " to relieve memory pressure");
         largest.forceFlush();
     }
 
@@ -2871,42 +3046,62 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     private CountDownLatch streamRanges(final Map<String, Multimap<Range<Token>, InetAddress>> rangesToStreamByTable)
     {
-        final CountDownLatch latch = new CountDownLatch(rangesToStreamByTable.keySet().size());
+        // First, we build a list of ranges to stream to each host, per table
+        final Map<String, Map<InetAddress, List<Range<Token>>>> sessionsToStreamByTable = new HashMap<String, Map<InetAddress, List<Range<Token>>>>();
+        // The number of stream out sessions we need to start, to be built up as we build sessionsToStreamByTable
+        int sessionCount = 0;
+
         for (Map.Entry<String, Multimap<Range<Token>, InetAddress>> entry : rangesToStreamByTable.entrySet())
         {
             Multimap<Range<Token>, InetAddress> rangesWithEndpoints = entry.getValue();
 
             if (rangesWithEndpoints.isEmpty())
-            {
-                latch.countDown();
                 continue;
-            }
 
             final String table = entry.getKey();
 
-            final Set<Map.Entry<Range<Token>, InetAddress>> pending = new HashSet<Map.Entry<Range<Token>, InetAddress>>(rangesWithEndpoints.entries());
+            Map<InetAddress, List<Range<Token>>> rangesPerEndpoint = new HashMap<InetAddress, List<Range<Token>>>();
 
             for (final Map.Entry<Range<Token>, InetAddress> endPointEntry : rangesWithEndpoints.entries())
             {
                 final Range<Token> range = endPointEntry.getKey();
-                final InetAddress newEndpoint = endPointEntry.getValue();
+                final InetAddress endpoint = endPointEntry.getValue();
+
+                List<Range<Token>> curRanges = rangesPerEndpoint.get(endpoint);
+                if (curRanges == null)
+                {
+                    curRanges = new LinkedList<Range<Token>>();
+                    rangesPerEndpoint.put(endpoint, curRanges);
+                }
+                curRanges.add(range);
+            }
+
+            sessionCount += rangesPerEndpoint.size();
+            sessionsToStreamByTable.put(table, rangesPerEndpoint);
+        }
+
+        final CountDownLatch latch = new CountDownLatch(sessionCount);
+
+        for (Map.Entry<String, Map<InetAddress, List<Range<Token>>>> entry : sessionsToStreamByTable.entrySet())
+        {
+            final String table = entry.getKey();
+            final Map<InetAddress, List<Range<Token>>> rangesPerEndpoint = entry.getValue();
+
+            for (final Map.Entry<InetAddress, List<Range<Token>>> rangesEntry : rangesPerEndpoint.entrySet())
+            {
+                final List<Range<Token>> ranges = rangesEntry.getValue();
+                final InetAddress newEndpoint = rangesEntry.getKey();
 
                 final IStreamCallback callback = new IStreamCallback()
                 {
                     public void onSuccess()
                     {
-                        synchronized (pending)
-                        {
-                            pending.remove(endPointEntry);
-
-                            if (pending.isEmpty())
-                                latch.countDown();
-                        }
+                        latch.countDown();
                     }
 
                     public void onFailure()
                     {
-                        logger_.warn("Streaming to " + endPointEntry + " failed");
+                        logger.warn("Streaming to " + newEndpoint + " failed");
                         onSuccess(); // calling onSuccess for latch countdown
                     }
                 };
@@ -2916,7 +3111,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                     public void run()
                     {
                         // TODO each call to transferRanges re-flushes, this is potentially a lot of waste
-                        StreamOut.transferRanges(newEndpoint, Table.open(table), Arrays.asList(range), callback, OperationType.UNBOOTSTRAP);
+                        StreamOut.transferRanges(newEndpoint, Table.open(table), ranges, callback,
+                                OperationType.UNBOOTSTRAP);
                     }
                 });
             }
@@ -2962,13 +3158,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
                     public void onFailure()
                     {
-                        logger_.warn("Streaming from " + source + " failed");
+                        logger.warn("Streaming from " + source + " failed");
                         onSuccess(); // calling onSuccess for latch countdown
                     }
                 };
 
-                if (logger_.isDebugEnabled())
-                    logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(toFetch, ", "));
+                if (logger.isDebugEnabled())
+                    logger.debug("Requesting from " + source + " ranges " + StringUtils.join(toFetch, ", "));
 
                 // sending actual request
                 StreamIn.requestRanges(source, table, toFetch, callback, OperationType.BOOTSTRAP);
@@ -3080,7 +3276,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     public int getExceptionCount()
     {
-        return AbstractCassandraDaemon.exceptions.get();
+        return CassandraDaemon.exceptions.get();
     }
 
     public void rescheduleFailedDeletions()
@@ -3101,7 +3297,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public List<String> sampleKeyRange() // do not rename to getter - see CASSANDRA-4452 for details
     {
-        List<DecoratedKey> keys = keySamples(ColumnFamilyStore.allUserDefined(), getLocalPrimaryRange());
+        List<DecoratedKey> keys = new ArrayList<DecoratedKey>();
+        for (Range<Token> range : getLocalPrimaryRanges())
+            keys.addAll(keySamples(ColumnFamilyStore.allUserDefined(), range));
 
         List<String> sampledKeys = new ArrayList<String>(keys.size());
         for (DecoratedKey key : keys)

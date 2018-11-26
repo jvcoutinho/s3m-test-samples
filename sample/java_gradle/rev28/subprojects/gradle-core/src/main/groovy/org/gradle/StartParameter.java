@@ -20,11 +20,16 @@ import org.apache.commons.lang.builder.EqualsBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
 import org.gradle.api.internal.artifacts.ProjectDependenciesBuildInstruction;
 import org.gradle.api.logging.LogLevel;
-import org.gradle.execution.*;
-import org.gradle.groovy.scripts.UriScriptSource;
+import org.gradle.execution.BuildExecuter;
+import org.gradle.execution.DefaultBuildExecuter;
+import org.gradle.execution.DryRunBuildExecuter;
 import org.gradle.groovy.scripts.ScriptSource;
 import org.gradle.groovy.scripts.StringScriptSource;
-import org.gradle.initialization.*;
+import org.gradle.groovy.scripts.UriScriptSource;
+import org.gradle.initialization.BuildFileProjectSpec;
+import org.gradle.initialization.DefaultProjectSpec;
+import org.gradle.initialization.ProjectDirectoryProjectSpec;
+import org.gradle.initialization.ProjectSpec;
 import org.gradle.util.GFileUtils;
 import org.gradle.util.GUtil;
 
@@ -77,6 +82,9 @@ public class StartParameter {
     private boolean showHelp;
     private boolean showVersion;
     private boolean launchGUI;
+    private boolean noDaemon;
+    private boolean foreground;
+    private boolean stopDaemon;
     private boolean dryRun;
     private boolean noOpt;
     private boolean colorOutput = true;
@@ -530,6 +538,30 @@ public class StartParameter {
      */
     public void setColorOutput(boolean colorOutput) {
         this.colorOutput = colorOutput;
+    }
+    
+    public boolean isForeground() {
+        return foreground;
+    }
+
+    public void setForeground(boolean foreground) {
+        this.foreground = foreground;
+    }
+
+    public boolean isNoDaemon() {
+        return noDaemon;
+    }
+
+    public void setNoDaemon(boolean noDaemon) {
+        this.noDaemon = noDaemon;
+    }
+
+    public boolean isStopDaemon() {
+        return stopDaemon;
+    }
+
+    public void setStopDaemon(boolean stopDaemon) {
+        this.stopDaemon = stopDaemon;
     }
 
     /**

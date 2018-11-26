@@ -45,7 +45,6 @@ import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.db.migration.*;
 import org.apache.cassandra.dht.*;
-import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
@@ -54,6 +53,7 @@ import org.apache.cassandra.thrift.Column;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.SemanticVersion;
 
 import com.google.common.base.Predicates;
 import com.google.common.collect.Maps;
@@ -66,7 +66,7 @@ import static org.apache.cassandra.thrift.ThriftValidation.validateColumnFamily;
 
 public class QueryProcessor
 {
-    public static final String CQL_VERSION = "2.0.0";
+    public static final SemanticVersion CQL_VERSION = new SemanticVersion("2.0.0");
 
     private static final Logger logger = LoggerFactory.getLogger(QueryProcessor.class);
 
@@ -74,7 +74,7 @@ public class QueryProcessor
 
     public static final String DEFAULT_KEY_NAME = bufferToString(CFMetaData.DEFAULT_KEY_NAME);
 
-    private static List<org.apache.cassandra.db.Row> getSlice(CFMetaData metadata, SelectStatement select)
+    private static List<org.apache.cassandra.db.Row> getSlice(CFMetaData metadata, SelectStatement select, List<ByteBuffer> variables)
     throws InvalidRequestException, TimedOutException, UnavailableException
     {
         QueryPath queryPath = new QueryPath(select.getColumnFamily());
@@ -83,12 +83,12 @@ public class QueryProcessor
         // ...of a list of column names
         if (!select.isColumnRange())
         {
-            Collection<ByteBuffer> columnNames = getColumnNames(select, metadata);
+            Collection<ByteBuffer> columnNames = getColumnNames(select, metadata, variables);
             validateColumnNames(columnNames);
 
             for (Term rawKey: select.getKeys())
             {
-                ByteBuffer key = rawKey.getByteBuffer(metadata.getKeyValidator());
+                ByteBuffer key = rawKey.getByteBuffer(metadata.getKeyValidator(),variables);
 
                 validateKey(key);
                 commands.add(new SliceByNamesReadCommand(metadata.ksName, key, queryPath, columnNames));
@@ -98,12 +98,12 @@ public class QueryProcessor
         else
         {
             AbstractType<?> comparator = select.getComparator(metadata.ksName);
-            ByteBuffer start = select.getColumnStart().getByteBuffer(comparator);
-            ByteBuffer finish = select.getColumnFinish().getByteBuffer(comparator);
+            ByteBuffer start = select.getColumnStart().getByteBuffer(comparator,variables);
+            ByteBuffer finish = select.getColumnFinish().getByteBuffer(comparator,variables);
 
             for (Term rawKey : select.getKeys())
             {
-                ByteBuffer key = rawKey.getByteBuffer(metadata.getKeyValidator());
+                ByteBuffer key = rawKey.getByteBuffer(metadata.getKeyValidator(),variables);
 
                 validateKey(key);
                 validateSliceRange(metadata, start, finish, select.isColumnsReversed());
@@ -131,7 +131,8 @@ public class QueryProcessor
         }
     }
 
-    private static List<ByteBuffer> getColumnNames(SelectStatement select, CFMetaData metadata) throws InvalidRequestException
+    private static List<ByteBuffer> getColumnNames(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
+    throws InvalidRequestException
     {
         String keyString = getKeyString(metadata);
         List<ByteBuffer> columnNames = new ArrayList<ByteBuffer>();
@@ -139,12 +140,12 @@ public class QueryProcessor
         {
             // skip the key for the slice op; we'll add it to the resultset in extractThriftColumns
             if (!column.getText().equalsIgnoreCase(keyString))
-                columnNames.add(column.getByteBuffer(metadata.comparator));
+                columnNames.add(column.getByteBuffer(metadata.comparator,variables));
         }
         return columnNames;
     }
 
-    private static List<org.apache.cassandra.db.Row> multiRangeSlice(CFMetaData metadata, SelectStatement select)
+    private static List<org.apache.cassandra.db.Row> multiRangeSlice(CFMetaData metadata, SelectStatement select, List<ByteBuffer> variables)
     throws TimedOutException, UnavailableException, InvalidRequestException
     {
         List<org.apache.cassandra.db.Row> rows;
@@ -152,27 +153,39 @@ public class QueryProcessor
 
         AbstractType<?> keyType = Schema.instance.getCFMetaData(metadata.ksName, select.getColumnFamily()).getKeyValidator();
 
-        ByteBuffer startKey = (select.getKeyStart() != null)
-                               ? select.getKeyStart().getByteBuffer(keyType)
-                               : (new Term()).getByteBuffer();
+        ByteBuffer startKeyBytes = (select.getKeyStart() != null)
+                                   ? select.getKeyStart().getByteBuffer(keyType,variables)
+                                   : null;
 
-        ByteBuffer finishKey = (select.getKeyFinish() != null)
-                                ? select.getKeyFinish().getByteBuffer(keyType)
-                                : (new Term()).getByteBuffer();
+        ByteBuffer finishKeyBytes = (select.getKeyFinish() != null)
+                                    ? select.getKeyFinish().getByteBuffer(keyType,variables)
+                                    : null;
 
-        Token startToken = p.getToken(startKey), finishToken = p.getToken(finishKey);
-        if (startToken.compareTo(finishToken) > 0 && !finishToken.equals(p.getMinimumToken()))
+        RowPosition startKey = RowPosition.forKey(startKeyBytes, p), finishKey = RowPosition.forKey(finishKeyBytes, p);
+        if (startKey.compareTo(finishKey) > 0 && !finishKey.isMinimum(p))
         {
             if (p instanceof RandomPartitioner)
-                throw new InvalidRequestException("Start key's md5 sorts after end key's md5. This is not allowed; you probably should not specify end key at all, under RandomPartitioner");
+                throw new InvalidRequestException("Start key sorts after end key. This is not allowed; you probably should not specify end key at all, under RandomPartitioner");
             else
                 throw new InvalidRequestException("Start key must sort before (or equal to) finish key in your partitioner!");
         }
-        AbstractBounds bounds = new Bounds(startToken, finishToken);
+        AbstractBounds<RowPosition> bounds = new Bounds<RowPosition>(startKey, finishKey);
         
         // XXX: Our use of Thrift structs internally makes me Sad. :(
-        SlicePredicate thriftSlicePredicate = slicePredicateFromSelect(select, metadata);
+        SlicePredicate thriftSlicePredicate = slicePredicateFromSelect(select, metadata, variables);
         validateSlicePredicate(metadata, thriftSlicePredicate);
+
+        List<IndexExpression> expressions = new ArrayList<IndexExpression>();
+        for (Relation columnRelation : select.getColumnRelations())
+        {
+            // Left and right side of relational expression encoded according to comparator/validator.
+            ByteBuffer entity = columnRelation.getEntity().getByteBuffer(metadata.comparator, variables);
+            ByteBuffer value = columnRelation.getValue().getByteBuffer(select.getValueValidator(metadata.ksName, entity), variables);
+
+            expressions.add(new IndexExpression(entity,
+                                                IndexOperator.valueOf(columnRelation.operator().toString()),
+                                                value));
+        }
 
         int limit = select.isKeyRange() && select.getKeyStart() != null
                   ? select.getNumRecords() + 1
@@ -185,6 +198,7 @@ public class QueryProcessor
                                                                     null,
                                                                     thriftSlicePredicate,
                                                                     bounds,
+                                                                    expressions,
                                                                     limit),
                                                                     select.getConsistencyLevel());
         }
@@ -204,7 +218,7 @@ public class QueryProcessor
         // if start key was set and relation was "greater than"
         if (select.getKeyStart() != null && !select.includeStartKey() && !rows.isEmpty())
         {
-            if (rows.get(0).key.key.equals(startKey))
+            if (rows.get(0).key.key.equals(startKeyBytes))
                 rows.remove(0);
         }
 
@@ -212,58 +226,14 @@ public class QueryProcessor
         if (select.getKeyFinish() != null && !select.includeFinishKey() && !rows.isEmpty())
         {
             int lastIndex = rows.size() - 1;
-            if (rows.get(lastIndex).key.key.equals(finishKey))
+            if (rows.get(lastIndex).key.key.equals(finishKeyBytes))
                 rows.remove(lastIndex);
         }
 
         return rows.subList(0, select.getNumRecords() < rows.size() ? select.getNumRecords() : rows.size());
     }
-    
-    private static List<org.apache.cassandra.db.Row> getIndexedSlices(CFMetaData metadata, SelectStatement select)
-    throws TimedOutException, UnavailableException, InvalidRequestException
-    {
-        // XXX: Our use of Thrift structs internally (still) makes me Sad. :~(
-        SlicePredicate thriftSlicePredicate = slicePredicateFromSelect(select, metadata);
-        validateSlicePredicate(metadata, thriftSlicePredicate);
-        
-        List<IndexExpression> expressions = new ArrayList<IndexExpression>();
-        for (Relation columnRelation : select.getColumnRelations())
-        {
-            // Left and right side of relational expression encoded according to comparator/validator.
-            ByteBuffer entity = columnRelation.getEntity().getByteBuffer(metadata.comparator);
-            ByteBuffer value = columnRelation.getValue().getByteBuffer(select.getValueValidator(metadata.ksName, entity));
-            
-            expressions.add(new IndexExpression(entity,
-                                                IndexOperator.valueOf(columnRelation.operator().toString()),
-                                                value));
-        }
 
-        AbstractType<?> keyType = Schema.instance.getCFMetaData(metadata.ksName, select.getColumnFamily()).getKeyValidator();
-        ByteBuffer startKey = (!select.isKeyRange()) ? (new Term()).getByteBuffer() : select.getKeyStart().getByteBuffer(keyType);
-        IndexClause thriftIndexClause = new IndexClause(expressions, startKey, select.getNumRecords());
-        
-        List<org.apache.cassandra.db.Row> rows;
-        try
-        {
-            rows = StorageProxy.scan(metadata.ksName,
-                                     select.getColumnFamily(),
-                                     thriftIndexClause,
-                                     thriftSlicePredicate,
-                                     select.getConsistencyLevel());
-        }
-        catch (IOException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (TimeoutException e)
-        {
-            throw new TimedOutException();
-        }
-        
-        return rows;
-    }
-    
-    private static void batchUpdate(ClientState clientState, List<UpdateStatement> updateStatements, ConsistencyLevel consistency)
+    private static void batchUpdate(ClientState clientState, List<UpdateStatement> updateStatements, ConsistencyLevel consistency, List<ByteBuffer> variables )
     throws InvalidRequestException, UnavailableException, TimedOutException
     {
         String globalKeyspace = clientState.getKeyspace();
@@ -281,7 +251,7 @@ public class QueryProcessor
                 cfamsSeen.add(update.getColumnFamily());
             }
 
-            rowMutations.addAll(update.prepareRowMutations(keyspace, clientState));
+            rowMutations.addAll(update.prepareRowMutations(keyspace, clientState, variables));
         }
         
         try
@@ -298,7 +268,7 @@ public class QueryProcessor
         }
     }
     
-    private static SlicePredicate slicePredicateFromSelect(SelectStatement select, CFMetaData metadata)
+    private static SlicePredicate slicePredicateFromSelect(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
     throws InvalidRequestException
     {
         SlicePredicate thriftSlicePredicate = new SlicePredicate();
@@ -306,23 +276,25 @@ public class QueryProcessor
         if (select.isColumnRange() || select.getColumnNames().size() == 0)
         {
             SliceRange sliceRange = new SliceRange();
-            sliceRange.start = select.getColumnStart().getByteBuffer(metadata.comparator);
-            sliceRange.finish = select.getColumnFinish().getByteBuffer(metadata.comparator);
+            sliceRange.start = select.getColumnStart().getByteBuffer(metadata.comparator, variables);
+            sliceRange.finish = select.getColumnFinish().getByteBuffer(metadata.comparator, variables);
             sliceRange.reversed = select.isColumnsReversed();
             sliceRange.count = select.getColumnsLimit();
             thriftSlicePredicate.slice_range = sliceRange;
         }
         else
         {
-            thriftSlicePredicate.column_names = getColumnNames(select, metadata);
+            thriftSlicePredicate.column_names = getColumnNames(select, metadata, variables);
         }
         
         return thriftSlicePredicate;
     }
     
     /* Test for SELECT-specific taboos */
-    private static void validateSelect(String keyspace, SelectStatement select) throws InvalidRequestException
+    private static void validateSelect(String keyspace, SelectStatement select, List<ByteBuffer> variables) throws InvalidRequestException
     {
+        ThriftValidation.validateConsistencyLevel(keyspace, select.getConsistencyLevel(), RequestType.READ);
+
         // Finish key w/o start key (KEY < foo)
         if (!select.isKeyRange() && (select.getKeyFinish() != null))
             throw new InvalidRequestException("Key range clauses must include a start key (i.e. KEY > term)");
@@ -345,7 +317,7 @@ public class QueryProcessor
             Set<ByteBuffer> indexed = Table.open(keyspace).getColumnFamilyStore(select.getColumnFamily()).indexManager.getIndexedColumns();
             for (Relation relation : select.getColumnRelations())
             {
-                if ((relation.operator() == RelationType.EQ) && indexed.contains(relation.getEntity().getByteBuffer(comparator)))
+                if ((relation.operator() == RelationType.EQ) && indexed.contains(relation.getEntity().getByteBuffer(comparator, variables)))
                     return;
             }
             throw new InvalidRequestException("No indexed columns present in by-columns clause with \"equals\" operator");
@@ -492,12 +464,9 @@ public class QueryProcessor
                                Predicates.not(Predicates.equalTo(StorageProxy.UNREACHABLE)));
     }
 
-    public static CqlResult process(String queryString, ClientState clientState)
-    throws RecognitionException, UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    public static CqlResult processStatement(CQLStatement statement,ClientState clientState, List<ByteBuffer> variables )
+    throws  UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
     {
-        logger.trace("CQL QUERY: {}", queryString);
-        
-        CQLStatement statement = getStatement(queryString);
         String keyspace = null;
         
         // Some statements won't have (or don't need) a keyspace (think USE, or CREATE).
@@ -506,7 +475,7 @@ public class QueryProcessor
 
         CqlResult result = new CqlResult();
         
-        logger.debug("CQL statement type: {}", statement.type.toString());
+        if (logger.isDebugEnabled()) logger.debug("CQL statement type: {}", statement.type.toString());
         CFMetaData metadata;
         switch (statement.type)
         {
@@ -534,27 +503,18 @@ public class QueryProcessor
                 if (select.getKeys().size() > 0)
                     validateKeyAlias(metadata, select.getKeyAlias());
 
-                validateSelect(keyspace, select);
+                validateSelect(keyspace, select, variables);
 
                 List<org.apache.cassandra.db.Row> rows;
 
                 // By-key
                 if (!select.isKeyRange() && (select.getKeys().size() > 0))
                 {
-                    rows = getSlice(metadata, select);
+                    rows = getSlice(metadata, select, variables);
                 }
                 else
                 {
-                    // Range query
-                    if ((select.getKeyFinish() != null) || (select.getColumnRelations().size() == 0))
-                    {
-                        rows = multiRangeSlice(metadata, select);
-                    }
-                    // Index scan
-                    else
-                    {
-                        rows = getIndexedSlices(metadata, select);
-                    }
+                    rows = multiRangeSlice(metadata, select, variables);
                 }
 
                 // count resultset is a single column named "count"
@@ -584,7 +544,7 @@ public class QueryProcessor
                     List<Column> thriftColumns = new ArrayList<Column>();
                     if (select.isColumnRange())
                     {
-                        if (select.isWildcard())
+                        if (select.isFullWildcard())
                         {
                             // prepend key
                             thriftColumns.add(new Column(metadata.getKeyName()).setValue(row.key.key).setTimestamp(-1));
@@ -631,7 +591,7 @@ public class QueryProcessor
                             ByteBuffer name;
                             try
                             {
-                                name = term.getByteBuffer(metadata.comparator);
+                                name = term.getByteBuffer(metadata.comparator, variables);
                             }
                             catch (InvalidRequestException e)
                             {
@@ -664,12 +624,14 @@ public class QueryProcessor
             case INSERT: // insert uses UpdateStatement
             case UPDATE:
                 UpdateStatement update = (UpdateStatement)statement.statement;
-                batchUpdate(clientState, Collections.singletonList(update), update.getConsistencyLevel());
+                ThriftValidation.validateConsistencyLevel(keyspace, update.getConsistencyLevel(), RequestType.WRITE);
+                batchUpdate(clientState, Collections.singletonList(update), update.getConsistencyLevel(), variables);
                 result.type = CqlResultType.VOID;
                 return result;
                 
             case BATCH:
                 BatchStatement batch = (BatchStatement) statement.statement;
+                ThriftValidation.validateConsistencyLevel(keyspace, batch.getConsistencyLevel(), RequestType.WRITE);
 
                 if (batch.getTimeToLive() != 0)
                     throw new InvalidRequestException("Global TTL on the BATCH statement is not supported.");
@@ -687,7 +649,7 @@ public class QueryProcessor
 
                 try
                 {
-                    StorageProxy.mutate(batch.getMutations(keyspace, clientState), batch.getConsistencyLevel());
+                    StorageProxy.mutate(batch.getMutations(keyspace, clientState, variables), batch.getConsistencyLevel());
                 }
                 catch (org.apache.cassandra.thrift.UnavailableException e)
                 {
@@ -737,7 +699,7 @@ public class QueryProcessor
 
                 try
                 {
-                    StorageProxy.mutate(delete.prepareRowMutations(keyspace, clientState), delete.getConsistencyLevel());
+                    StorageProxy.mutate(delete.prepareRowMutations(keyspace, clientState, variables), delete.getConsistencyLevel());
                 }
                 catch (TimeoutException e)
                 {
@@ -770,12 +732,6 @@ public class QueryProcessor
                     ex.initCause(e);
                     throw ex;
                 }
-                catch (IOException e)
-                {
-                    InvalidRequestException ex = new InvalidRequestException(e.getMessage());
-                    ex.initCause(e);
-                    throw ex;
-                }
                 
                 result.type = CqlResultType.VOID;
                 return result;
@@ -784,7 +740,7 @@ public class QueryProcessor
                 CreateColumnFamilyStatement createCf = (CreateColumnFamilyStatement)statement.statement;
                 clientState.hasColumnFamilySchemaAccess(Permission.WRITE);
                 validateSchemaAgreement();
-                CFMetaData cfmd = createCf.getCFMetaData(keyspace);
+                CFMetaData cfmd = createCf.getCFMetaData(keyspace, variables);
                 ThriftValidation.validateCfDef(cfmd.toThrift(), null);
 
                 try
@@ -792,12 +748,6 @@ public class QueryProcessor
                     applyMigrationOnStage(new AddColumnFamily(cfmd));
                 }
                 catch (ConfigurationException e)
-                {
-                    InvalidRequestException ex = new InvalidRequestException(e.toString());
-                    ex.initCause(e);
-                    throw ex;
-                }
-                catch (IOException e)
                 {
                     InvalidRequestException ex = new InvalidRequestException(e.toString());
                     ex.initCause(e);
@@ -826,7 +776,8 @@ public class QueryProcessor
                     {
                         if (cd.index_type != null)
                             throw new InvalidRequestException("Index already exists");
-                        logger.debug("Updating column {} definition for index {}", oldCfm.comparator.getString(columnName), createIdx.getIndexName());
+                        if (logger.isDebugEnabled()) 
+                            logger.debug("Updating column {} definition for index {}", oldCfm.comparator.getString(columnName), createIdx.getIndexName());
                         cd.setIndex_type(IndexType.KEYS);
                         cd.setIndex_name(createIdx.getIndexName());
                         columnExists = true;
@@ -840,24 +791,9 @@ public class QueryProcessor
                 ThriftValidation.validateCfDef(cf_def, oldCfm);
                 try
                 {
-                    org.apache.cassandra.db.migration.avro.CfDef result1;
-                    try
-                    {
-                        result1 = CFMetaData.fromThrift(cf_def).toAvro();
-                    }
-                    catch (Exception e)
-                    {
-                        throw new RuntimeException(e);
-                    }
-                    applyMigrationOnStage(new UpdateColumnFamily(result1));
+                    applyMigrationOnStage(new UpdateColumnFamily(cf_def));
                 }
                 catch (ConfigurationException e)
-                {
-                    InvalidRequestException ex = new InvalidRequestException(e.toString());
-                    ex.initCause(e);
-                    throw ex;
-                }
-                catch (IOException e)
                 {
                     InvalidRequestException ex = new InvalidRequestException(e.toString());
                     ex.initCause(e);
@@ -908,12 +844,6 @@ public class QueryProcessor
                     ex.initCause(e);
                     throw ex;
                 }
-                catch (IOException e)
-                {
-                    InvalidRequestException ex = new InvalidRequestException(e.getMessage());
-                    ex.initCause(e);
-                    throw ex;
-                }
                 
                 result.type = CqlResultType.VOID;
                 return result;
@@ -928,12 +858,6 @@ public class QueryProcessor
                     applyMigrationOnStage(new DropColumnFamily(keyspace, deleteColumnFamily));
                 }
                 catch (ConfigurationException e)
-                {
-                    InvalidRequestException ex = new InvalidRequestException(e.getMessage());
-                    ex.initCause(e);
-                    throw ex;
-                }
-                catch (IOException e)
                 {
                     InvalidRequestException ex = new InvalidRequestException(e.getMessage());
                     ex.initCause(e);
@@ -960,18 +884,62 @@ public class QueryProcessor
                     ex.initCause(e);
                     throw ex;
                 }
-                catch (IOException e)
-                {
-                    InvalidRequestException ex = new InvalidRequestException(e.getMessage());
-                    ex.initCause(e);
-                    throw ex;
-                }
 
                 result.type = CqlResultType.VOID;
                 return result;
         }
-        
         return null;    // We should never get here.
+    }
+
+    public static CqlResult process(String queryString, ClientState clientState)
+    throws RecognitionException, UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    {
+        logger.trace("CQL QUERY: {}", queryString);
+        return processStatement(getStatement(queryString), clientState, new ArrayList<ByteBuffer>());
+    }
+
+    public static CqlPreparedResult prepare(String queryString, ClientState clientState)
+    throws RecognitionException, InvalidRequestException
+    {
+        logger.trace("CQL QUERY: {}", queryString);
+
+        CQLStatement statement = getStatement(queryString);
+        int statementId = makeStatementId(queryString);
+        logger.trace("Discovered "+ statement.boundTerms + " bound variables.");
+
+        clientState.getPrepared().put(statementId, statement);
+        logger.trace(String.format("Stored prepared statement #%d with %d bind markers",
+                                   statementId,
+                                   statement.boundTerms));
+
+        return new CqlPreparedResult(statementId, statement.boundTerms);
+    }
+   
+    public static CqlResult processPrepared(CQLStatement statement, ClientState clientState, List<ByteBuffer> variables)
+    throws UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    {
+        // Check to see if there are any bound variables to verify 
+        if (!(variables.isEmpty() && (statement.boundTerms == 0)))
+        {
+            if (variables.size() != statement.boundTerms) 
+                throw new InvalidRequestException(String.format("there were %d markers(?) in CQL but %d bound variables",
+                                                                statement.boundTerms,
+                                                                variables.size()));
+
+            // at this point there is a match in count between markers and variables that is non-zero
+
+            if (logger.isTraceEnabled()) 
+                for (int i = 0; i < variables.size(); i++)
+                    logger.trace("[{}] '{}'", i+1, variables.get(i));
+        }
+
+        return processStatement(statement, clientState, variables);
+    }
+
+    private static final int makeStatementId(String cql)
+    {
+        // use the hash of the string till something better is provided
+        return cql.hashCode();
     }
 
     private static Column thriftify(IColumn c)

@@ -52,6 +52,7 @@ import javax.jms.TextMessage;
 import javax.jms.Topic;
 import javax.naming.Context;
 import javax.naming.InitialContext;
+import java.io.IOException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -65,13 +66,19 @@ import java.util.logging.Logger;
  */
 public class JMSBroadcaster extends AbstractBroadcasterProxy {
     private static final String JMS_TOPIC = JMSBroadcaster.class.getName() + ".topic";
+    private static final String JNDI_NAMESPACE = JMSBroadcaster.class.getName() + ".JNDINamespace";
+    private static final String JNDI_FACTORY_NAME = JMSBroadcaster.class.getName() + ".JNDIConnectionFactoryName";
+    private static final String JNDI_TOPIC = JMSBroadcaster.class.getName() + ".JNDITopic";
 
     private final Logger logger = LoggerUtils.getLogger();
     private Connection connection;
     private Session session;
     private MessageConsumer consumer;
     private MessageProducer publisher;
+
     private String topicId = "atmosphere";
+    private String factoryName = "atmosphereFactory";
+    private String namespace = "jms/";
 
     /**
      * {@inheritDoc}
@@ -80,8 +87,22 @@ public class JMSBroadcaster extends AbstractBroadcasterProxy {
     public void incomingBroadcast() {
         try {
             if (bc.getAtmosphereConfig() != null) {
+
+                // For backward compatibility.
                 if (bc.getAtmosphereConfig().getInitParameter(JMS_TOPIC) != null) {
                     topicId = bc.getAtmosphereConfig().getInitParameter(JMS_TOPIC);
+                }
+
+                if (bc.getAtmosphereConfig().getInitParameter(JNDI_NAMESPACE) != null) {
+                    namespace = bc.getAtmosphereConfig().getInitParameter(JNDI_NAMESPACE);
+                }
+
+                if (bc.getAtmosphereConfig().getInitParameter(JNDI_FACTORY_NAME) != null) {
+                    factoryName = bc.getAtmosphereConfig().getInitParameter(JNDI_FACTORY_NAME);
+                }
+
+                if (bc.getAtmosphereConfig().getInitParameter(JNDI_TOPIC) != null) {
+                    topicId = bc.getAtmosphereConfig().getInitParameter(JNDI_TOPIC);
                 }
             }
 
@@ -90,12 +111,13 @@ public class JMSBroadcaster extends AbstractBroadcasterProxy {
                 id = "atmosphere";
             }
 
-            logger.info("Looking up: jms/atmosphereFactory");
+            logger.info(String.format("Looking up Connection Factory %s", namespace + factoryName));
             Context ctx = new InitialContext();
-            ConnectionFactory connectionFactory = (ConnectionFactory) ctx.lookup("jms/atmosphereFactory");
+            ConnectionFactory connectionFactory = (ConnectionFactory) ctx.lookup(namespace + factoryName);
 
             logger.info(String.format("Looking up topic: %s", topicId));
-            Topic topic = (Topic) ctx.lookup("jms/" + topicId);
+            Topic topic = (Topic) ctx.lookup(namespace + topicId);
+
             connection = connectionFactory.createConnection();
             session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
 
@@ -146,6 +168,23 @@ public class JMSBroadcaster extends AbstractBroadcasterProxy {
             publisher.send(textMessage);
         } catch (JMSException ex) {
             logger.log(Level.WARNING, "", ex);
+        }
+    }
+
+    /**
+     * Close all related JMS factory, connection, etc.
+     */
+    @Override
+    public void releaseExternalResources() {
+        super.destroy();
+        try {
+            connection.close();
+            session.close();            
+            consumer.close();
+            publisher.close();
+        } catch (Throwable ex) {
+            logger.log(Level.WARNING, "", ex);
+
         }
     }
 }

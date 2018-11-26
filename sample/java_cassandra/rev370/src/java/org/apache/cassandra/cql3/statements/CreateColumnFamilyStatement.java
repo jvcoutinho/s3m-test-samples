@@ -7,14 +7,13 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.cassandra.cql3.statements;
 
@@ -49,7 +48,7 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
     private AbstractType<?> keyValidator;
 
     private ByteBuffer keyAlias;
-    private List<ByteBuffer> columnAliases = new ArrayList<ByteBuffer>();
+    private final List<ByteBuffer> columnAliases = new ArrayList<ByteBuffer>();
     private ByteBuffer valueAlias;
 
     private final Map<ColumnIdentifier, String> columns = new HashMap<ColumnIdentifier, String>();
@@ -131,10 +130,10 @@ public class CreateColumnFamilyStatement extends SchemaAlteringStatement
         private final CFPropDefs properties = new CFPropDefs();
 
         private final List<ColumnIdentifier> keyAliases = new ArrayList<ColumnIdentifier>();
-        private List<ColumnIdentifier> columnAliases = new ArrayList<ColumnIdentifier>();
+        private final List<ColumnIdentifier> columnAliases = new ArrayList<ColumnIdentifier>();
 
         private boolean useCompactStorage;
-        private Multiset<ColumnIdentifier> definedNames = HashMultiset.create(1);
+        private final Multiset<ColumnIdentifier> definedNames = HashMultiset.create(1);
 
         public RawStatement(CFName name)
         {

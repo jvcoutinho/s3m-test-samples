@@ -40,6 +40,7 @@ import org.apache.thrift.TBase;
 import org.apache.thrift.TDeserializer;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
+import org.apache.thrift.protocol.TBinaryProtocol;
 import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
 import org.apache.thrift.transport.TTransportException;
@@ -495,17 +496,11 @@ public class ConfigHelper
 
     /**
      * @param conf The configuration to use.
-     * @return Value (converts MBs to Bytes) set by {@link setThriftFramedTransportSizeInMb(Configuration, int)} or default of 15MB
+     * @return Value (converts MBs to Bytes) set by {@link #setThriftFramedTransportSizeInMb(Configuration, int)} or default of 15MB
      */
     public static int getThriftFramedTransportSize(Configuration conf)
     {
         return conf.getInt(THRIFT_FRAMED_TRANSPORT_SIZE_IN_MB, 15) * 1024 * 1024; // 15MB is default in Cassandra
-    }
-
-    @Deprecated
-    public static void setThriftMaxMessageLengthInMb(Configuration conf, int maxMessageSizeInMB)
-    {
-        // SEE CASSANDRA-5529
     }
 
     public static CompressionParameters getOutputCompressionParamaters(Configuration conf)

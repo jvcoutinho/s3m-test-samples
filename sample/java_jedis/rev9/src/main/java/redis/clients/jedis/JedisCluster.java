@@ -2,12 +2,13 @@ package redis.clients.jedis;
 
 import redis.clients.jedis.BinaryClient.LIST_POSITION;
 
+import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
-public class JedisCluster implements JedisCommands, BasicCommands {
+public class JedisCluster implements JedisCommands, BasicCommands, Closeable {
     public static final short HASHSLOTS = 16384;
     private static final int DEFAULT_TIMEOUT = 1;
     private static final int DEFAULT_MAX_REDIRECTIONS = 5;
@@ -31,6 +32,21 @@ public class JedisCluster implements JedisCommands, BasicCommands {
 		jedisClusterNode);
 	this.timeout = timeout;
 	this.maxRedirections = maxRedirections;
+    }
+    
+    @Override
+    public void close() {
+	if (connectionHandler != null) {
+	    for (JedisPool pool : connectionHandler.getNodes().values()) {
+		try {
+		    if (pool != null) {
+			pool.destroy();
+		    }
+		} catch (Exception e) {
+		    // pass
+		}
+	    }
+	}
     }
 
     @Override
@@ -1086,6 +1102,51 @@ public class JedisCluster implements JedisCommands, BasicCommands {
 	    }
 	}.run(key);
     }
+    
+    @Override
+    public Long zlexcount(final String key, final String min, final String max) {
+	return new JedisClusterCommand<Long>(connectionHandler, timeout, 
+		maxRedirections) {
+	    @Override
+	    public Long execute(Jedis connection) {
+		return connection.zlexcount(key, min, max);
+	    }
+	}.run(key);
+    }
+
+    @Override
+    public Set<String> zrangeByLex(final String key, final String min, final String max) {
+	return new JedisClusterCommand<Set<String>>(connectionHandler, timeout, 
+		maxRedirections) {
+	    @Override
+	    public Set<String> execute(Jedis connection) {
+		return connection.zrangeByLex(key, min, max);
+	    }
+	}.run(key);
+    }
+
+    @Override
+    public Set<String> zrangeByLex(final String key, final String min, final String max,
+	    final int offset, final int count) {
+	return new JedisClusterCommand<Set<String>>(connectionHandler, timeout, 
+		maxRedirections) {
+	    @Override
+	    public Set<String> execute(Jedis connection) {
+		return connection.zrangeByLex(key, min, max, offset, count);
+	    }
+	}.run(key);
+    }
+
+    @Override
+    public Long zremrangeByLex(final String key, final String min, final String max) {
+	return new JedisClusterCommand<Long>(connectionHandler, timeout, 
+		maxRedirections) {
+	    @Override
+	    public Long execute(Jedis connection) {
+		return connection.zremrangeByLex(key, min, max);
+	    }
+	}.run(key);
+    }
 
     @Override
     public Long linsert(final String key, final LIST_POSITION where,
@@ -1474,4 +1535,5 @@ public class JedisCluster implements JedisCommands, BasicCommands {
 	    }
 	}.run(key);
     }
+
 }

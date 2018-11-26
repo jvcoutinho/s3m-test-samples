@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -7,15 +7,13 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.cassandra.db.compaction;
 
@@ -28,7 +26,6 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.DecoratedKey;
-import org.apache.cassandra.db.EchoedRow;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.service.CacheService;
@@ -38,14 +35,13 @@ import org.apache.cassandra.service.CacheService;
  */
 public class CompactionController
 {
-    private static Logger logger = LoggerFactory.getLogger(CompactionController.class);
+    private static final Logger logger = LoggerFactory.getLogger(CompactionController.class);
 
     private final ColumnFamilyStore cfs;
     private final Set<SSTableReader> sstables;
     private final boolean forceDeserialize;
 
     public final int gcBefore;
-    public boolean keyExistenceIsExpensive;
     public final int mergeShardBefore;
 
     public CompactionController(ColumnFamilyStore cfs, Collection<SSTableReader> sstables, int gcBefore, boolean forceDeserialize)
@@ -60,7 +56,6 @@ public class CompactionController
         // current 'stop all write during memtable switch' situation).
         this.mergeShardBefore = (int) ((cfs.oldestUnflushedMemtable() + 5 * 3600) / 1000);
         this.forceDeserialize = forceDeserialize;
-        keyExistenceIsExpensive = cfs.getCompactionStrategy().isKeyExistenceExpensive(this.sstables);
     }
 
     public String getKeyspace()
@@ -125,15 +120,6 @@ public class CompactionController
         long rowSize = 0;
         for (SSTableIdentityIterator row : rows)
             rowSize += row.dataSize;
-
-        // in-memory echoedrow is only enabled if we think checking for the key's existence in the other sstables,
-        // is going to be less expensive than simply de/serializing the row again
-        if (rows.size() == 1 && !needDeserialize()
-            && (rowSize > DatabaseDescriptor.getInMemoryCompactionLimit() || !keyExistenceIsExpensive)
-            && !shouldPurge(rows.get(0).getKey()))
-        {
-            return new EchoedRow(rows.get(0));
-        }
 
         if (rowSize > DatabaseDescriptor.getInMemoryCompactionLimit())
         {

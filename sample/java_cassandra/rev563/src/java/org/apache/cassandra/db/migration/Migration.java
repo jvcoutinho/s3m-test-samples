@@ -28,6 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
+import org.apache.cassandra.net.MessagingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,14 +46,12 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
 
-import static com.google.common.base.Charsets.UTF_8;
-
 /**
  * A migration represents a single metadata mutation (cf dropped, added, etc.).  Migrations can be applied locally, or
  * serialized and sent to another machine where it can be applied there. Each migration has a version represented by
  * a TimeUUID that can be used to look up both the Migration itself (see getLocalMigrations) as well as a serialization
  * of the Keyspace definition that was modified.
- *
+ * 
  * There are three parts to a migration (think of it as a schema update):
  * 1. data is written to the schema cf.
  * 2. the migration is serialized to the migrations cf.
@@ -94,22 +93,6 @@ public abstract class Migration
         this.lastVersion = lastVersion;
     }
     
-    // block compactions and flushing.
-    protected final void acquireLocks()
-    {
-        CompactionManager.instance.getCompactionLock().lock();
-        Table.getFlushLock().lock();
-    }
-    
-    protected final void releaseLocks()
-    {
-        Table.getFlushLock().unlock();
-        CompactionManager.instance.getCompactionLock().unlock();
-    }
-
-    /** override this to perform logic before writing the migration or applying it.  defaults to nothing. */
-    public void beforeApplyModels() {}
-    
     /** apply changes */
     public final void apply() throws IOException, ConfigurationException
     {
@@ -121,8 +104,6 @@ public abstract class Migration
         if (!clientMode)
             rm.apply();
 
-        beforeApplyModels();
-        
         // write migration.
         if (!clientMode)
         {
@@ -237,12 +218,12 @@ public abstract class Migration
         long now = System.currentTimeMillis();
         // add a column for each keyspace
         for (KSMetaData ksm : ksms)
-            rm.add(new QueryPath(SCHEMA_CF, null, ByteBuffer.wrap(ksm.name.getBytes(UTF_8))), SerDeUtils.serialize(ksm.deflate()), now);
+            rm.add(new QueryPath(SCHEMA_CF, null, ByteBufferUtil.bytes(ksm.name)), SerDeUtils.serialize(ksm.deflate()), now);
         // add the schema
         rm.add(new QueryPath(SCHEMA_CF,
                              null,
                              DefsTable.DEFINITION_SCHEMA_COLUMN_NAME),
-                             ByteBuffer.wrap(org.apache.cassandra.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8)),
+                             ByteBufferUtil.bytes(org.apache.cassandra.db.migration.avro.KsDef.SCHEMA$.toString()),
                              now);
         return rm;
     }
@@ -260,7 +241,7 @@ public abstract class Migration
         DataOutputBuffer dob = new DataOutputBuffer();
         try
         {
-            RowMutation.serializer().serialize(rm, dob);
+            RowMutation.serializer().serialize(rm, dob, MessagingService.version_);
         }
         catch (IOException e)
         {
@@ -275,7 +256,7 @@ public abstract class Migration
         return SerDeUtils.serializeWithSchema(mi);
     }
 
-    public static Migration deserialize(ByteBuffer bytes) throws IOException
+    public static Migration deserialize(ByteBuffer bytes, int version) throws IOException
     {
         // deserialize
         org.apache.cassandra.db.migration.avro.Migration mi = SerDeUtils.deserializeWithSchema(bytes, new org.apache.cassandra.db.migration.avro.Migration());
@@ -299,7 +280,7 @@ public abstract class Migration
         migration.newVersion = UUIDGen.getUUID(ByteBuffer.wrap(mi.new_version.bytes()));
         try
         {
-            migration.rm = RowMutation.serializer().deserialize(SerDeUtils.createDataInputStream(mi.row_mutation));
+            migration.rm = RowMutation.serializer().deserialize(SerDeUtils.createDataInputStream(mi.row_mutation), version);
         }
         catch (IOException e)
         {
@@ -323,7 +304,7 @@ public abstract class Migration
     
     public static ByteBuffer toUTF8Bytes(UUID version)
     {
-        return ByteBuffer.wrap(version.toString().getBytes(UTF_8));
+        return ByteBufferUtil.bytes(version.toString());
     }
     
     public static boolean isLegalName(String s)

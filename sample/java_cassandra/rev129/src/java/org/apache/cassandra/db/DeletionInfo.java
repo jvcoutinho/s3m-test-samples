@@ -20,33 +20,41 @@ package org.apache.cassandra.db;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
-import java.lang.reflect.Constructor;
 import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.base.Objects;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
 
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.io.ISerializer;
-import org.apache.cassandra.io.ISSTableSerializer;
 import org.apache.cassandra.io.IVersionedSerializer;
-import org.apache.cassandra.io.sstable.Descriptor;
-import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.IntervalTree;
-import org.apache.cassandra.utils.ObjectSizes;
 
+/**
+ * A combination of a top-level (or row) tombstone and range tombstones describing the deletions
+ * within a {@link ColumnFamily} (or row).
+ */
 public class DeletionInfo
 {
     private static final Serializer serializer = new Serializer();
 
-    // We don't have way to represent the full interval of keys (Interval don't support the minimum token as the right bound),
-    // so we keep the topLevel deletion info separatly. This also slightly optimize the case of full row deletion which is rather common.
+    /**
+     * This represents a deletion of the entire row.  We can't represent this within the RangeTombstoneList, so it's
+     * kept separately.  This also slightly optimizes the common case of a full row deletion.
+     */
     private DeletionTime topLevel;
-    private RangeTombstoneList ranges; // null if no range tombstones (to save an allocation since it's a common case).
 
+    /**
+     * A list of range tombstones within the row.  This is left as null if there are no range tombstones
+     * (to save an allocation (since it's a common case).
+     */
+    private RangeTombstoneList ranges;
+
+    /**
+     * Creates a DeletionInfo with only a top-level (row) tombstone.
+     * @param markedForDeleteAt the time after which the entire row should be considered deleted
+     * @param localDeletionTime what time the deletion write was applied locally (for purposes of
+     *                          purging the tombstone after gc_grace_seconds).
+     */
     public DeletionInfo(long markedForDeleteAt, int localDeletionTime)
     {
         // Pre-1.1 node may return MIN_VALUE for non-deleted container, but the new default is MAX_VALUE
@@ -70,15 +78,18 @@ public class DeletionInfo
         this(rangeTombstone.min, rangeTombstone.max, comparator, rangeTombstone.data.markedForDeleteAt, rangeTombstone.data.localDeletionTime);
     }
 
-    public static DeletionInfo live()
-    {
-        return new DeletionInfo(DeletionTime.LIVE);
-    }
-
     private DeletionInfo(DeletionTime topLevel, RangeTombstoneList ranges)
     {
         this.topLevel = topLevel;
         this.ranges = ranges;
+    }
+
+    /**
+     * Returns a new DeletionInfo that has no top-level tombstone or any range tombstones.
+     */
+    public static DeletionInfo live()
+    {
+        return new DeletionInfo(DeletionTime.LIVE);
     }
 
     public static Serializer serializer()
@@ -102,15 +113,14 @@ public class DeletionInfo
     }
 
     /**
-     * Return whether a given column is deleted by the container having this
-     * deletion info.
+     * Return whether a given column is deleted by the container having this deletion info.
      *
      * @param column the column to check.
      * @return true if the column is deleted, false otherwise
      */
-    public boolean isDeleted(IColumn column)
+    public boolean isDeleted(Column column)
     {
-        return isDeleted(column.name(), column.mostRecentLiveChangeAt());
+        return isDeleted(column.name(), column.timestamp());
     }
 
     public boolean isDeleted(ByteBuffer name, long timestamp)
@@ -119,6 +129,7 @@ public class DeletionInfo
         // consider the column deleted even if timestamp=MIN_VALUE, otherwise this break QueryFilter.isRelevant
         if (isLive())
             return false;
+
         if (timestamp <= topLevel.markedForDeleteAt)
             return true;
 
@@ -126,10 +137,26 @@ public class DeletionInfo
     }
 
     /**
+     * Returns a new {@link InOrderTester} in forward order.
+     */
+    InOrderTester inOrderTester()
+    {
+        return inOrderTester(false);
+    }
+
+    /**
+     * Returns a new {@link InOrderTester} given the order in which
+     * columns will be passed to it.
+     */
+    public InOrderTester inOrderTester(boolean reversed)
+    {
+        return new InOrderTester(reversed);
+    }
+
+    /**
      * Purge every tombstones that are older than {@code gcbefore}.
      *
-     * @param gcBefore timestamp (in seconds) before which tombstones should
-     * be purged
+     * @param gcBefore timestamp (in seconds) before which tombstones should be purged
      */
     public void purge(int gcBefore)
     {
@@ -143,14 +170,24 @@ public class DeletionInfo
         }
     }
 
-    public boolean hasIrrelevantData(int gcBefore)
+    /**
+     * Returns true if {@code purge} would remove the top-level tombstone or any of the range
+     * tombstones, false otherwise.
+     * @param gcBefore timestamp (in seconds) before which tombstones should be purged
+     */
+    public boolean hasPurgeableTombstones(int gcBefore)
     {
         if (topLevel.localDeletionTime < gcBefore)
             return true;
 
-        return ranges != null && ranges.hasIrrelevantData(gcBefore);
+        return ranges != null && ranges.hasPurgeableTombstones(gcBefore);
     }
 
+    /**
+     * Potentially replaces the top-level tombstone with another, keeping whichever has the higher markedForDeleteAt
+     * timestamp.
+     * @param newInfo
+     */
     public void add(DeletionTime newInfo)
     {
         if (topLevel.markedForDeleteAt < newInfo.markedForDeleteAt)
@@ -166,7 +203,9 @@ public class DeletionInfo
     }
 
     /**
-     * Adds the provided deletion infos to the current ones.
+     * Combines another DeletionInfo with this one and returns the result.  Whichever top-level tombstone
+     * has the higher markedForDeleteAt timestamp will be kept, along with its localDeletionTime.  The
+     * range tombstones will be combined.
      *
      * @return this object.
      */
@@ -182,6 +221,9 @@ public class DeletionInfo
         return this;
     }
 
+    /**
+     * Returns the minimum timestamp in any of the range tombstones or the top-level tombstone.
+     */
     public long minTimestamp()
     {
         return ranges == null
@@ -190,7 +232,7 @@ public class DeletionInfo
     }
 
     /**
-     * The maximum timestamp mentioned by this DeletionInfo.
+     * Returns the maximum timestamp in any of the range tombstones or the top-level tombstone.
      */
     public long maxTimestamp()
     {
@@ -199,6 +241,9 @@ public class DeletionInfo
              : Math.max(topLevel.markedForDeleteAt, ranges.maxMarkedAt());
     }
 
+    /**
+     * Returns the top-level (or "row") tombstone.
+     */
     public DeletionTime getTopLevelDeletion()
     {
         return topLevel;
@@ -210,15 +255,25 @@ public class DeletionInfo
         return ranges == null ? Iterators.<RangeTombstone>emptyIterator() : ranges.iterator();
     }
 
+    public DeletionTime rangeCovering(ByteBuffer name)
+    {
+        return ranges == null ? null : ranges.search(name);
+    }
+
     public int dataSize()
     {
         int size = TypeSizes.NATIVE.sizeof(topLevel.markedForDeleteAt);
         return size + (ranges == null ? 0 : ranges.dataSize());
     }
 
+    public boolean hasRanges()
+    {
+        return ranges != null && !ranges.isEmpty();
+    }
+
     public int rangeCount()
     {
-        return ranges == null ? 0 : ranges.size();
+        return hasRanges() ? ranges.size() : 0;
     }
 
     /**
@@ -227,7 +282,7 @@ public class DeletionInfo
     public boolean mayModify(DeletionInfo delInfo)
     {
         return topLevel.markedForDeleteAt > delInfo.topLevel.markedForDeleteAt
-            || ranges == null;
+            || hasRanges();
     }
 
     @Override
@@ -258,6 +313,16 @@ public class DeletionInfo
         return sb.toString();
     }
 
+    // Updates all the timestamp of the deletion contained in this DeletionInfo to be {@code timestamp}.
+    public void updateAllTimestamp(long timestamp)
+    {
+        if (topLevel.markedForDeleteAt != Long.MIN_VALUE)
+            topLevel = new DeletionTime(timestamp, topLevel.localDeletionTime);
+
+        if (ranges != null)
+            ranges.updateAllTimestamp(timestamp);
+    }
+
     @Override
     public boolean equals(Object o)
     {
@@ -278,16 +343,7 @@ public class DeletionInfo
         public void serialize(DeletionInfo info, DataOutput out, int version) throws IOException
         {
             DeletionTime.serializer.serialize(info.topLevel, out);
-            if (version < MessagingService.VERSION_12)
-            {
-                if (info.ranges != null && !info.ranges.isEmpty())
-                    throw new RuntimeException("Cannot send range tombstone to pre-1.2 node. You should upgrade all node to Cassandra 1.2+ before using range tombstone.");
-                // Otherwise we're done
-            }
-            else
-            {
-                RangeTombstoneList.serializer.serialize(info.ranges, out, version);
-            }
+            RangeTombstoneList.serializer.serialize(info.ranges, out, version);
         }
 
         /*
@@ -301,12 +357,7 @@ public class DeletionInfo
 
         public DeletionInfo deserialize(DataInput in, int version, Comparator<ByteBuffer> comparator) throws IOException
         {
-            assert comparator != null;
             DeletionTime topLevel = DeletionTime.serializer.deserialize(in);
-
-            if (version < MessagingService.VERSION_12)
-                return new DeletionInfo(topLevel, null);
-
             RangeTombstoneList ranges = RangeTombstoneList.serializer.deserialize(in, version, comparator);
             return new DeletionInfo(topLevel, ranges);
         }
@@ -314,15 +365,61 @@ public class DeletionInfo
         public long serializedSize(DeletionInfo info, TypeSizes typeSizes, int version)
         {
             long size = DeletionTime.serializer.serializedSize(info.topLevel, typeSizes);
-            if (version < MessagingService.VERSION_12)
-                return size;
-
             return size + RangeTombstoneList.serializer.serializedSize(info.ranges, typeSizes, version);
         }
 
         public long serializedSize(DeletionInfo info, int version)
         {
             return serializedSize(info, TypeSizes.NATIVE, version);
+        }
+    }
+
+    /**
+     * This object allow testing whether a given column (name/timestamp) is deleted
+     * or not by this DeletionInfo, assuming that the columns given to this
+     * object are passed in forward or reversed comparator sorted order.
+     *
+     * This is more efficient that calling DeletionInfo.isDeleted() repeatedly
+     * in that case.
+     */
+    public class InOrderTester
+    {
+        /*
+         * Note that because because range tombstone are added to this DeletionInfo while we iterate,
+         * `ranges` may be null initially and we need to wait for the first range to create the tester (once
+         * created the test will pick up new tombstones however). We are guaranteed that a range tombstone
+         * will be added *before* we test any column that it may delete, so this is ok.
+         */
+        private RangeTombstoneList.InOrderTester tester;
+        private final boolean reversed;
+
+        private InOrderTester(boolean reversed)
+        {
+            this.reversed = reversed;
+        }
+
+        public boolean isDeleted(Column column)
+        {
+            return isDeleted(column.name(), column.timestamp());
+        }
+
+        public boolean isDeleted(ByteBuffer name, long timestamp)
+        {
+            if (timestamp <= topLevel.markedForDeleteAt)
+                return true;
+
+            /*
+             * We don't optimize the reversed case for now because RangeTombstoneList
+             * is always in forward sorted order.
+             */
+            if (reversed)
+                 return DeletionInfo.this.isDeleted(name, timestamp);
+
+            // Maybe create the tester if we hadn't yet and we now have some ranges (see above).
+            if (tester == null && ranges != null)
+                tester = ranges.inOrderTester();
+
+            return tester != null && tester.isDeleted(name, timestamp);
         }
     }
 }

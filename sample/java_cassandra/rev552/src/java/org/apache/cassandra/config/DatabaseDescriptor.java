@@ -54,14 +54,14 @@ import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.error.YAMLException;
 
-public class    DatabaseDescriptor
+public class DatabaseDescriptor
 {
     private static Logger logger = LoggerFactory.getLogger(DatabaseDescriptor.class);
 
     private static IEndpointSnitch snitch;
     private static InetAddress listenAddress; // leave null so we can fall through to getLocalHost
     private static InetAddress rpcAddress;
-    private static Set<InetAddress> seeds = new HashSet<InetAddress>();
+    private static SeedProvider seedProvider;
     /* Current index into the above list of directories */
     private static int currentIndex = 0;
     private static int consistencyThreads = 4; // not configurable
@@ -138,6 +138,8 @@ public class    DatabaseDescriptor
             ksDesc.putListPropertyType("column_families", RawColumnFamily.class);
             TypeDescription cfDesc = new TypeDescription(RawColumnFamily.class);
             cfDesc.putListPropertyType("column_metadata", RawColumnDefinition.class);
+            TypeDescription seedDesc = new TypeDescription(SeedProviderDef.class);
+            seedDesc.putMapPropertyType("parameters", String.class, String.class);
             constructor.addTypeDescription(desc);
             constructor.addTypeDescription(ksDesc);
             constructor.addTypeDescription(cfDesc);
@@ -230,6 +232,11 @@ public class    DatabaseDescriptor
             if (conf.concurrent_writes != null && conf.concurrent_writes < 2)
             {
                 throw new ConfigurationException("concurrent_writes must be at least 2");
+            }
+
+            if (conf.concurrent_replicates != null && conf.concurrent_replicates < 2)
+            {
+                throw new ConfigurationException("conf.concurrent_replicates must be at least 2");
             }
 
             /* Memtable flush writer threads */
@@ -385,21 +392,24 @@ public class    DatabaseDescriptor
             tables.put(Table.SYSTEM_TABLE, systemMeta);
             
             /* Load the seeds for node contact points */
-            if (conf.seeds == null || conf.seeds.length <= 0)
+            if (conf.seed_provider == null)
             {
-                throw new ConfigurationException("seeds missing; a minimum of one seed is required.");
+                throw new ConfigurationException("seeds configuration is missing; a minimum of one seed is required.");
             }
-            for (String seedString : conf.seeds)
+            try 
             {
-                try
-                {
-                    seeds.add(InetAddress.getByName(seedString));
-                }
-                catch (UnknownHostException e)
-                {
-                    throw new ConfigurationException("Unknown seed " + seedString + ".  Consider using IP addresses instead of host names");
-                }
+                Class seedProviderClass = Class.forName(conf.seed_provider.class_name);
+                seedProvider = (SeedProvider)seedProviderClass.getConstructor(Map.class).newInstance(conf.seed_provider.parameters);
             }
+            // there are about 5 checked exceptions that could be thrown here.
+            catch (Exception e)
+            {
+                logger.error("Fatal configuration error", e);
+                System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
+                System.exit(1);
+            }
+            if (seedProvider.getSeeds().size() == 0)
+                throw new ConfigurationException("The seed provider lists no seeds.");
         }
         catch (ConfigurationException e)
         {
@@ -631,6 +641,7 @@ public class    DatabaseDescriptor
                                              cf.rows_cached,
                                              cf.keys_cached, 
                                              cf.read_repair_chance,
+                                             cf.replicate_on_write,
                                              cf.gc_grace_seconds,
                                              default_validator,
                                              cf.min_compaction_threshold,
@@ -863,6 +874,11 @@ public class    DatabaseDescriptor
         return conf.concurrent_writes;
     }
 
+    public static int getConcurrentReplicators()
+    {
+        return conf.concurrent_replicates;
+    }
+
     public static int getFlushWriters()
     {
             return conf.memtable_flush_writers;
@@ -916,7 +932,7 @@ public class    DatabaseDescriptor
     
     public static Set<InetAddress> getSeeds()
     {
-        return seeds;
+        return Collections.unmodifiableSet(new HashSet(seedProvider.getSeeds()));
     }
 
     /*
@@ -1151,8 +1167,14 @@ public class    DatabaseDescriptor
     {
         return conf.dynamic_snitch_badness_threshold;
     }
+
     public static void setDynamicBadnessThreshold(Double dynamicBadnessThreshold)
     {
         conf.dynamic_snitch_badness_threshold = dynamicBadnessThreshold;
+    }
+
+    public static EncryptionOptions getEncryptionOptions()
+    {
+        return conf.encryption_options;
     }
 }

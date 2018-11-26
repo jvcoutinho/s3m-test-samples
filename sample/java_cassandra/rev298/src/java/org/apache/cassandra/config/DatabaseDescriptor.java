@@ -38,6 +38,7 @@ import java.util.UUID;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.primitives.Longs;
+import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.apache.cassandra.auth.AllowAllAuthenticator;
@@ -98,6 +99,8 @@ public class DatabaseDescriptor
 
     private static Config conf;
 
+    private static SSTableFormat.Type sstable_format = SSTableFormat.Type.BIG;
+
     private static IAuthenticator authenticator = new AllowAllAuthenticator();
     private static IAuthorizer authorizer = new AllowAllAuthorizer();
 
@@ -115,33 +118,13 @@ public class DatabaseDescriptor
 
     static
     {
-        // In client mode, we use a default configuration. Note that the fields of this class will be
-        // left unconfigured however (the partitioner or localDC will be null for instance) so this
-        // should be used with care.
         try
         {
-            if (Config.isClientMode())
-            {
-                conf = new Config();
-                // at least we have to set memoryAllocator to open SSTable in client mode
-                memoryAllocator = FBUtilities.newOffHeapAllocator(conf.memory_allocator);
-            }
-            else
-            {
-                applyConfig(loadConfig());
-            }
-        }
-        catch (ConfigurationException e)
-        {
-            logger.error("Fatal configuration error", e);
-            System.err.println(e.getMessage() + "\nFatal configuration error; unable to start. See log for stacktrace.");
-            System.exit(1);
+            applyConfig(loadConfig());
         }
         catch (Exception e)
         {
-            logger.error("Fatal error during configuration loading", e);
-            System.err.println(e.getMessage() + "\nFatal error during configuration loading; unable to start. See log for stacktrace.");
-            System.exit(1);
+            throw new ExceptionInInitializerError(e.getMessage() + "\nFatal configuration error; unable to start. See log for stacktrace.");
         }
     }
 
@@ -192,23 +175,34 @@ public class DatabaseDescriptor
         if (conf.commitlog_total_space_in_mb == null)
             conf.commitlog_total_space_in_mb = hasLargeAddressSpace() ? 8192 : 32;
 
-        /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
-        if (conf.disk_access_mode == Config.DiskAccessMode.auto)
+        if (FBUtilities.isUnix())
         {
-            conf.disk_access_mode = hasLargeAddressSpace() ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
-            indexAccessMode = conf.disk_access_mode;
-            logger.info("DiskAccessMode 'auto' determined to be {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
+            if (conf.disk_access_mode == Config.DiskAccessMode.auto)
+            {
+                conf.disk_access_mode = hasLargeAddressSpace() ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
+                indexAccessMode = conf.disk_access_mode;
+                logger.info("DiskAccessMode 'auto' determined to be {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            }
+            else if (conf.disk_access_mode == Config.DiskAccessMode.mmap_index_only)
+            {
+                conf.disk_access_mode = Config.DiskAccessMode.standard;
+                indexAccessMode = Config.DiskAccessMode.mmap;
+                logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            }
+            else
+            {
+                indexAccessMode = conf.disk_access_mode;
+                logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            }
         }
-        else if (conf.disk_access_mode == Config.DiskAccessMode.mmap_index_only)
-        {
-            conf.disk_access_mode = Config.DiskAccessMode.standard;
-            indexAccessMode = Config.DiskAccessMode.mmap;
-            logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
-        }
+        // Always force standard mode access on Windows - CASSANDRA-6993. Windows won't allow deletion of hard-links to files that
+        // are memory-mapped which causes trouble with snapshots.
         else
         {
+            conf.disk_access_mode = Config.DiskAccessMode.standard;
             indexAccessMode = conf.disk_access_mode;
-            logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            logger.info("Non-unix environment detected.  DiskAccessMode set to {}, indexAccessMode {}", conf.disk_access_mode, indexAccessMode);
         }
 
         /* Authentication and authorization backend, implementing IAuthenticator and IAuthorizer */
@@ -602,12 +596,15 @@ public class DatabaseDescriptor
         // there are about 5 checked exceptions that could be thrown here.
         catch (Exception e)
         {
-            logger.error("Fatal configuration error", e);
-            System.err.println(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
-            System.exit(1);
+            throw new ConfigurationException(e.getMessage() + "\nFatal configuration error; unable to start server.  See log for stacktrace.");
         }
         if (seedProvider.getSeeds().size() == 0)
             throw new ConfigurationException("The seed provider lists no seeds.");
+
+        if (conf.batch_size_fail_threshold_in_kb == null)
+        {
+            conf.batch_size_fail_threshold_in_kb = conf.batch_size_warn_threshold_in_kb * 10;
+        }
     }
 
     private static IEndpointSnitch createEndpointSnitch(String snitchClassName) throws ConfigurationException
@@ -718,15 +715,11 @@ public class DatabaseDescriptor
         }
         catch (ConfigurationException e)
         {
-            logger.error("Fatal error: {}", e.getMessage());
-            System.err.println("Bad configuration; unable to start server");
-            System.exit(1);
+            throw new IllegalArgumentException("Bad configuration; unable to start server: "+e.getMessage());
         }
         catch (FSWriteError e)
         {
-            logger.error("Fatal error: {}", e.getMessage());
-            System.err.println(e.getCause().getMessage() + "; unable to start server");
-            System.exit(1);
+            throw new IllegalStateException(e.getCause().getMessage() + "; unable to start server");
         }
     }
 
@@ -778,6 +771,21 @@ public class DatabaseDescriptor
     public static int getBatchSizeWarnThreshold()
     {
         return conf.batch_size_warn_threshold_in_kb * 1024;
+    }
+
+    public static long getBatchSizeFailThreshold()
+    {
+        return conf.batch_size_fail_threshold_in_kb * 1024L;
+    }
+
+    public static int getBatchSizeFailThresholdInKB()
+    {
+        return conf.batch_size_fail_threshold_in_kb;
+    }
+
+    public static void setBatchSizeFailThresholdInKB(int threshold)
+    {
+        conf.batch_size_fail_threshold_in_kb = threshold;
     }
 
     public static Collection<String> getInitialTokens()
@@ -1325,19 +1333,12 @@ public class DatabaseDescriptor
         return conf.max_hint_window_in_ms;
     }
 
-    @Deprecated
-    public static Integer getIndexInterval()
-    {
-        return conf.index_interval;
-    }
-
     public static File getSerializedCachePath(String ksName, String cfName, UUID cfId, CacheService.CacheType cacheType, String version)
     {
         StringBuilder builder = new StringBuilder();
         builder.append(ksName).append('-');
         builder.append(cfName).append('-');
-        if (cfId != null)
-            builder.append(ByteBufferUtil.bytesToHex(ByteBufferUtil.bytes(cfId))).append('-');
+        builder.append(ByteBufferUtil.bytesToHex(ByteBufferUtil.bytes(cfId))).append('-');
         builder.append(cacheType);
         builder.append((version == null ? "" : "-" + version + ".db"));
         return new File(conf.saved_caches_directory, builder.toString());
@@ -1546,6 +1547,12 @@ public class DatabaseDescriptor
         return conf.inter_dc_tcp_nodelay;
     }
 
+
+    public static SSTableFormat.Type getSSTableFormat()
+    {
+        return sstable_format;
+    }
+
     public static MemtablePool getMemtableAllocatorPool()
     {
         long heapLimit = ((long) conf.memtable_heap_space_in_mb) << 20;
@@ -1559,8 +1566,7 @@ public class DatabaseDescriptor
             case offheap_buffers:
                 if (!FileUtils.isCleanerAvailable())
                 {
-                    logger.error("Could not free direct byte buffer: offheap_buffers is not a safe memtable_allocation_type without this ability, please adjust your config. This feature is only guaranteed to work on an Oracle JVM. Refusing to start.");
-                    System.exit(-1);
+                    throw new IllegalStateException("Could not free direct byte buffer: offheap_buffers is not a safe memtable_allocation_type without this ability, please adjust your config. This feature is only guaranteed to work on an Oracle JVM. Refusing to start.");
                 }
                 return new SlabPool(heapLimit, offHeapLimit, conf.memtable_cleanup_threshold, new ColumnFamilyStore.FlushLargestColumnFamily());
             case offheap_objects:

@@ -39,6 +39,7 @@ import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cache.AutoSavingCache;
 import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.dht.Range;
@@ -48,7 +49,9 @@ import org.apache.cassandra.io.util.BufferedRandomAccessFile;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.AntiEntropyService;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.streaming.OperationType;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.NodeId;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.WrappedRunnable;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
@@ -160,7 +163,7 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    public void performCleanup(final ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
+    public void performCleanup(final ColumnFamilyStore cfStore, final NodeId.OneShotRenewer renewer) throws InterruptedException, ExecutionException
     {
         Callable<Object> runnable = new Callable<Object>()
         {
@@ -170,7 +173,7 @@ public class CompactionManager implements CompactionManagerMBean
                 try 
                 {
                     if (!cfStore.isInvalid())
-                        doCleanupCompaction(cfStore);
+                        doCleanupCompaction(cfStore, renewer);
                     return this;
                 }
                 finally 
@@ -427,7 +430,8 @@ public class CompactionManager implements CompactionManagerMBean
           logger.debug("Expected bloom filter size : " + expectedBloomFilterSize);
 
         SSTableWriter writer;
-        CompactionIterator ci = new CompactionIterator(cfs, sstables, gcBefore, major); // retain a handle so we can call close()
+        CompactionController controller = new CompactionController(cfs, sstables, major, gcBefore, false);
+        CompactionIterator ci = new CompactionIterator(sstables, controller); // retain a handle so we can call close()
         Iterator<AbstractCompactedRow> nni = new FilterIterator(ci, PredicateUtils.notNullPredicate());
         executor.beginCompaction(cfs.columnFamily, ci);
 
@@ -587,7 +591,7 @@ public class CompactionManager implements CompactionManagerMBean
                     if (dataSize > dataFile.length())
                         throw new IOError(new IOException("Impossible row size " + dataSize));
                     SSTableIdentityIterator row = new SSTableIdentityIterator(sstable, dataFile, key, dataStart, dataSize, true);
-                    AbstractCompactedRow compactedRow = getCompactedRow(row, cfs, sstable.descriptor, true);
+                    AbstractCompactedRow compactedRow = getCompactedRow(row, sstable.descriptor, true);
                     if (compactedRow.isEmpty())
                     {
                         emptyRows++;
@@ -615,7 +619,7 @@ public class CompactionManager implements CompactionManagerMBean
                         try
                         {
                             SSTableIdentityIterator row = new SSTableIdentityIterator(sstable, dataFile, key, dataStartFromIndex, dataSizeFromIndex, true);
-                            AbstractCompactedRow compactedRow = getCompactedRow(row, cfs, sstable.descriptor, true);
+                            AbstractCompactedRow compactedRow = getCompactedRow(row, sstable.descriptor, true);
                             if (compactedRow.isEmpty())
                             {
                                 emptyRows++;
@@ -676,11 +680,12 @@ public class CompactionManager implements CompactionManagerMBean
      *
      * @throws IOException
      */
-    private void doCleanupCompaction(ColumnFamilyStore cfs) throws IOException
+    private void doCleanupCompaction(ColumnFamilyStore cfs, NodeId.OneShotRenewer renewer) throws IOException
     {
         assert !cfs.isIndex();
         Table table = cfs.table;
         Collection<Range> ranges = StorageService.instance.getLocalRanges(table.name);
+        boolean isCommutative = cfs.metadata.getDefaultValidator().isCommutative();
 
         for (SSTableReader sstable : cfs.getSSTables())
         {
@@ -711,16 +716,21 @@ public class CompactionManager implements CompactionManagerMBean
                     if (Range.isTokenInRanges(row.getKey().token, ranges))
                     {
                         writer = maybeCreateWriter(cfs, compactionFileLocation, expectedBloomFilterSize, writer);
-                        writer.append(getCompactedRow(row, cfs, sstable.descriptor, false));
+                        writer.append(getCompactedRow(row, sstable.descriptor, false));
                         totalkeysWritten++;
                     }
                     else
                     {
-                        while (row.hasNext())
+                        if (!indexedColumns.isEmpty() || isCommutative)
                         {
-                            IColumn column = row.next();
-                            if (indexedColumns.contains(column.name()))
-                                Table.cleanupIndexEntry(cfs, row.getKey().key, column);
+                            while (row.hasNext())
+                            {
+                                IColumn column = row.next();
+                                if (column instanceof CounterColumn)
+                                    renewer.maybeRenew((CounterColumn)column);
+                                if (indexedColumns.contains(column.name()))
+                                    Table.cleanupIndexEntry(cfs, row.getKey().key, column);
+                            }
                         }
                     }
                 }
@@ -767,16 +777,16 @@ public class CompactionManager implements CompactionManagerMBean
     /**
      * @return an AbstractCompactedRow implementation to write the row in question.
      * If the data is from a current-version sstable, write it unchanged.  Otherwise,
-     * re-serialize it in the latest version.
+     * re-serialize it in the latest version. The returned AbstractCompactedRow will not purge data.
      */
-    private AbstractCompactedRow getCompactedRow(SSTableIdentityIterator row, ColumnFamilyStore cfs, Descriptor descriptor, boolean forceDeserialize)
+    private AbstractCompactedRow getCompactedRow(SSTableIdentityIterator row, Descriptor descriptor, boolean forceDeserialize)
     {
         if (descriptor.isLatestVersion && !forceDeserialize)
             return new EchoedRow(row);
 
         return row.dataSize > DatabaseDescriptor.getInMemoryCompactionLimit()
-               ? new LazilyCompactedRow(cfs, Arrays.asList(row), false, getDefaultGcBefore(cfs), forceDeserialize)
-               : new PrecompactedRow(cfs, Arrays.asList(row), false, getDefaultGcBefore(cfs), forceDeserialize);
+               ? new LazilyCompactedRow(CompactionController.getBasicController(forceDeserialize), Arrays.asList(row))
+               : new PrecompactedRow(CompactionController.getBasicController(forceDeserialize), Arrays.asList(row));
     }
 
     private SSTableWriter maybeCreateWriter(ColumnFamilyStore cfs, String compactionFileLocation, int expectedBloomFilterSize, SSTableWriter writer)
@@ -925,11 +935,11 @@ public class CompactionManager implements CompactionManagerMBean
         else
             return executor.submit(runnable);
     }
-    
-    public Future<SSTableReader> submitSSTableBuild(final Descriptor desc)
+
+    public Future<SSTableReader> submitSSTableBuild(final Descriptor desc, OperationType type)
     {
         // invalid descriptions due to missing or dropped CFS are handled by SSTW and StreamInSession.
-        final SSTableWriter.Builder builder = SSTableWriter.createBuilder(desc);
+        final SSTableWriter.Builder builder = SSTableWriter.createBuilder(desc, type);
         Callable<SSTableReader> callable = new Callable<SSTableReader>()
         {
             public SSTableReader call() throws IOException
@@ -949,7 +959,7 @@ public class CompactionManager implements CompactionManagerMBean
         return executor.submit(callable);
     }
 
-    public Future<?> submitCacheWrite(final CacheWriter writer)
+    public Future<?> submitCacheWrite(final AutoSavingCache.Writer writer)
     {
         Runnable runnable = new WrappedRunnable()
         {
@@ -971,7 +981,7 @@ public class CompactionManager implements CompactionManagerMBean
     {
         public ValidationCompactionIterator(ColumnFamilyStore cfs) throws IOException
         {
-            super(cfs, cfs.getSSTables(), getDefaultGcBefore(cfs), true);
+            super(cfs.getSSTables(), new CompactionController(cfs, cfs.getSSTables(), true, getDefaultGcBefore(cfs), false));
         }
 
         @Override

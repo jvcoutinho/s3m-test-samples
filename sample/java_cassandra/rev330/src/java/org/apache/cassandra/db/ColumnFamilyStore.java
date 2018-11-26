@@ -56,6 +56,7 @@ import org.apache.cassandra.thrift.IndexClause;
 import org.apache.cassandra.thrift.IndexExpression;
 import org.apache.cassandra.thrift.IndexOperator;
 import org.apache.cassandra.utils.*;
+import org.cliffc.high_scale_lib.NonBlockingHashMap;
 
 public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 {
@@ -108,7 +109,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private AtomicInteger fileIndexGenerator = new AtomicInteger(0);
 
     /* active memtable associated with this ColumnFamilyStore. */
-    private Memtable memtable;
+    private volatile Memtable memtable;
 
     private final ConcurrentSkipListMap<ByteBuffer, ColumnFamilyStore> indexedColumns;
 
@@ -126,6 +127,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private final EstimatedHistogram sstablesPerRead = new EstimatedHistogram(35);
 
     public final CFMetaData metadata;
+
+    private static final int INTERN_CUTOFF = 256;
+    public final ConcurrentMap<ByteBuffer, ByteBuffer> internedNames = new NonBlockingHashMap<ByteBuffer, ByteBuffer>();
 
     /* These are locally held copies to be changed from the config during runtime */
     private volatile DefaultInteger minCompactionThreshold;
@@ -287,6 +291,42 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             }
         }
         return keys;
+    }
+
+    public boolean reverseReadWriteOrder()
+    {
+        //XXX: PURPOSE: allow less harmful race condition w/o locking
+
+        // normal read/write order (non-commutative):
+        //   purpose:
+        //     avoid missing an MT; may double reconcile
+        //   read path order:
+        //     1) live MT
+        //     2) MTs pending flush
+        //     3) SSTs
+        //   write path order: (live MT => MT pending flush)
+        //     1) add live MT to MTs pending flush
+        //     2) reset live MT
+        //   write path order: (MT pending flush => SST)
+        //     1) add SST
+        //     2) remove MT pending flush
+
+        // reversed read/write order (commutative):
+        //   purpose:
+        //     avoid over-counting an MT; may miss an MT
+        //   read path order:
+        //     1) SSTs
+        //     2) MTs pending flush
+        //     3) live MT
+        //   write path order: (live MT => MT pending flush)
+        //     1) save live MT
+        //     2) reset live MT
+        //     3) add saved MT to MTs pending flush
+        //   write path order: (MT pending flush => SST)
+        //     1) remove MT pending flush
+        //     2) add SST
+
+        return metadata.getDefaultValidator().isCommutative();
     }
 
     public void addIndex(final ColumnDefinition info)
@@ -641,27 +681,21 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     /** flush the given memtable and swap in a new one for its CFS, if it hasn't been frozen already.  threadsafe. */
     Future<?> maybeSwitchMemtable(Memtable oldMemtable, final boolean writeCommitLog)
     {
-        /*
-         * If we can get the writelock, that means no new updates can come in and
-         * all ongoing updates to memtables have completed. We can get the tail
-         * of the log and use it as the starting position for log replay on recovery.
-         *
-         * This is why we Table.flusherLock needs to be global instead of per-Table:
-         * we need to schedule discardCompletedSegments calls in the same order as their
-         * contexts (commitlog position) were read, even though the flush executor
-         * is multithreaded.
-         */
-        Table.flusherLock.writeLock().lock();
+        if (oldMemtable.isPendingFlush())
+            return null;
+
+        if (DatabaseDescriptor.getCFMetaData(metadata.cfId) == null)
+            return null; // column family was dropped. no point in flushing.
+
+        // Only one thread will succeed in marking it as pending flush; the others can go back to processing writes
+        if (!oldMemtable.markPendingFlush())
+            return null;
+
+        // Table.flusherLock ensures that we schedule discardCompletedSegments calls in the same order as their
+        // contexts (commitlog position) were read, even though the flush executor is multithreaded.
+        Table.flusherLock.lock();
         try
         {
-            if (oldMemtable.isFrozen())
-                return null;
-            
-            if (DatabaseDescriptor.getCFMetaData(metadata.cfId) == null)
-                return null; // column family was dropped. no point in flushing.
-
-            assert memtable == oldMemtable;
-            memtable.freeze();
             final CommitLogSegment.CommitLogContext ctx = writeCommitLog ? CommitLog.instance.getContext() : null;
             logger.info("switching in a fresh Memtable for " + columnFamily + " at " + ctx);
 
@@ -676,8 +710,19 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             final CountDownLatch latch = new CountDownLatch(icc.size());
             for (ColumnFamilyStore cfs : icc)
             {
-                submitFlush(cfs.memtable, latch);
-                cfs.memtable = new Memtable(cfs);
+                if (!reverseReadWriteOrder())
+                {
+                    //XXX: race condition: may allow double reconcile; but never misses an MT
+                    submitFlush(cfs.memtable, latch);
+                    cfs.memtable = new Memtable(cfs);
+                }
+                else
+                {
+                    //XXX: race condition: may miss an MT, but no double counts
+                    Memtable pendingFlush = cfs.memtable;
+                    cfs.memtable = new Memtable(cfs);
+                    submitFlush(pendingFlush, latch);
+                }
             }
 
             // when all the memtables have been written, including for indexes, mark the flush in the commitlog header.
@@ -699,7 +744,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
         finally
         {
-            Table.flusherLock.writeLock().unlock();
+            Table.flusherLock.unlock();
             if (memtableSwitchCount == Integer.MAX_VALUE)
             {
                 memtableSwitchCount = 0;
@@ -745,8 +790,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     /**
      * Insert/Update the column family for this key.
-     * Caller is responsible for acquiring Table.flusherLock!
-     * param @ lock - lock that needs to be used.
      * param @ key - key for update/insert
      * param @ columnFamily - columnFamily changes
      */
@@ -754,14 +797,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     {
         long start = System.nanoTime();
 
-        boolean flushRequested = memtable.isThresholdViolated();
-        memtable.put(key, columnFamily);
+        Memtable mt = getMemtableThreadSafe();
+        boolean flushRequested = mt.isThresholdViolated();
+        mt.put(key, columnFamily);
         ColumnFamily cachedRow = getRawCachedRow(key);
         if (cachedRow != null)
             cachedRow.addAll(columnFamily);
         writeStats.addNano(System.nanoTime() - start);
         
-        return flushRequested ? memtable : null;
+        return flushRequested ? mt : null;
     }
 
     /*
@@ -819,7 +863,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             // remove columns if
             // (a) the column itself is tombstoned or
             // (b) the CF is tombstoned and the column is not newer than it
-            // (we split the test to avoid computing ClockRelationship if not necessary)
             if ((c.isMarkedForDelete() && c.getLocalDeletionTime() <= gcBefore)
                 || c.timestamp() <= cf.getMarkedForDeleteAt())
             {
@@ -994,26 +1037,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     }
 
     /**
-     * get the current memtable in a threadsafe fashion.  note that simply "return memtable_" is
-     * incorrect; you need to lock to introduce a thread safe happens-before ordering.
+     * get the current memtable in a threadsafe fashion. 
+     * Returning memtable is ok because memtable is volatile, and thus
+     * introduce a happens-before ordering.
      *
-     * do NOT use this method to do either a put or get on the memtable object, since it could be
-     * flushed in the meantime (and its executor terminated).
-     *
-     * also do NOT make this method public or it will really get impossible to reason about these things.
-     * @return
+     * do NOT make this method public or it will really get impossible to reason about these things.
      */
     private Memtable getMemtableThreadSafe()
     {
-        Table.flusherLock.readLock().lock();
-        try
-        {
-            return memtable;
-        }
-        finally
-        {
-            Table.flusherLock.readLock().unlock();
-        }
+        return memtable;
     }
 
     public Collection<SSTableReader> getSSTables()
@@ -1056,10 +1088,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return readStats.getTotalLatencyMicros();
     }
 
-// TODO this actually isn't a good meature of pending tasks
+    // TODO this actually isn't a good meature of pending tasks
     public int getPendingTasks()
     {
-        return Table.flusherLock.getQueueLength();
+        return 0;
     }
 
     public long getWriteCount()
@@ -1113,47 +1145,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         if ((cached = ssTables.getRowCache().get(key)) == null)
         {
             cached = getTopLevelColumns(QueryFilter.getIdentityFilter(key, new QueryPath(columnFamily)), Integer.MIN_VALUE);
-
             if (cached == null)
-            {
                 return null;
-            }
 
-            /**
-             *  checking if name or value of the column don't have backing array
-             *  if found then removing column and storing deep copy instead
-             *  because we don't want to put such columns to the cache
-             */
+            // make a deep copy of column data so we don't keep references to direct buffers, which
+            // would prevent munmap post-compaction.
             for (IColumn column : cached.getSortedColumns())
             {
-                // for Super CF checking only name
-                if (cached.isSuper())
-                {
-                    // if name of the super column is DirectBuffer then copying whole column
-                    if (!column.name().hasArray())
-                    {
-                        cached.deepCopyColumn(column);
-                    }
-                    // checking if sub-columns also have DirectBuffer as name or value
-                    else
-                    {
-                        SuperColumn superColumn = (SuperColumn) column;
-
-                        for (IColumn subColumn : column.getSubColumns())
-                        {
-                            if (!subColumn.name().hasArray() || !subColumn.value().hasArray())
-                            {
-                                superColumn.remove(subColumn.name());
-                                superColumn.addColumn(subColumn.deepCopy());
-                            }
-                        }
-                    }
-                }
-                // for Standard checking name and value
-                else if (!column.name().hasArray() || !column.value().hasArray())
-                {
-                    cached.deepCopyColumn(column);
-                }
+                cached.remove(column.name());
+                cached.addColumn(column.localCopy(this));
             }
 
             // avoid keeping a permanent reference to the original key buffer
@@ -1255,36 +1255,75 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         {
             IColumnIterator iter;
 
-            /* add the current memtable */
-            iter = filter.getMemtableColumnIterator(getMemtableThreadSafe(), getComparator());
-            if (iter != null)
+            int sstablesToIterate = 0;
+            if (!reverseReadWriteOrder())
             {
-                returnCF.delete(iter.getColumnFamily());
-                    
-                iterators.add(iter);
-            }
+                //XXX: race condition: may allow double reconcile; but never misses an MT
 
-            /* add the memtables being flushed */
-            for (Memtable memtable : memtablesPendingFlush)
-            {
-                iter = filter.getMemtableColumnIterator(memtable, getComparator());
+                /* add the current memtable */
+                iter = filter.getMemtableColumnIterator(getMemtableThreadSafe(), getComparator());
                 if (iter != null)
                 {
                     returnCF.delete(iter.getColumnFamily());
                     iterators.add(iter);
                 }
-            }
 
-            /* add the SSTables on disk */
-            int sstablesToIterate = 0;
-            for (SSTableReader sstable : ssTables)
+                /* add the memtables being flushed */
+                for (Memtable memtable : memtablesPendingFlush)
+                {
+                    iter = filter.getMemtableColumnIterator(memtable, getComparator());
+                    if (iter != null)
+                    {
+                        returnCF.delete(iter.getColumnFamily());
+                        iterators.add(iter);
+                    }
+                }
+                
+                /* add the SSTables on disk */
+                for (SSTableReader sstable : ssTables)
+                {
+                    iter = filter.getSSTableColumnIterator(sstable);
+                    if (iter.getColumnFamily() != null)
+                    {
+                        returnCF.delete(iter.getColumnFamily());
+                        iterators.add(iter);
+                    }
+                    sstablesToIterate++;
+                }
+            }
+            else
             {
-                iter = filter.getSSTableColumnIterator(sstable);
-                if (iter.getColumnFamily() != null)
+                //XXX: race condition: may miss an MT, but no double counts
+
+                /* add the SSTables on disk */
+                for (SSTableReader sstable : ssTables)
+                {
+                    iter = filter.getSSTableColumnIterator(sstable);
+                    if (iter.getColumnFamily() != null)
+                    {
+                        returnCF.delete(iter.getColumnFamily());
+                        iterators.add(iter);
+                    }
+                    sstablesToIterate++;
+                }
+
+                /* add the memtables being flushed */
+                for (Memtable memtable : memtablesPendingFlush)
+                {
+                    iter = filter.getMemtableColumnIterator(memtable, getComparator());
+                    if (iter != null)
+                    {
+                        returnCF.delete(iter.getColumnFamily());
+                        iterators.add(iter);
+                    }
+                }
+
+                /* add the current memtable */
+                iter = filter.getMemtableColumnIterator(getMemtableThreadSafe(), getComparator());
+                if (iter != null)
                 {
                     returnCF.delete(iter.getColumnFamily());
                     iterators.add(iter);
-                    sstablesToIterate++;
                 }
             }
             recentSSTablesPerRead.add(sstablesToIterate);
@@ -1345,12 +1384,23 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         QueryFilter filter = new QueryFilter(null, new QueryPath(columnFamily, superColumn, null), columnFilter);
         Collection<Memtable> memtables = new ArrayList<Memtable>();
-        memtables.add(getMemtableThreadSafe());
-        memtables.addAll(memtablesPendingFlush);
-
         Collection<SSTableReader> sstables = new ArrayList<SSTableReader>();
-        Iterables.addAll(sstables, ssTables);
 
+        if (!reverseReadWriteOrder())
+        {
+            //XXX: race condition: may allow double reconcile; but never misses an MT
+            memtables.add(getMemtableThreadSafe());
+            memtables.addAll(memtablesPendingFlush);
+            Iterables.addAll(sstables, ssTables);
+        }
+        else
+        {
+            //XXX: race condition: may miss an MT, but no double counts
+            Iterables.addAll(sstables, ssTables);
+            memtables.addAll(memtablesPendingFlush);
+            memtables.add(getMemtableThreadSafe());
+        }
+        
         RowIterator iterator = RowIteratorFactory.getIterator(memtables, sstables, startWith, stopAt, filter, getComparator(), this);
         int gcBefore = (int)(System.currentTimeMillis() / 1000) - metadata.getGcGraceSeconds();
 
@@ -2062,6 +2112,35 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
                                       columnFamily, ssTables.getKeyCache().getCapacity(), newCapacity));
             ssTables.getKeyCache().setCapacity(newCapacity);
         }
+    }
+
+    private ByteBuffer intern(ByteBuffer name)
+    {
+        ByteBuffer internedName = internedNames.get(name);
+        if (internedName == null)
+        {
+            internedName = ByteBufferUtil.clone(name);
+            ByteBuffer concurrentName = internedNames.putIfAbsent(internedName, internedName);
+            if (concurrentName != null)
+                internedName = concurrentName;
+        }
+        return internedName;
+    }
+
+    public ByteBuffer internOrCopy(ByteBuffer name)
+    {
+        if (internedNames.size() >= INTERN_CUTOFF)
+            return ByteBufferUtil.clone(name);
+
+        return intern(name);
+    }
+
+    public ByteBuffer maybeIntern(ByteBuffer name)
+    {
+        if (internedNames.size() >= INTERN_CUTOFF)
+            return name;
+
+        return intern(name);
     }
 
     public SSTableWriter createFlushWriter(long estimatedRows) throws IOException

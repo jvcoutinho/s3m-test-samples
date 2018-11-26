@@ -102,27 +102,6 @@ public class ResultSet
         return new ResultSet(metadata.withPagingState(state), rows);
     }
 
-    public ResultSet makeCountResult(ColumnIdentifier alias)
-    {
-        assert metadata.names != null;
-        String ksName = metadata.names.get(0).ksName;
-        String cfName = metadata.names.get(0).cfName;
-        long count = rows.size();
-        return makeCountResult(ksName, cfName, count, alias);
-    }
-
-    public static ResultSet.Metadata makeCountMetadata(String ksName, String cfName, ColumnIdentifier alias)
-    {
-        ColumnSpecification spec = new ColumnSpecification(ksName, cfName, alias == null ? COUNT_COLUMN : alias, LongType.instance);
-        return new Metadata(Collections.singletonList(spec));
-    }
-
-    public static ResultSet makeCountResult(String ksName, String cfName, long count, ColumnIdentifier alias)
-    {
-        List<List<ByteBuffer>> newRows = Collections.singletonList(Collections.singletonList(ByteBufferUtil.bytes(count)));
-        return new ResultSet(makeCountMetadata(ksName, cfName, alias), newRows);
-    }
-
     public CqlResult toThriftResult()
     {
         assert metadata.names != null;
@@ -333,7 +312,7 @@ public class ResultSet
             {
                 for (ColumnSpecification name : names)
                 {
-                    sb.append("[").append(name.name.toString());
+                    sb.append("[").append(name.name);
                     sb.append("(").append(name.ksName).append(", ").append(name.cfName).append(")");
                     sb.append(", ").append(name.type).append("]");
                 }

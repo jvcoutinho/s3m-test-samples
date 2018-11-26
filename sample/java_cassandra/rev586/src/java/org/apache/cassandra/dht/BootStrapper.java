@@ -28,6 +28,7 @@ package org.apache.cassandra.dht;
  import com.google.common.collect.ArrayListMultimap;
  import com.google.common.collect.HashMultimap;
  import com.google.common.collect.Multimap;
+ import org.apache.cassandra.gms.Gossiper;
  import org.apache.commons.lang.ArrayUtils;
  import org.apache.commons.lang.StringUtils;
  import org.slf4j.Logger;
@@ -45,6 +46,7 @@ package org.apache.cassandra.dht;
  import org.apache.cassandra.net.Message;
  import org.apache.cassandra.net.MessagingService;
  import org.apache.cassandra.service.StorageService;
+ import org.apache.cassandra.streaming.OperationType;
  import org.apache.cassandra.streaming.StreamIn;
  import org.apache.cassandra.utils.FBUtilities;
  import org.apache.cassandra.utils.SimpleCondition;
@@ -107,8 +109,8 @@ public class BootStrapper
                     }
                 };
                 if (logger.isDebugEnabled())
-                    logger.debug("Bootstrapping from " + source + " ranges " + StringUtils.join(ranges, ", "));
-                StreamIn.requestRanges(source, table, ranges, callback);
+                    logger.debug("Bootstrapping from " + source + " ranges " + StringUtils.join(entry.getValue(), ", "));
+                StreamIn.requestRanges(source, table, entry.getValue(), callback, OperationType.BOOTSTRAP);
             }
         }
 
@@ -214,7 +216,10 @@ public class BootStrapper
 
     static Token<?> getBootstrapTokenFrom(InetAddress maxEndpoint)
     {
-        Message message = new Message(FBUtilities.getLocalAddress(), StorageService.Verb.BOOTSTRAP_TOKEN, ArrayUtils.EMPTY_BYTE_ARRAY);
+        Message message = new Message(FBUtilities.getLocalAddress(), 
+                                      StorageService.Verb.BOOTSTRAP_TOKEN, 
+                                      ArrayUtils.EMPTY_BYTE_ARRAY, 
+                                      Gossiper.instance.getVersion(maxEndpoint));
         BootstrapTokenCallback btc = new BootstrapTokenCallback();
         MessagingService.instance().sendRR(message, maxEndpoint, btc);
         return btc.getToken();
@@ -250,12 +255,12 @@ public class BootStrapper
 
     public static class BootstrapTokenVerbHandler implements IVerbHandler
     {
-        public void doVerb(Message message)
+        public void doVerb(Message message, String id)
         {
             StorageService ss = StorageService.instance;
             String tokenString = StorageService.getPartitioner().getTokenFactory().toString(ss.getBootstrapToken());
-            Message response = message.getInternalReply(tokenString.getBytes(Charsets.UTF_8));
-            MessagingService.instance().sendOneWay(response, message.getFrom());
+            Message response = message.getInternalReply(tokenString.getBytes(Charsets.UTF_8), message.getVersion());
+            MessagingService.instance().sendReply(response, id, message.getFrom());
         }
     }
 

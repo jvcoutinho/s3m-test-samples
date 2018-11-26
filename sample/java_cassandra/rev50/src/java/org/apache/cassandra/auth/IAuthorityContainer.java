@@ -20,8 +20,9 @@
 package org.apache.cassandra.auth;
 
 import org.apache.cassandra.cql3.CFName;
-import org.apache.cassandra.thrift.CqlResult;
-import org.apache.cassandra.thrift.InvalidRequestException;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.UnauthorizedException;
+import org.apache.cassandra.transport.messages.ResultMessage;
 
 /**
  * 1.1.x : Temporary measure to unable dynamic operations without changing IAuthority interface.
@@ -53,7 +54,7 @@ public class IAuthorityContainer
         return authority;
     }
 
-    public void grant(AuthenticatedUser granter, Permission permission, String to, CFName resource, boolean grantOption) throws InvalidRequestException
+    public void grant(AuthenticatedUser granter, Permission permission, String to, CFName resource, boolean grantOption) throws UnauthorizedException, InvalidRequestException
     {
         if (dynamicAuthority == null)
             throw new InvalidRequestException("GRANT operation is not supported by your authority: " + authority);
@@ -64,7 +65,7 @@ public class IAuthorityContainer
         dynamicAuthority.grant(granter, permission, to, resource, grantOption);
     }
 
-    public void revoke(AuthenticatedUser revoker, Permission permission, String from, CFName resource) throws InvalidRequestException
+    public void revoke(AuthenticatedUser revoker, Permission permission, String from, CFName resource) throws UnauthorizedException, InvalidRequestException
     {
         if (dynamicAuthority == null)
             throw new InvalidRequestException("REVOKE operation is not supported by your authority: " + authority);
@@ -72,7 +73,7 @@ public class IAuthorityContainer
         dynamicAuthority.revoke(revoker, permission, from, resource);
     }
 
-    public CqlResult listPermissions(String username) throws InvalidRequestException
+    public ResultMessage listPermissions(String username) throws UnauthorizedException, InvalidRequestException
     {
         if (dynamicAuthority == null)
             throw new InvalidRequestException("LIST GRANTS operation is not supported by your authority: " + authority);

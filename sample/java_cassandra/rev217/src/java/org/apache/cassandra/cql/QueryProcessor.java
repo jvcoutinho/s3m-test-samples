@@ -1,5 +1,4 @@
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,48 +7,53 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
-
 package org.apache.cassandra.cql;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.cassandra.auth.Permission;
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cli.CliUtils;
 import org.apache.cassandra.db.CounterColumn;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.context.CounterContext;
-import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.MarshalException;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.dht.*;
+import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.MigrationManager;
-import org.apache.cassandra.thrift.*;
 import org.apache.cassandra.thrift.Column;
+import org.apache.cassandra.db.ConsistencyLevel;
+import org.apache.cassandra.thrift.CqlMetadata;
+import org.apache.cassandra.thrift.CqlResult;
+import org.apache.cassandra.thrift.CqlResultType;
+import org.apache.cassandra.thrift.CqlRow;
+import org.apache.cassandra.thrift.CqlPreparedResult;
+import org.apache.cassandra.thrift.IndexExpression;
+import org.apache.cassandra.thrift.IndexOperator;
+import org.apache.cassandra.thrift.IndexType;
+import org.apache.cassandra.thrift.RequestType;
+import org.apache.cassandra.thrift.SchemaDisagreementException;
+import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
@@ -70,12 +74,10 @@ public class QueryProcessor
 
     private static final Logger logger = LoggerFactory.getLogger(QueryProcessor.class);
 
-    private static final long timeLimitForSchemaAgreement = 10 * 1000;
-
     public static final String DEFAULT_KEY_NAME = bufferToString(CFMetaData.DEFAULT_KEY_NAME);
 
     private static List<org.apache.cassandra.db.Row> getSlice(CFMetaData metadata, SelectStatement select, List<ByteBuffer> variables)
-    throws InvalidRequestException, TimedOutException, UnavailableException
+    throws InvalidRequestException, ReadTimeoutException, UnavailableException, IsBootstrappingException
     {
         QueryPath queryPath = new QueryPath(select.getColumnFamily());
         List<ReadCommand> commands = new ArrayList<ReadCommand>();
@@ -106,7 +108,7 @@ public class QueryProcessor
                 ByteBuffer key = rawKey.getByteBuffer(metadata.getKeyValidator(),variables);
 
                 validateKey(key);
-                validateSliceRange(metadata, start, finish, select.isColumnsReversed());
+                validateSliceFilter(metadata, start, finish, select.isColumnsReversed());
                 commands.add(new SliceFromReadCommand(metadata.ksName,
                                                       key,
                                                       queryPath,
@@ -121,22 +123,18 @@ public class QueryProcessor
         {
             return StorageProxy.read(commands, select.getConsistencyLevel());
         }
-        catch (TimeoutException e)
-        {
-            throw new TimedOutException();
-        }
         catch (IOException e)
         {
             throw new RuntimeException(e);
         }
     }
 
-    private static List<ByteBuffer> getColumnNames(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
+    private static SortedSet<ByteBuffer> getColumnNames(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
     throws InvalidRequestException
     {
         String keyString = getKeyString(metadata);
         List<Term> selectColumnNames = select.getColumnNames();
-        List<ByteBuffer> columnNames = new ArrayList<ByteBuffer>(selectColumnNames.size());
+        SortedSet<ByteBuffer> columnNames = new TreeSet<ByteBuffer>(metadata.comparator);
         for (Term column : selectColumnNames)
         {
             // skip the key for the slice op; we'll add it to the resultset in extractThriftColumns
@@ -147,7 +145,7 @@ public class QueryProcessor
     }
 
     private static List<org.apache.cassandra.db.Row> multiRangeSlice(CFMetaData metadata, SelectStatement select, List<ByteBuffer> variables)
-    throws TimedOutException, UnavailableException, InvalidRequestException
+    throws ReadTimeoutException, UnavailableException, InvalidRequestException
     {
         List<org.apache.cassandra.db.Row> rows;
         IPartitioner<?> p = StorageService.getPartitioner();
@@ -172,9 +170,8 @@ public class QueryProcessor
         }
         AbstractBounds<RowPosition> bounds = new Bounds<RowPosition>(startKey, finishKey);
 
-        // XXX: Our use of Thrift structs internally makes me Sad. :(
-        SlicePredicate thriftSlicePredicate = slicePredicateFromSelect(select, metadata, variables);
-        validateSlicePredicate(metadata, thriftSlicePredicate);
+        IFilter columnFilter = filterFromSelect(select, metadata, variables);
+        validateFilter(metadata, columnFilter);
 
         List<Relation> columnRelations = select.getColumnRelations();
         List<IndexExpression> expressions = new ArrayList<IndexExpression>(columnRelations.size());
@@ -198,7 +195,7 @@ public class QueryProcessor
             rows = StorageProxy.getRangeSlice(new RangeSliceCommand(metadata.ksName,
                                                                     select.getColumnFamily(),
                                                                     null,
-                                                                    thriftSlicePredicate,
+                                                                    columnFilter,
                                                                     bounds,
                                                                     expressions,
                                                                     limit),
@@ -207,14 +204,6 @@ public class QueryProcessor
         catch (IOException e)
         {
             throw new RuntimeException(e);
-        }
-        catch (org.apache.cassandra.thrift.UnavailableException e)
-        {
-            throw new UnavailableException();
-        }
-        catch (TimeoutException e)
-        {
-            throw new TimedOutException();
         }
 
         // if start key was set and relation was "greater than"
@@ -236,7 +225,7 @@ public class QueryProcessor
     }
 
     private static void batchUpdate(ClientState clientState, List<UpdateStatement> updateStatements, ConsistencyLevel consistency, List<ByteBuffer> variables )
-    throws InvalidRequestException, UnavailableException, TimedOutException
+    throws RequestValidationException, RequestExecutionException
     {
         String globalKeyspace = clientState.getKeyspace();
         List<IMutation> rowMutations = new ArrayList<IMutation>(updateStatements.size());
@@ -261,46 +250,29 @@ public class QueryProcessor
             validateKey(mutation.key());
         }
 
-        try
-        {
-            StorageProxy.mutate(rowMutations, consistency);
-        }
-        catch (org.apache.cassandra.thrift.UnavailableException e)
-        {
-            throw new UnavailableException();
-        }
-        catch (TimeoutException e)
-        {
-            throw new TimedOutException();
-        }
+        StorageProxy.mutate(rowMutations, consistency);
     }
 
-    private static SlicePredicate slicePredicateFromSelect(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
+    private static IFilter filterFromSelect(SelectStatement select, CFMetaData metadata, List<ByteBuffer> variables)
     throws InvalidRequestException
     {
-        SlicePredicate thriftSlicePredicate = new SlicePredicate();
-
         if (select.isColumnRange() || select.getColumnNames().size() == 0)
         {
-            SliceRange sliceRange = new SliceRange();
-            sliceRange.start = select.getColumnStart().getByteBuffer(metadata.comparator, variables);
-            sliceRange.finish = select.getColumnFinish().getByteBuffer(metadata.comparator, variables);
-            sliceRange.reversed = select.isColumnsReversed();
-            sliceRange.count = select.getColumnsLimit();
-            thriftSlicePredicate.slice_range = sliceRange;
+            return new SliceQueryFilter(select.getColumnStart().getByteBuffer(metadata.comparator, variables),
+                                        select.getColumnFinish().getByteBuffer(metadata.comparator, variables),
+                                        select.isColumnsReversed(),
+                                        select.getColumnsLimit());
         }
         else
         {
-            thriftSlicePredicate.column_names = getColumnNames(select, metadata, variables);
+            return new NamesQueryFilter(getColumnNames(select, metadata, variables));
         }
-
-        return thriftSlicePredicate;
     }
 
     /* Test for SELECT-specific taboos */
     private static void validateSelect(String keyspace, SelectStatement select, List<ByteBuffer> variables) throws InvalidRequestException
     {
-        ThriftValidation.validateConsistencyLevel(keyspace, select.getConsistencyLevel(), RequestType.READ);
+        select.getConsistencyLevel().validateForRead(keyspace);
 
         // Finish key w/o start key (KEY < foo)
         if (!select.isKeyRange() && (select.getKeyFinish() != null))
@@ -321,10 +293,11 @@ public class QueryProcessor
         if (select.getColumnRelations().size() > 0)
         {
             AbstractType<?> comparator = select.getComparator(keyspace);
-            Set<ByteBuffer> indexed = Table.open(keyspace).getColumnFamilyStore(select.getColumnFamily()).indexManager.getIndexedColumns();
+            SecondaryIndexManager idxManager = Table.open(keyspace).getColumnFamilyStore(select.getColumnFamily()).indexManager;
             for (Relation relation : select.getColumnRelations())
             {
-                if ((relation.operator() == RelationType.EQ) && indexed.contains(relation.getEntity().getByteBuffer(comparator, variables)))
+                ByteBuffer name = relation.getEntity().getByteBuffer(comparator, variables);
+                if ((relation.operator() == RelationType.EQ) && idxManager.indexes(name))
                     return;
             }
             throw new InvalidRequestException("No indexed columns present in by-columns clause with \"equals\" operator");
@@ -393,35 +366,28 @@ public class QueryProcessor
         }
     }
 
-    private static void validateSlicePredicate(CFMetaData metadata, SlicePredicate predicate)
+    private static void validateFilter(CFMetaData metadata, IFilter filter)
     throws InvalidRequestException
     {
-        if (predicate.slice_range != null)
-            validateSliceRange(metadata, predicate.slice_range);
+        if (filter instanceof SliceQueryFilter)
+            validateSliceFilter(metadata, (SliceQueryFilter)filter);
         else
-            validateColumnNames(predicate.column_names);
+            validateColumnNames(((NamesQueryFilter)filter).columns);
     }
 
-    private static void validateSliceRange(CFMetaData metadata, SliceRange range)
+    private static void validateSliceFilter(CFMetaData metadata, SliceQueryFilter range)
     throws InvalidRequestException
     {
-        validateSliceRange(metadata, range.start, range.finish, range.reversed);
+        validateSliceFilter(metadata, range.start(), range.finish(), range.reversed);
     }
 
-    private static void validateSliceRange(CFMetaData metadata, ByteBuffer start, ByteBuffer finish, boolean reversed)
+    private static void validateSliceFilter(CFMetaData metadata, ByteBuffer start, ByteBuffer finish, boolean reversed)
     throws InvalidRequestException
     {
         AbstractType<?> comparator = metadata.getComparatorFor(null);
         Comparator<ByteBuffer> orderedComparator = reversed ? comparator.reverseComparator: comparator;
         if (start.remaining() > 0 && finish.remaining() > 0 && orderedComparator.compare(start, finish) > 0)
             throw new InvalidRequestException("range finish must come after start in traversal order");
-    }
-
-    // Copypasta from CassandraServer (where it is private).
-    private static void validateSchemaAgreement() throws SchemaDisagreementException
-    {
-       if (describeSchemaVersions().size() > 1)
-            throw new SchemaDisagreementException();
     }
 
     private static Map<String, List<String>> describeSchemaVersions()
@@ -432,7 +398,7 @@ public class QueryProcessor
     }
 
     public static CqlResult processStatement(CQLStatement statement,ClientState clientState, List<ByteBuffer> variables )
-    throws  UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    throws RequestExecutionException, RequestValidationException
     {
         String keyspace = null;
 
@@ -527,7 +493,7 @@ public class QueryProcessor
                                 if (c.isMarkedForDelete())
                                     continue;
 
-                                ColumnDefinition cd = metadata.getColumnDefinition(c.name());
+                                ColumnDefinition cd = metadata.getColumnDefinitionFromColumnName(c.name());
                                 if (cd != null)
                                     result.schema.value_types.put(c.name(), TypeParser.getShortName(cd.getValidator()));
 
@@ -565,7 +531,7 @@ public class QueryProcessor
                                 throw new AssertionError(e);
                             }
 
-                            ColumnDefinition cd = metadata.getColumnDefinition(name);
+                            ColumnDefinition cd = metadata.getColumnDefinitionFromColumnName(name);
                             if (cd != null)
                                 result.schema.value_types.put(name, TypeParser.getShortName(cd.getValidator()));
                             IColumn c = row.cf.getColumn(name);
@@ -591,15 +557,15 @@ public class QueryProcessor
             case INSERT: // insert uses UpdateStatement
             case UPDATE:
                 UpdateStatement update = (UpdateStatement)statement.statement;
+                update.getConsistencyLevel().validateForWrite(keyspace);
                 clientState.hasColumnFamilyAccess(keyspace, update.getColumnFamily(), Permission.UPDATE);
-                ThriftValidation.validateConsistencyLevel(keyspace, update.getConsistencyLevel(), RequestType.WRITE);
                 batchUpdate(clientState, Collections.singletonList(update), update.getConsistencyLevel(), variables);
                 result.type = CqlResultType.VOID;
                 return result;
 
             case BATCH:
                 BatchStatement batch = (BatchStatement) statement.statement;
-                ThriftValidation.validateConsistencyLevel(keyspace, batch.getConsistencyLevel(), RequestType.WRITE);
+                batch.getConsistencyLevel().validateForWrite(keyspace);
 
                 if (batch.getTimeToLive() != 0)
                     throw new InvalidRequestException("Global TTL on the BATCH statement is not supported.");
@@ -621,18 +587,7 @@ public class QueryProcessor
                     validateKey(mutation.key());
                 }
 
-                try
-                {
-                    StorageProxy.mutate(mutations, batch.getConsistencyLevel());
-                }
-                catch (org.apache.cassandra.thrift.UnavailableException e)
-                {
-                    throw new UnavailableException();
-                }
-                catch (TimeoutException e)
-                {
-                    throw new TimedOutException();
-                }
+                StorageProxy.mutate(mutations, batch.getConsistencyLevel());
 
                 result.type = CqlResultType.VOID;
                 return result;
@@ -656,11 +611,11 @@ public class QueryProcessor
                 }
                 catch (TimeoutException e)
                 {
-                    throw (UnavailableException) new UnavailableException().initCause(e);
+                    throw new TruncateException(e);
                 }
                 catch (IOException e)
                 {
-                    throw (UnavailableException) new UnavailableException().initCause(e);
+                    throw new RuntimeException(e);
                 }
 
                 result.type = CqlResultType.VOID;
@@ -677,14 +632,7 @@ public class QueryProcessor
                     validateKey(deletion.key());
                 }
 
-                try
-                {
-                    StorageProxy.mutate(deletions, delete.getConsistencyLevel());
-                }
-                catch (TimeoutException e)
-                {
-                    throw new TimedOutException();
-                }
+                StorageProxy.mutate(deletions, delete.getConsistencyLevel());
 
                 result.type = CqlResultType.VOID;
                 return result;
@@ -694,7 +642,6 @@ public class QueryProcessor
                 create.validate();
                 ThriftValidation.validateKeyspaceNotSystem(create.getName());
                 clientState.hasKeyspaceAccess(create.getName(), Permission.CREATE);
-                validateSchemaAgreement();
 
                 try
                 {
@@ -704,7 +651,6 @@ public class QueryProcessor
                                                             true);
                     ThriftValidation.validateKeyspaceNotYetExisting(ksm.name);
                     MigrationManager.announceNewKeyspace(ksm);
-                    validateSchemaIsSettled();
                 }
                 catch (ConfigurationException e)
                 {
@@ -719,12 +665,10 @@ public class QueryProcessor
             case CREATE_COLUMNFAMILY:
                 CreateColumnFamilyStatement createCf = (CreateColumnFamilyStatement)statement.statement;
                 clientState.hasColumnFamilySchemaAccess(createCf.getName(), Permission.CREATE);
-                validateSchemaAgreement();
 
                 try
                 {
                     MigrationManager.announceNewColumnFamily(createCf.getCFMetaData(keyspace, variables));
-                    validateSchemaIsSettled();
                 }
                 catch (ConfigurationException e)
                 {
@@ -739,7 +683,6 @@ public class QueryProcessor
             case CREATE_INDEX:
                 CreateIndexStatement createIdx = (CreateIndexStatement)statement.statement;
                 clientState.hasColumnFamilyAccess(keyspace, createIdx.getColumnFamily(), Permission.ALTER);
-                validateSchemaAgreement();
                 CFMetaData oldCfm = Schema.instance.getCFMetaData(keyspace, createIdx.getColumnFamily());
                 if (oldCfm == null)
                     throw new InvalidRequestException("No such column family: " + createIdx.getColumnFamily());
@@ -769,7 +712,6 @@ public class QueryProcessor
                 {
                     cfm.addDefaultIndexNames();
                     MigrationManager.announceColumnFamilyUpdate(cfm);
-                    validateSchemaIsSettled();
                 }
                 catch (ConfigurationException e)
                 {
@@ -783,12 +725,13 @@ public class QueryProcessor
 
             case DROP_INDEX:
                 DropIndexStatement dropIdx = (DropIndexStatement)statement.statement;
-                validateSchemaAgreement();
 
                 try
                 {
-                    MigrationManager.announceColumnFamilyUpdate(dropIdx.generateCFMetadataUpdate(clientState.getKeyspace()));
-                    validateSchemaIsSettled();
+                    CFMetaData updatedCF = dropIdx.generateCFMetadataUpdate(clientState.getKeyspace());
+                    clientState.hasColumnFamilyAccess(updatedCF.ksName, updatedCF.cfName, Permission.DESCRIBE);
+
+                    MigrationManager.announceColumnFamilyUpdate(updatedCF);
                 }
                 catch (ConfigurationException e)
                 {
@@ -810,12 +753,10 @@ public class QueryProcessor
                 String deleteKeyspace = (String)statement.statement;
                 ThriftValidation.validateKeyspaceNotSystem(deleteKeyspace);
                 clientState.hasKeyspaceAccess(deleteKeyspace, Permission.DROP);
-                validateSchemaAgreement();
 
                 try
                 {
                     MigrationManager.announceKeyspaceDrop(deleteKeyspace);
-                    validateSchemaIsSettled();
                 }
                 catch (ConfigurationException e)
                 {
@@ -830,12 +771,10 @@ public class QueryProcessor
             case DROP_COLUMNFAMILY:
                 String deleteColumnFamily = (String)statement.statement;
                 clientState.hasColumnFamilyAccess(keyspace, deleteColumnFamily, Permission.DROP);
-                validateSchemaAgreement();
 
                 try
                 {
                     MigrationManager.announceColumnFamilyDrop(keyspace, deleteColumnFamily);
-                    validateSchemaIsSettled();
                 }
                 catch (ConfigurationException e)
                 {
@@ -852,12 +791,10 @@ public class QueryProcessor
 
                 validateColumnFamily(keyspace, alterTable.columnFamily);
                 clientState.hasColumnFamilyAccess(alterTable.columnFamily, Permission.ALTER);
-                validateSchemaAgreement();
 
                 try
                 {
                     MigrationManager.announceColumnFamilyUpdate(alterTable.getCFMetaData(keyspace));
-                    validateSchemaIsSettled();
                 }
                 catch (ConfigurationException e)
                 {
@@ -873,14 +810,14 @@ public class QueryProcessor
     }
 
     public static CqlResult process(String queryString, ClientState clientState)
-    throws RecognitionException, UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    throws RequestValidationException, RequestExecutionException
     {
         logger.trace("CQL QUERY: {}", queryString);
         return processStatement(getStatement(queryString), clientState, new ArrayList<ByteBuffer>(0));
     }
 
     public static CqlPreparedResult prepare(String queryString, ClientState clientState)
-    throws RecognitionException, InvalidRequestException
+    throws InvalidRequestException, SyntaxException
     {
         logger.trace("CQL QUERY: {}", queryString);
 
@@ -897,7 +834,7 @@ public class QueryProcessor
     }
 
     public static CqlResult processPrepared(CQLStatement statement, ClientState clientState, List<ByteBuffer> variables)
-    throws UnavailableException, InvalidRequestException, TimedOutException, SchemaDisagreementException
+    throws RequestValidationException, RequestExecutionException
     {
         // Check to see if there are any bound variables to verify
         if (!(variables.isEmpty() && (statement.boundTerms == 0)))
@@ -945,7 +882,7 @@ public class QueryProcessor
         return keyString;
     }
 
-    private static CQLStatement getStatement(String queryStr) throws InvalidRequestException, RecognitionException
+    private static CQLStatement getStatement(String queryStr) throws SyntaxException
     {
         try
         {
@@ -954,44 +891,27 @@ public class QueryProcessor
             CqlLexer lexer = new CqlLexer(stream);
             TokenStream tokenStream = new CommonTokenStream(lexer);
             CqlParser parser = new CqlParser(tokenStream);
-            
+
             // Parse the query string to a statement instance
             CQLStatement statement = parser.query();
-            
+
             // The lexer and parser queue up any errors they may have encountered
             // along the way, if necessary, we turn them into exceptions here.
             lexer.throwLastRecognitionError();
             parser.throwLastRecognitionError();
-            
+
             return statement;
-        } 
+        }
         catch (RuntimeException re)
         {
-            InvalidRequestException ire = new InvalidRequestException("Failed parsing statement: [" + queryStr + "] reason: " + re.getClass().getSimpleName() + " " + re.getMessage());
-            ire.initCause(re);
+            SyntaxException ire = new SyntaxException("Failed parsing statement: [" + queryStr + "] reason: " + re.getClass().getSimpleName() + " " + re.getMessage());
             throw ire;
         }
-    }
-
-    private static void validateSchemaIsSettled() throws SchemaDisagreementException
-    {
-        long limit = System.currentTimeMillis() + timeLimitForSchemaAgreement;
-
-        outer:
-        while (limit - System.currentTimeMillis() >= 0)
+        catch (RecognitionException e)
         {
-            String currentVersionId = Schema.instance.getVersion().toString();
-            for (String version : describeSchemaVersions().keySet())
-            {
-                if (!version.equals(currentVersionId))
-                    continue outer;
-            }
-
-            // schemas agree
-            return;
+            SyntaxException ire = new SyntaxException("Invalid or malformed CQL query string: " + e.getMessage());
+            throw ire;
         }
-
-        throw new SchemaDisagreementException();
     }
 
     private static void validateCountOperation(SelectStatement select) throws InvalidRequestException

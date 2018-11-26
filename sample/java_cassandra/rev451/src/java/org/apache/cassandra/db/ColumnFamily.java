@@ -34,7 +34,9 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.filter.QueryPath;
+import org.apache.cassandra.db.marshal.AbstractCommutativeType;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.io.IColumnSerializer;
 import org.apache.cassandra.io.ICompactSerializer2;
 import org.apache.cassandra.io.util.IIterableColumns;
 import org.apache.cassandra.utils.FBUtilities;
@@ -70,7 +72,7 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     private final Integer cfid;
     private final ColumnFamilyType type;
 
-    private transient ICompactSerializer2<IColumn> columnSerializer;
+    private transient IColumnSerializer columnSerializer;
     final AtomicLong markedForDeleteAt = new AtomicLong(Long.MIN_VALUE);
     final AtomicInteger localDeletionTime = new AtomicInteger(Integer.MIN_VALUE);
     private ConcurrentSkipListMap<ByteBuffer, IColumn> columns;
@@ -132,15 +134,12 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
         delete(cf);
     }
 
-    /**
-     * FIXME: Gross.
-     */
-    public ICompactSerializer2<IColumn> getColumnSerializer()
+    public IColumnSerializer getColumnSerializer()
     {
         return columnSerializer;
     }
 
-    int getColumnCount()
+    public int getColumnCount()
     {
         return columns.size();
     }
@@ -152,18 +151,25 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
 
     public void addColumn(QueryPath path, ByteBuffer value, long timestamp)
     {
-        assert path.columnName != null : path;
-        addColumn(path.superColumnName, new Column(path.columnName, value, timestamp));
+        addColumn(path, value, timestamp, 0);
     }
 
     public void addColumn(QueryPath path, ByteBuffer value, long timestamp, int timeToLive)
     {
         assert path.columnName != null : path;
         Column column;
-        if (timeToLive > 0)
-            column = new ExpiringColumn(path.columnName, value, timestamp, timeToLive);
+        AbstractType defaultValidator = metadata().getDefaultValidator();
+        if (!defaultValidator.isCommutative())
+        {
+            if (timeToLive > 0)
+                column = new ExpiringColumn(path.columnName, value, timestamp, timeToLive);
+            else
+                column = new Column(path.columnName, value, timestamp);
+        }
         else
-            column = new Column(path.columnName, value, timestamp);
+        {
+            column = ((AbstractCommutativeType)defaultValidator).createColumn(path.columnName, value, timestamp);
+        }
         addColumn(path.superColumnName, column);
     }
 
@@ -413,15 +419,5 @@ public class ColumnFamily implements IColumnContainer, IIterableColumns
     public Iterator<IColumn> iterator()
     {
         return columns.values().iterator();
-    }
-
-    /**
-     * Used to force copy an existing column
-     * @param column column to copy
-     */
-    public void deepCopyColumn(IColumn column)
-    {
-        remove(column.name());
-        addColumn(column.deepCopy());
     }
 }

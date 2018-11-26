@@ -30,9 +30,10 @@ import org.apache.ivy.plugins.resolver.DependencyResolver;
 import org.gradle.api.artifacts.resolution.JvmLibraryJavadocArtifact;
 import org.gradle.api.artifacts.resolution.JvmLibrarySourcesArtifact;
 import org.gradle.api.artifacts.resolution.SoftwareArtifact;
-import org.gradle.api.internal.artifacts.ivyservice.BuildableArtifactResolveResult;
+import org.gradle.api.internal.artifacts.ivyservice.*;
 import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.*;
 import org.gradle.api.internal.artifacts.metadata.*;
+import org.gradle.api.internal.artifacts.resolution.ComponentMetaDataArtifact;
 import org.gradle.internal.UncheckedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -117,8 +118,8 @@ public class IvyDependencyResolverAdapter implements ConfiguredModuleVersionRepo
         }
     }
 
-    public void resolve(ModuleVersionArtifactMetaData artifact, BuildableArtifactResolveResult result, ModuleSource moduleSource) {
-        Artifact ivyArtifact = artifact.getArtifact();
+    public void resolveArtifact(ModuleVersionArtifactMetaData artifact, ModuleSource moduleSource, BuildableArtifactResolveResult result) {
+        Artifact ivyArtifact = createIvyArtifact(artifact);
         ArtifactDownloadReport artifactDownloadReport = resolver.download(new Artifact[]{ivyArtifact}, downloadOptions).getArtifactReport(ivyArtifact);
         if (downloadFailed(artifactDownloadReport)) {
             if (artifactDownloadReport instanceof EnhancedArtifactDownloadReport) {
@@ -138,13 +139,38 @@ public class IvyDependencyResolverAdapter implements ConfiguredModuleVersionRepo
         }
     }
 
-    public Set<ModuleVersionArtifactMetaData> getCandidateArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
+    private Artifact createIvyArtifact(ModuleVersionArtifactMetaData artifact) {
+        // TODO:DAZ Should really be looking up the Ivy Artifact from the ModuleDescriptor, to ensure we're not losing anything here, like URL or publication date.
+        IvyArtifactName ivyName = artifact.getName();
+        return new DefaultArtifact(IvyUtil.createModuleRevisionId(artifact.getModuleVersion()), null, ivyName.getName(), ivyName.getType(), ivyName.getExtension(), ivyName.getAttributes());
+    }
+
+    public void resolveModuleArtifacts(ModuleVersionMetaData moduleMetaData, ArtifactResolveContext context, BuildableArtifactSetResolveResult result) {
+        if (context instanceof ConfigurationResolveContext) {
+            String configurationName = ((ConfigurationResolveContext) context).getConfigurationName();
+            result.resolved(moduleMetaData.getConfiguration(configurationName).getArtifacts());
+        } else {
+            Class<? extends SoftwareArtifact> artifactType = ((ArtifactTypeResolveContext) context).getArtifactType();
+            try {
+                result.resolved(doGetCandidateArtifacts(moduleMetaData, artifactType));
+            } catch (Exception e) {
+                result.failed(new ArtifactResolveException(moduleMetaData.getId(), e));
+            }
+        }
+    }
+
+    public Set<ModuleVersionArtifactMetaData> doGetCandidateArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
         if (artifactType == JvmLibraryJavadocArtifact.class) {
             return createArtifactMetaData(module, "javadoc", "javadoc");
         }
 
         if (artifactType == JvmLibrarySourcesArtifact.class) {
             return createArtifactMetaData(module, "source", "sources");
+        }
+
+        if (artifactType == ComponentMetaDataArtifact.class) {
+            Artifact metadataArtifact = module.getDescriptor().getMetadataArtifact();
+            return ImmutableSet.<ModuleVersionArtifactMetaData>of(new DefaultModuleVersionArtifactMetaData(module, metadataArtifact));
         }
 
         throw new IllegalArgumentException(String.format("Don't know how to get candidate artifacts of type %s", artifactType.getName()));
@@ -163,6 +189,6 @@ public class IvyDependencyResolverAdapter implements ConfiguredModuleVersionRepo
     private Set<ModuleVersionArtifactMetaData> createArtifactMetaData(ModuleVersionMetaData module, String type, String classifier) {
         Artifact artifact = new DefaultArtifact(module.getDescriptor().getModuleRevisionId(), null,
                 module.getId().getName(), type, "jar", ImmutableMap.of("m:classifier", classifier));
-        return ImmutableSet.<ModuleVersionArtifactMetaData>of(new DefaultModuleVersionArtifactMetaData(module.getId(), artifact));
+        return ImmutableSet.<ModuleVersionArtifactMetaData>of(new DefaultModuleVersionArtifactMetaData(module, artifact));
     }
 }

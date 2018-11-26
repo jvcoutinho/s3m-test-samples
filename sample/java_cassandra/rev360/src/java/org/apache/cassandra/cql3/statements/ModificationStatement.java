@@ -26,7 +26,6 @@ import org.apache.cassandra.auth.Permission;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnSlice;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.exceptions.*;
@@ -165,7 +164,7 @@ public abstract class ModificationStatement extends CFStatement implements CQLSt
         for (ByteBuffer key : keys)
             commands.add(new SliceFromReadCommand(keyspace(),
                                                   key,
-                                                  new QueryPath(columnFamily()),
+                                                  columnFamily(),
                                                   new SliceQueryFilter(slices, false, Integer.MAX_VALUE)));
 
         try
@@ -181,7 +180,7 @@ public abstract class ModificationStatement extends CFStatement implements CQLSt
                     continue;
 
                 ColumnGroupMap.Builder groupBuilder = new ColumnGroupMap.Builder(composite, true);
-                for (IColumn column : row.cf)
+                for (Column column : row.cf)
                     groupBuilder.add(column);
 
                 List<ColumnGroupMap> groups = groupBuilder.groups();
@@ -208,7 +207,15 @@ public abstract class ModificationStatement extends CFStatement implements CQLSt
      * @return list of the mutations
      * @throws InvalidRequestException on invalid requests
      */
-    protected abstract Collection<? extends IMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
+    protected Collection<? extends IMutation> getMutations(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now)
+    throws RequestExecutionException, RequestValidationException
+    {
+        return getMutationsInternal(variables, local, cl, now, false);
+    }
+
+    // hack to allow us to special-case RowMutation construction depending on if it's part of a batch
+    // (in which case we need the CF collection to be mutable), or not (in which case we can use more-efficient SingletonMap)
+    protected abstract Collection<? extends IMutation> getMutationsInternal(List<ByteBuffer> variables, boolean local, ConsistencyLevel cl, long now, boolean isBatch)
     throws RequestExecutionException, RequestValidationException;
 
     public abstract ParsedStatement.Prepared prepare(ColumnSpecification[] boundNames) throws InvalidRequestException;

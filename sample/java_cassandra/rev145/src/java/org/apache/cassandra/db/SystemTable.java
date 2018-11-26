@@ -21,15 +21,18 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
 import java.util.*;
-import java.util.concurrent.ExecutionException;
 
+import com.google.common.base.Function;
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.SetMultimap;
+import com.google.common.collect.Sets;
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.config.Schema;
@@ -38,15 +41,17 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.filter.QueryFilter;
-import org.apache.cassandra.db.filter.QueryPath;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.locator.IEndpointSnitch;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.thrift.Constants;
+import org.apache.cassandra.service.paxos.Commit;
+import org.apache.cassandra.service.paxos.PaxosState;
+import org.apache.cassandra.thrift.cassandraConstants;
 import org.apache.cassandra.utils.*;
 
 import static org.apache.cassandra.cql3.QueryProcessor.processInternal;
@@ -68,11 +73,8 @@ public class SystemTable
     public static final String SCHEMA_KEYSPACES_CF = "schema_keyspaces";
     public static final String SCHEMA_COLUMNFAMILIES_CF = "schema_columnfamilies";
     public static final String SCHEMA_COLUMNS_CF = "schema_columns";
-
-    @Deprecated
-    public static final String OLD_STATUS_CF = "LocationInfo";
-    @Deprecated
-    public static final String OLD_HINTS_CF = "HintsColumnFamily";
+    public static final String COMPACTION_LOG = "compactions_in_progress";
+    public static final String PAXOS_CF = "paxos";
 
     private static final String LOCAL_KEY = "local";
     private static final ByteBuffer ALL_LOCAL_NODE_ID_KEY = ByteBufferUtil.bytes("Local");
@@ -91,20 +93,7 @@ public class SystemTable
 
     public static void finishStartup()
     {
-        DefsTable.fixSchemaNanoTimestamps();
         setupVersion();
-        try
-        {
-            upgradeSystemData();
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (InterruptedException e)
-        {
-            throw new RuntimeException(e);
-        }
 
         // add entries to system schema columnfamilies for the hardcoded system definitions
         for (String ksname : Schema.systemKeyspaceNames)
@@ -131,51 +120,71 @@ public class SystemTable
                                          LOCAL_KEY,
                                          FBUtilities.getReleaseVersionString(),
                                          QueryProcessor.CQL_VERSION.toString(),
-                                         Constants.VERSION,
+                                         cassandraConstants.VERSION,
                                          snitch.getDatacenter(FBUtilities.getBroadcastAddress()),
                                          snitch.getRack(FBUtilities.getBroadcastAddress()),
                                          DatabaseDescriptor.getPartitioner().getClass().getName()));
     }
 
-    /** if system data becomes incompatible across versions of cassandra, that logic (and associated purging) is managed here */
-    private static void upgradeSystemData() throws ExecutionException, InterruptedException
+    /**
+     * Write compaction log, except columfamilies under system keyspace.
+     *
+     * @param cfs
+     * @param toCompact sstables to compact
+     * @return compaction task id or null if cfs is under system keyspace
+     */
+    public static UUID startCompaction(ColumnFamilyStore cfs, Iterable<SSTableReader> toCompact)
     {
-        Table table = Table.open(Table.SYSTEM_KS);
-        ColumnFamilyStore oldStatusCfs = table.getColumnFamilyStore(OLD_STATUS_CF);
-        if (oldStatusCfs.getSSTables().size() > 0)
+        if (Table.SYSTEM_KS.equals(cfs.table.getName()))
+            return null;
+
+        UUID compactionId = UUIDGen.getTimeUUID();
+        String req = "INSERT INTO system.%s (id, keyspace_name, columnfamily_name, inputs) VALUES (%s, '%s', '%s', {%s})";
+        Iterable<Integer> generations = Iterables.transform(toCompact, new Function<SSTableReader, Integer>()
         {
-            SortedSet<ByteBuffer> cols = new TreeSet<ByteBuffer>(BytesType.instance);
-            cols.add(ByteBufferUtil.bytes("ClusterName"));
-            cols.add(ByteBufferUtil.bytes("Token"));
-            QueryFilter filter = QueryFilter.getNamesFilter(decorate(ByteBufferUtil.bytes("L")), new QueryPath(OLD_STATUS_CF), cols);
-            ColumnFamily oldCf = oldStatusCfs.getColumnFamily(filter);
-            Iterator<IColumn> oldColumns = oldCf.columns.iterator();
-
-            String clusterName = null;
-            try
+            public Integer apply(SSTableReader sstable)
             {
-                clusterName = ByteBufferUtil.string(oldColumns.next().value());
+                return sstable.descriptor.generation;
             }
-            catch (CharacterCodingException e)
-            {
-                throw new RuntimeException(e);
-            }
-            // serialize the old token as a collection of (one )tokens.
-            Token token = StorageService.getPartitioner().getTokenFactory().fromByteArray(oldColumns.next().value());
-            String tokenBytes = tokensAsSet(Collections.singleton(token));
-            // (assume that any node getting upgraded was bootstrapped, since that was stored in a separate row for no particular reason)
-            String req = "INSERT INTO system.%s (key, cluster_name, tokens, bootstrapped) VALUES ('%s', '%s', %s, '%s')";
-            processInternal(String.format(req, LOCAL_CF, LOCAL_KEY, clusterName, tokenBytes, BootstrapState.COMPLETED.name()));
+        });
+        processInternal(String.format(req, COMPACTION_LOG, compactionId, cfs.table.getName(), cfs.name, StringUtils.join(Sets.newHashSet(generations), ',')));
+        forceBlockingFlush(COMPACTION_LOG);
+        return compactionId;
+    }
 
-            oldStatusCfs.truncate();
-        }
+    public static void finishCompaction(UUID taskId)
+    {
+        assert taskId != null;
 
-        ColumnFamilyStore oldHintsCfs = table.getColumnFamilyStore(OLD_HINTS_CF);
-        if (oldHintsCfs.getSSTables().size() > 0)
+        String req = "DELETE FROM system.%s WHERE id = %s";
+        processInternal(String.format(req, COMPACTION_LOG, taskId));
+        forceBlockingFlush(COMPACTION_LOG);
+    }
+
+    /**
+     * @return unfinished compactions, grouped by keyspace/columnfamily pair.
+     */
+    public static SetMultimap<Pair<String, String>, Integer> getUnfinishedCompactions()
+    {
+        String req = "SELECT * FROM system.%s";
+        UntypedResultSet resultSet = processInternal(String.format(req, COMPACTION_LOG));
+
+        SetMultimap<Pair<String, String>, Integer> unfinishedCompactions = HashMultimap.create();
+        for (UntypedResultSet.Row row : resultSet)
         {
-            logger.info("Possible old-format hints found. Truncating");
-            oldHintsCfs.truncate();
+            String keyspace = row.getString("keyspace_name");
+            String columnfamily = row.getString("columnfamily_name");
+            Set<Integer> inputs = row.getSet("inputs", Int32Type.instance);
+
+            unfinishedCompactions.putAll(Pair.create(keyspace, columnfamily), inputs);
         }
+        return unfinishedCompactions;
+    }
+
+    public static void discardCompactionsInProgress()
+    {
+        ColumnFamilyStore compactionLog = Table.open(Table.SYSTEM_KS).getColumnFamilyStore(COMPACTION_LOG);
+        compactionLog.truncateBlocking();
     }
 
     public static void saveTruncationPosition(ColumnFamilyStore cfs, ReplayPosition position)
@@ -335,18 +344,7 @@ public class SystemTable
 
     private static void forceBlockingFlush(String cfname)
     {
-        try
-        {
-            Table.open(Table.SYSTEM_KS).getColumnFamilyStore(cfname).forceBlockingFlush();
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (InterruptedException e)
-        {
-            throw new AssertionError(e);
-        }
+        Table.open(Table.SYSTEM_KS).getColumnFamilyStore(cfname).forceBlockingFlush();
     }
 
     /**
@@ -525,17 +523,16 @@ public class SystemTable
     {
         ColumnFamilyStore cfs = Table.open(Table.SYSTEM_KS).getColumnFamilyStore(INDEX_CF);
         QueryFilter filter = QueryFilter.getNamesFilter(decorate(ByteBufferUtil.bytes(table)),
-                                                        new QueryPath(INDEX_CF),
+                                                        INDEX_CF,
                                                         ByteBufferUtil.bytes(indexName));
         return ColumnFamilyStore.removeDeleted(cfs.getColumnFamily(filter), Integer.MAX_VALUE) != null;
     }
 
     public static void setIndexBuilt(String table, String indexName)
     {
-        ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_KS, INDEX_CF);
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(Table.SYSTEM_KS, INDEX_CF);
         cf.addColumn(new Column(ByteBufferUtil.bytes(indexName), ByteBufferUtil.EMPTY_BYTE_BUFFER, FBUtilities.timestampMicros()));
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, ByteBufferUtil.bytes(table));
-        rm.add(cf);
+        RowMutation rm = new RowMutation(Table.SYSTEM_KS, ByteBufferUtil.bytes(table), cf);
         rm.apply();
         forceBlockingFlush(INDEX_CF);
     }
@@ -543,7 +540,7 @@ public class SystemTable
     public static void setIndexRemoved(String table, String indexName)
     {
         RowMutation rm = new RowMutation(Table.SYSTEM_KS, ByteBufferUtil.bytes(table));
-        rm.delete(new QueryPath(INDEX_CF, null, ByteBufferUtil.bytes(indexName)), FBUtilities.timestampMicros());
+        rm.delete(INDEX_CF, ByteBufferUtil.bytes(indexName), FBUtilities.timestampMicros());
         rm.apply();
         forceBlockingFlush(INDEX_CF);
     }
@@ -584,7 +581,7 @@ public class SystemTable
 
         // Get the last CounterId (since CounterId are timeuuid is thus ordered from the older to the newer one)
         QueryFilter filter = QueryFilter.getSliceFilter(decorate(ALL_LOCAL_NODE_ID_KEY),
-                                                        new QueryPath(COUNTER_ID_CF),
+                                                        COUNTER_ID_CF,
                                                         ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                         ByteBufferUtil.EMPTY_BYTE_BUFFER,
                                                         true,
@@ -609,10 +606,9 @@ public class SystemTable
     {
         ByteBuffer ip = ByteBuffer.wrap(FBUtilities.getBroadcastAddress().getAddress());
 
-        ColumnFamily cf = ColumnFamily.create(Table.SYSTEM_KS, COUNTER_ID_CF);
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(Table.SYSTEM_KS, COUNTER_ID_CF);
         cf.addColumn(new Column(newCounterId.bytes(), ip, now));
-        RowMutation rm = new RowMutation(Table.SYSTEM_KS, ALL_LOCAL_NODE_ID_KEY);
-        rm.add(cf);
+        RowMutation rm = new RowMutation(Table.SYSTEM_KS, ALL_LOCAL_NODE_ID_KEY, cf);
         rm.apply();
         forceBlockingFlush(COUNTER_ID_CF);
     }
@@ -622,11 +618,11 @@ public class SystemTable
         List<CounterId.CounterIdRecord> l = new ArrayList<CounterId.CounterIdRecord>();
 
         Table table = Table.open(Table.SYSTEM_KS);
-        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(ALL_LOCAL_NODE_ID_KEY), new QueryPath(COUNTER_ID_CF));
+        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(ALL_LOCAL_NODE_ID_KEY), COUNTER_ID_CF);
         ColumnFamily cf = table.getColumnFamilyStore(COUNTER_ID_CF).getColumnFamily(filter);
 
         CounterId previous = null;
-        for (IColumn c : cf)
+        for (Column c : cf)
         {
             if (previous != null)
                 l.add(new CounterId.CounterIdRecord(previous, c.timestamp()));
@@ -666,8 +662,7 @@ public class SystemTable
     {
         Token minToken = StorageService.getPartitioner().getMinimumToken();
 
-        return schemaCFS(schemaCfName).getRangeSlice(null,
-                                                     new Range<RowPosition>(minToken.minKeyBound(),
+        return schemaCFS(schemaCfName).getRangeSlice(new Range<RowPosition>(minToken.minKeyBound(),
                                                                             minToken.maxKeyBound()),
                                                      Integer.MAX_VALUE,
                                                      new IdentityQueryFilter(),
@@ -693,11 +688,10 @@ public class SystemTable
                 continue;
 
             RowMutation mutation = mutationMap.get(schemaRow.key);
-
             if (mutation == null)
             {
-                mutationMap.put(schemaRow.key, new RowMutation(Table.SYSTEM_KS, schemaRow));
-                continue;
+                mutation = new RowMutation(Table.SYSTEM_KS, schemaRow.key.key);
+                mutationMap.put(schemaRow.key, mutation);
             }
 
             mutation.add(schemaRow.cf);
@@ -724,7 +718,7 @@ public class SystemTable
         DecoratedKey key = StorageService.getPartitioner().decorateKey(getSchemaKSKey(ksName));
 
         ColumnFamilyStore schemaCFS = SystemTable.schemaCFS(SCHEMA_KEYSPACES_CF);
-        ColumnFamily result = schemaCFS.getColumnFamily(QueryFilter.getIdentityFilter(key, new QueryPath(SCHEMA_KEYSPACES_CF)));
+        ColumnFamily result = schemaCFS.getColumnFamily(QueryFilter.getIdentityFilter(key, SCHEMA_KEYSPACES_CF));
 
         return new Row(key, result);
     }
@@ -735,12 +729,72 @@ public class SystemTable
 
         ColumnFamilyStore schemaCFS = SystemTable.schemaCFS(SCHEMA_COLUMNFAMILIES_CF);
         ColumnFamily result = schemaCFS.getColumnFamily(key,
-                                                        new QueryPath(SCHEMA_COLUMNFAMILIES_CF),
                                                         DefsTable.searchComposite(cfName, true),
                                                         DefsTable.searchComposite(cfName, false),
                                                         false,
                                                         Integer.MAX_VALUE);
 
         return new Row(key, result);
+    }
+
+    public static PaxosState loadPaxosState(ByteBuffer key, CFMetaData metadata)
+    {
+        String req = "SELECT * FROM system.%s WHERE row_key = 0x%s AND cf_id = %s";
+        UntypedResultSet results = processInternal(String.format(req, PAXOS_CF, ByteBufferUtil.bytesToHex(key), metadata.cfId));
+        if (results.isEmpty())
+            return new PaxosState(key, metadata);
+        UntypedResultSet.Row row = results.one();
+        Commit inProgress = new Commit(key,
+                                       row.getUUID("in_progress_ballot"),
+                                       row.has("proposal") ? ColumnFamily.fromBytes(row.getBytes("proposal")) : EmptyColumns.factory.create(metadata));
+        // either most_recent_commit and most_recent_commit_at will both be set, or neither
+        Commit mostRecent = row.has("most_recent_commit")
+                          ? new Commit(key, row.getUUID("most_recent_commit_at"), ColumnFamily.fromBytes(row.getBytes("most_recent_commit")))
+                          : Commit.emptyCommit(key, metadata);
+        return new PaxosState(inProgress, mostRecent);
+    }
+
+    public static void savePaxosPromise(Commit promise)
+    {
+        String req = "UPDATE %s USING TIMESTAMP %d AND TTL %d SET in_progress_ballot = %s WHERE row_key = 0x%s AND cf_id = %s";
+        processInternal(String.format(req,
+                                      PAXOS_CF,
+                                      UUIDGen.microsTimestamp(promise.ballot),
+                                      paxosTtl(promise.update.metadata),
+                                      promise.ballot,
+                                      ByteBufferUtil.bytesToHex(promise.key),
+                                      promise.update.id()));
+    }
+
+    public static void savePaxosProposal(Commit commit)
+    {
+        processInternal(String.format("UPDATE %s USING TIMESTAMP %d AND TTL %d SET proposal = 0x%s WHERE row_key = 0x%s AND cf_id = %s",
+                                      PAXOS_CF,
+                                      UUIDGen.microsTimestamp(commit.ballot),
+                                      paxosTtl(commit.update.metadata),
+                                      ByteBufferUtil.bytesToHex(commit.update.toBytes()),
+                                      ByteBufferUtil.bytesToHex(commit.key),
+                                      commit.update.id()));
+    }
+
+    private static int paxosTtl(CFMetaData metadata)
+    {
+        // keep paxos state around for at least 3h
+        return Math.max(3 * 3600, metadata.getGcGraceSeconds());
+    }
+
+    public static void savePaxosCommit(Commit commit, boolean eraseInProgressProposal)
+    {
+        String preserveCql = "UPDATE %s USING TIMESTAMP %d AND TTL %d SET most_recent_commit_at = %s, most_recent_commit = 0x%s WHERE row_key = 0x%s AND cf_id = %s";
+        // identical except adds proposal = null
+        String eraseCql = "UPDATE %s USING TIMESTAMP %d AND TTL %d SET proposal = null, most_recent_commit_at = %s, most_recent_commit = 0x%s WHERE row_key = 0x%s AND cf_id = %s";
+        processInternal(String.format(eraseInProgressProposal ? eraseCql : preserveCql,
+                                      PAXOS_CF,
+                                      UUIDGen.microsTimestamp(commit.ballot),
+                                      paxosTtl(commit.update.metadata),
+                                      commit.ballot,
+                                      ByteBufferUtil.bytesToHex(commit.update.toBytes()),
+                                      ByteBufferUtil.bytesToHex(commit.key),
+                                      commit.update.id()));
     }
 }

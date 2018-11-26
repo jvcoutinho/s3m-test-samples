@@ -24,13 +24,19 @@ package org.apache.cassandra.db.marshal;
 import java.nio.ByteBuffer;
 import java.util.UUID;
 
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
 
-public class LexicalUUIDType extends AbstractType
+public class LexicalUUIDType extends AbstractType<UUID>
 {
     public static final LexicalUUIDType instance = new LexicalUUIDType();
 
     LexicalUUIDType() {} // singleton
+
+    public UUID compose(ByteBuffer bytes)
+    {
+        return UUIDGen.getUUID(bytes);
+    }
 
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
@@ -59,9 +65,25 @@ public class LexicalUUIDType extends AbstractType
         return UUIDGen.getUUID(bytes).toString();
     }
 
-    public ByteBuffer fromString(String source)
+    public String toString(UUID uuid)
     {
-        return ByteBuffer.wrap(UUIDGen.decompose(UUID.fromString(source)));
+        return uuid.toString();
+    }
+
+    public ByteBuffer fromString(String source) throws MarshalException
+    {
+        // Return an empty ByteBuffer for an empty string.
+        if (source.isEmpty())
+            return ByteBufferUtil.EMPTY_BYTE_BUFFER;
+
+        try
+        {
+            return ByteBuffer.wrap(UUIDGen.decompose(UUID.fromString(source)));
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new MarshalException(String.format("unable to make UUID from '%s'", source), e);
+        }
     }
 
     public void validate(ByteBuffer bytes) throws MarshalException
@@ -69,5 +91,10 @@ public class LexicalUUIDType extends AbstractType
         if (bytes.remaining() != 16 && bytes.remaining() != 0)
             throw new MarshalException(String.format("LexicalUUID should be 16 or 0 bytes (%d)", bytes.remaining()));
         // not sure what the version should be for this.
+    }
+
+    public Class<UUID> getType()
+    {
+        return UUID.class;
     }
 }

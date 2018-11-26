@@ -23,10 +23,11 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,7 +47,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
     private static final Logger logger = LoggerFactory.getLogger(FailureDetector.class);
     public static final String MBEAN_NAME = "org.apache.cassandra.net:type=FailureDetector";
     private static final int SAMPLE_SIZE = 1000;
-    protected static final int INITIAL_VALUE = getInitialValue();
+    protected static final long INITIAL_VALUE_NANOS = TimeUnit.NANOSECONDS.convert(getInitialValue(), TimeUnit.MILLISECONDS);
 
     public static final IFailureDetector instance = new FailureDetector();
 
@@ -73,16 +74,18 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
         }
     }
 
-    private static int getInitialValue()
+    private static long getInitialValue()
     {
         String newvalue = System.getProperty("cassandra.fd_initial_value_ms");
-        if (newvalue != null)
+        if (newvalue == null)
+        {
+            return Gossiper.intervalInMillis * 30;
+        }
+        else
         {
             logger.info("Overriding FD INITIAL_VALUE to {}ms", newvalue);
             return Integer.parseInt(newvalue);
         }
-        else
-            return Gossiper.intervalInMillis * 30;
     }
 
     public String getAllEndpointStates()
@@ -202,7 +205,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
     {
         if (logger.isTraceEnabled())
             logger.trace("reporting {}", ep);
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         ArrivalWindow heartbeatWindow = arrivalSamples.get(ep);
         if (heartbeatWindow == null)
         {
@@ -220,11 +223,11 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
     public void interpret(InetAddress ep)
     {
         ArrivalWindow hbWnd = arrivalSamples.get(ep);
-        if ( hbWnd == null )
+        if (hbWnd == null)
         {
             return;
         }
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime();
         double phi = hbWnd.phi(now);
         if (logger.isTraceEnabled())
             logger.trace("PHI for " + ep + " : " + phi);
@@ -233,7 +236,7 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
         {
             logger.trace("notifying listeners that {} is down", ep);
             logger.trace("intervals: {} mean: {}", hbWnd, hbWnd.mean());
-            for ( IFailureDetectionEventListener listener : fdEvntListeners )
+            for (IFailureDetectionEventListener listener : fdEvntListeners)
             {
                 listener.convict(ep, phi);
             }
@@ -270,18 +273,18 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
         Set<InetAddress> eps = arrivalSamples.keySet();
 
         sb.append("-----------------------------------------------------------------------");
-        for ( InetAddress ep : eps )
+        for (InetAddress ep : eps)
         {
             ArrivalWindow hWnd = arrivalSamples.get(ep);
             sb.append(ep + " : ");
             sb.append(hWnd.toString());
-            sb.append( System.getProperty("line.separator") );
+            sb.append(System.getProperty("line.separator"));
         }
         sb.append("-----------------------------------------------------------------------");
         return sb.toString();
     }
 
-    public static void main(String[] args) throws Throwable
+    public static void main(String[] args)
     {
     }
 }
@@ -289,38 +292,47 @@ public class FailureDetector implements IFailureDetector, FailureDetectorMBean
 class ArrivalWindow
 {
     private static final Logger logger = LoggerFactory.getLogger(ArrivalWindow.class);
-    private double tLast = 0L;
+    private long tLast = 0L;
     private final BoundedStatsDeque arrivalIntervals;
+
+    // this is useless except to provide backwards compatibility in phi_convict_threshold,
+    // because everyone seems pretty accustomed to the default of 8, and users who have
+    // already tuned their phi_convict_threshold for their own environments won't need to
+    // change.
+    private final double PHI_FACTOR = 1.0 / Math.log(10.0);
 
     // in the event of a long partition, never record an interval longer than the rpc timeout,
     // since if a host is regularly experiencing connectivity problems lasting this long we'd
     // rather mark it down quickly instead of adapting
     // this value defaults to the same initial value the FD is seeded with
-    private final int MAX_INTERVAL_IN_MS = getMaxInterval();
+    private final long MAX_INTERVAL_IN_NANO = getMaxInterval();
 
     ArrivalWindow(int size)
     {
         arrivalIntervals = new BoundedStatsDeque(size);
     }
 
-    private static int getMaxInterval()
+    private static long getMaxInterval()
     {
         String newvalue = System.getProperty("cassandra.fd_max_interval_ms");
-        if (newvalue != null)
+        if (newvalue == null)
         {
-            logger.info("Overriding FD MAX_INTERVAL to {}ms", newvalue);
-            return Integer.parseInt(newvalue);
+            return FailureDetector.INITIAL_VALUE_NANOS;
         }
         else
-            return FailureDetector.INITIAL_VALUE;
+        {
+            logger.info("Overriding FD MAX_INTERVAL to {}ms", newvalue);
+            return TimeUnit.NANOSECONDS.convert(Integer.parseInt(newvalue), TimeUnit.MILLISECONDS);
+        }
     }
 
-    synchronized void add(double value)
+    synchronized void add(long value)
     {
+        assert tLast >= 0;
         if (tLast > 0L)
         {
-            double interArrivalTime = (value - tLast);
-            if (interArrivalTime <= MAX_INTERVAL_IN_MS)
+            long interArrivalTime = (value - tLast);
+            if (interArrivalTime <= MAX_INTERVAL_IN_NANO)
                 arrivalIntervals.add(interArrivalTime);
             else
                 logger.debug("Ignoring interval time of {}", interArrivalTime);
@@ -330,7 +342,7 @@ class ArrivalWindow
             // We use a very large initial interval since the "right" average depends on the cluster size
             // and it's better to err high (false negatives, which will be corrected by waiting a bit longer)
             // than low (false positives, which cause "flapping").
-            arrivalIntervals.add(FailureDetector.INITIAL_VALUE);
+            arrivalIntervals.add(FailureDetector.INITIAL_VALUE_NANOS);
         }
         tLast = value;
     }
@@ -344,7 +356,7 @@ class ArrivalWindow
     double phi(long tnow)
     {
         assert arrivalIntervals.size() > 0 && tLast > 0; // should not be called before any samples arrive
-        double t = tnow - tLast;
+        long t = tnow - tLast;
         return t / mean();
     }
 

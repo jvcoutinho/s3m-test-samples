@@ -24,14 +24,13 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.*;
 
+import com.google.common.base.Optional;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterables;
+
+import org.apache.cassandra.hadoop.HadoopCompat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.cql3.CFDefinition;
-import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.LongType;
@@ -108,7 +107,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
     public void initialize(InputSplit split, TaskAttemptContext context) throws IOException
     {
         this.split = (ColumnFamilySplit) split;
-        Configuration conf = context.getConfiguration();
+        Configuration conf = HadoopCompat.getConfiguration(context);
         totalRowCount = (this.split.getLength() < Long.MAX_VALUE)
                       ? (int) this.split.getLength()
                       : ConfigHelper.getInputSplitSize(conf);
@@ -118,16 +117,17 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
         columns = CqlConfigHelper.getInputcolumns(conf);
         userDefinedWhereClauses = CqlConfigHelper.getInputWhereClauses(conf);
 
-        try
+        Optional<Integer> pageRowSizeOptional = CqlConfigHelper.getInputPageRowSize(conf);
+        try 
         {
-            pageRowSize = Integer.parseInt(CqlConfigHelper.getInputPageRowSize(conf));
-        }
-        catch (NumberFormatException e)
+        	pageRowSize = pageRowSizeOptional.isPresent() ? pageRowSizeOptional.get() : DEFAULT_CQL_PAGE_LIMIT;
+        } 
+        catch(NumberFormatException e) 
         {
-            pageRowSize = DEFAULT_CQL_PAGE_LIMIT;
+        	pageRowSize = DEFAULT_CQL_PAGE_LIMIT;
         }
 
-        partitioner = ConfigHelper.getInputPartitioner(context.getConfiguration());
+        partitioner = ConfigHelper.getInputPartitioner(HadoopCompat.getConfiguration(context));
 
         try
         {
@@ -432,7 +432,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             return previousIndex - 1;
         }
 
-        /** compose the prepared query, pair.left is query id, pair.right is query */
+        /** serialize the prepared query, pair.left is query id, pair.right is query */
         private Pair<Integer, String> composeQuery(String columns)
         {
             Pair<Integer, String> clause = whereClause();
@@ -480,7 +480,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             return result;
         }
 
-        /** compose the where clause */
+        /** serialize the where clause */
         private Pair<Integer, String> whereClause()
         {
             if (partitionKeyString == null)
@@ -504,11 +504,11 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
                                String.format(" WHERE token(%s) = token(%s) %s", partitionKeyString, partitionKeyMarkers, clause.right));
         }
 
-        /** recursively compose the where clause */
+        /** recursively serialize the where clause */
         private Pair<Integer, String> whereClause(List<BoundColumn> column, int position)
         {
             if (position == column.size() - 1 || column.get(position + 1).value == null)
-                return Pair.create(position + 2, String.format(" AND %s %s ? ", quote(column.get(position).name), column.get(position).reversed ? " < " : " > "));
+                return Pair.create(position + 2, String.format(" AND %s %s ? ", quote(column.get(position).name), column.get(position).reversed ? " < " : " >")); 
 
             Pair<Integer, String> clause = whereClause(column, position + 1);
             return Pair.create(clause.left, String.format(" AND %s = ? %s", quote(column.get(position).name), clause.right));
@@ -525,7 +525,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             return true;
         }
 
-        /** compose the partition key string in format of <key1>, <key2>, <key3> */
+        /** serialize the partition key string in format of <key1>, <key2>, <key3> */
         private String keyString(List<BoundColumn> columns)
         {
             String result = null;
@@ -535,7 +535,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             return result == null ? "" : result;
         }
 
-        /** compose the question marks for partition key string in format of ?, ? , ? */
+        /** serialize the question marks for partition key string in format of ?, ? , ? */
         private String partitionKeyMarkers()
         {
             String result = null;
@@ -545,7 +545,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             return result;
         }
 
-        /** compose the query binding variables, pair.left is query id, pair.right is the binding variables */
+        /** serialize the query binding variables, pair.left is query id, pair.right is the binding variables */
         private Pair<Integer, List<ByteBuffer>> preparedQueryBindValues()
         {
             List<ByteBuffer> values = new LinkedList<ByteBuffer>();
@@ -577,7 +577,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             }
         }
 
-        /** recursively compose the query binding variables */
+        /** recursively serialize the query binding variables */
         private int preparedQueryBindValues(List<BoundColumn> column, int position, List<ByteBuffer> bindValues)
         {
             if (position == column.size() - 1 || column.get(position + 1).value == null)
@@ -689,11 +689,6 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
 
         for (String key : keys)
             partitionBoundColumns.add(new BoundColumn(key));
-        if (partitionBoundColumns.isEmpty())
-        {
-            retrieveKeysForThriftTables();
-            return;
-        }
 
         keyString = ByteBufferUtil.string(ByteBuffer.wrap(cqlRow.columns.get(1).getValue()));
         logger.debug("cluster columns: {}", keyString);
@@ -702,8 +697,22 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
         for (String key : keys)
             clusterColumns.add(new BoundColumn(key));
 
-        parseKeyValidators(ByteBufferUtil.string(ByteBuffer.wrap(cqlRow.columns.get(2).getValue())));
-        
+        Column rawKeyValidator = cqlRow.columns.get(2);
+        String validator = ByteBufferUtil.string(ByteBuffer.wrap(rawKeyValidator.getValue()));
+        logger.debug("row key validator: {}", validator);
+        keyValidator = parseType(validator);
+
+        if (keyValidator instanceof CompositeType)
+        {
+            List<AbstractType<?>> types = ((CompositeType) keyValidator).types;
+            for (int i = 0; i < partitionBoundColumns.size(); i++)
+                partitionBoundColumns.get(i).validator = types.get(i);
+        }
+        else
+        {
+            partitionBoundColumns.get(0).validator = keyValidator;
+        }
+
         Column rawComparator = cqlRow.columns.get(3);
         String comparator = ByteBufferUtil.string(ByteBuffer.wrap(rawComparator.getValue()));
         logger.debug("comparator: {}", comparator);
@@ -719,45 +728,6 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
         }
     }
 
-    /** 
-     * retrieve the fake partition keys and cluster keys for classic thrift table 
-     * use CFDefinition to get keys and columns
-     * */
-    private void retrieveKeysForThriftTables() throws Exception
-    {
-        KsDef ksDef = client.describe_keyspace(keyspace);
-        for (CfDef cfDef : ksDef.cf_defs)
-        {
-            if (cfDef.name.equalsIgnoreCase(cfName))
-            {
-                CFMetaData cfMeta = CFMetaData.fromThrift(cfDef);
-                CFDefinition cfDefinition = new CFDefinition(cfMeta);
-                for (ColumnIdentifier columnIdentifier : cfDefinition.keys.keySet())
-                    partitionBoundColumns.add(new BoundColumn(columnIdentifier.toString()));
-                parseKeyValidators(cfDef.key_validation_class);
-                return;
-            }
-        }
-    }
-
-    /** parse key validators */
-    private void parseKeyValidators(String rowKeyValidator) throws IOException
-    {
-        logger.debug("row key validator: {} ", rowKeyValidator);
-        keyValidator = parseType(rowKeyValidator);
-
-        if (keyValidator instanceof CompositeType)
-        {
-            List<AbstractType<?>> types = ((CompositeType) keyValidator).types;
-            for (int i = 0; i < partitionBoundColumns.size(); i++)
-                partitionBoundColumns.get(i).validator = types.get(i);
-        }
-        else
-        {
-            partitionBoundColumns.get(0).validator = keyValidator;
-        }
-    }
-
     /** check whether current row is at the end of range */
     private boolean reachEndRange()
     {
@@ -769,7 +739,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
             for (int i = 0; i < partitionBoundColumns.size(); i++)
                 keys[i] = partitionBoundColumns.get(i).value.duplicate();
 
-            rowKey = ((CompositeType) keyValidator).build(keys);
+            rowKey = CompositeType.build(keys);
         }
         else
         {
@@ -787,7 +757,7 @@ public class CqlPagingRecordReader extends RecordReader<Map<String, ByteBuffer>,
     {
         try
         {
-            // always treat counters like longs, specifically CCT.compose is not what we need
+            // always treat counters like longs, specifically CCT.serialize is not what we need
             if (type != null && type.equals("org.apache.cassandra.db.marshal.CounterColumnType"))
                 return LongType.instance;
             return TypeParser.parse(type);

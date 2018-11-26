@@ -1,6 +1,6 @@
 package org.apache.cassandra.db.compaction;
 /*
- * 
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -8,16 +8,16 @@ package org.apache.cassandra.db.compaction;
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * 
+ *
  */
 
 
@@ -31,10 +31,10 @@ import com.google.common.primitives.Ints;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.RowPosition;
 import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.util.FileUtils;
@@ -59,7 +59,8 @@ public class LeveledManifest
 
     private final ColumnFamilyStore cfs;
     private final List<SSTableReader>[] generations;
-    private final DecoratedKey[] lastCompactedKeys;
+    private final Map<SSTableReader, Integer> sstableGenerations;
+    private final RowPosition[] lastCompactedKeys;
     private final int maxSSTableSizeInMB;
 
     private LeveledManifest(ColumnFamilyStore cfs, int maxSSTableSizeInMB)
@@ -70,12 +71,13 @@ public class LeveledManifest
         // allocate enough generations for a PB of data
         int n = (int) Math.log10(1000 * 1000 * 1000 / maxSSTableSizeInMB);
         generations = new List[n];
-        lastCompactedKeys = new DecoratedKey[n];
+        lastCompactedKeys = new RowPosition[n];
         for (int i = 0; i < generations.length; i++)
         {
             generations[i] = new ArrayList<SSTableReader>();
-            lastCompactedKeys[i] = new DecoratedKey(cfs.partitioner.getMinimumToken(), null);
+            lastCompactedKeys[i] = cfs.partitioner.getMinimumToken().minKeyBound();
         }
+        sstableGenerations = new HashMap<SSTableReader, Integer>();
     }
 
     static LeveledManifest create(ColumnFamilyStore cfs, int maxSSTableSize)
@@ -138,7 +140,7 @@ public class LeveledManifest
     }
 
     /**
-     * if the number of SSTables in the current compacted set *by itself* exeeds the target level's
+     * if the number of SSTables in the current compacted set *by itself* exceeds the target level's
      * (regardless of the level's current contents), find an empty level instead
      */
     private int skipLevels(int newLevel, Iterable<SSTableReader> added)
@@ -165,6 +167,7 @@ public class LeveledManifest
         for (SSTableReader sstable : removed)
         {
             int thisLevel = levelOf(sstable);
+            assert thisLevel >= 0;
             maximumLevel = Math.max(maximumLevel, thisLevel);
             minimumLevel = Math.min(minimumLevel, thisLevel);
             remove(sstable);
@@ -283,12 +286,11 @@ public class LeveledManifest
 
     private int levelOf(SSTableReader sstable)
     {
-        for (int level = 0; level < generations.length; level++)
-        {
-            if (generations[level].contains(sstable))
-                return level;
-        }
-        return -1;
+        Integer level = sstableGenerations.get(sstable);
+        if (level == null)
+            return -1;
+
+        return level.intValue();
     }
 
     private void remove(SSTableReader reader)
@@ -296,12 +298,14 @@ public class LeveledManifest
         int level = levelOf(reader);
         assert level >= 0 : reader + " not present in manifest";
         generations[level].remove(reader);
+        sstableGenerations.remove(reader);
     }
 
     private void add(SSTableReader sstable, int level)
     {
         assert level < generations.length : "Invalid level " + level + " out of " + (generations.length - 1);
         generations[level].add(sstable);
+        sstableGenerations.put(sstable, Integer.valueOf(level));
     }
 
     private static List<SSTableReader> overlapping(SSTableReader sstable, Iterable<SSTableReader> candidates)
@@ -309,10 +313,10 @@ public class LeveledManifest
         List<SSTableReader> overlapped = new ArrayList<SSTableReader>();
         overlapped.add(sstable);
 
-        Range promotedRange = new Range(sstable.first.token, sstable.last.token);
+        Range<Token> promotedRange = new Range<Token>(sstable.first.token, sstable.last.token);
         for (SSTableReader candidate : candidates)
         {
-            Range candidateRange = new Range(candidate.first.token, candidate.last.token);
+            Range<Token> candidateRange = new Range<Token>(candidate.first.token, candidate.last.token);
             if (candidateRange.intersects(promotedRange))
                 overlapped.add(candidate);
         }
@@ -352,11 +356,14 @@ public class LeveledManifest
         return overlapping(generations[level].get(0), generations[(level + 1)]);
     }
 
+    public static File tryGetManifest(ColumnFamilyStore cfs)
+    {
+        return cfs.directories.tryGetLeveledManifest();
+    }
+
     public synchronized void serialize()
     {
-        File manifestFile = tryGetManifest(cfs);
-        if (manifestFile == null)
-            manifestFile = new File(new File(DatabaseDescriptor.getAllDataFileLocations()[0], cfs.table.name), cfs.columnFamily + ".json");
+        File manifestFile = cfs.directories.getOrCreateLeveledManifest();
         File oldFile = new File(manifestFile.getPath().replace(EXTENSION, "-old.json"));
         File tmpFile = new File(manifestFile.getPath().replace(EXTENSION, "-tmp.json"));
 
@@ -394,21 +401,6 @@ public class LeveledManifest
         {
             throw new IOError(e);
         }
-    }
-
-    public static File tryGetManifest(ColumnFamilyStore cfs)
-    {
-        for (String dir : DatabaseDescriptor.getAllDataFileLocations())
-        {
-            File manifestFile = new File(new File(dir, cfs.table.name), cfs.columnFamily + EXTENSION);
-            if (manifestFile.exists())
-            {
-                logger.debug("Found manifest at {}", manifestFile);
-                return manifestFile;
-            }
-        }
-        logger.debug("No level manifest found");
-        return null;
     }
 
     @Override

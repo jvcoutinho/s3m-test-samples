@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -7,14 +7,13 @@
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package org.apache.cassandra.db.marshal;
 
@@ -62,23 +61,27 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
-        if (null == o1)
-            return null == o2 ? 0 : -1;
+        if (o1 == null)
+            return o2 == null ? 0 : -1;
 
         ByteBuffer bb1 = o1.duplicate();
         ByteBuffer bb2 = o2.duplicate();
         int i = 0;
 
+        ByteBuffer previous = null;
+
         while (bb1.remaining() > 0 && bb2.remaining() > 0)
         {
-            AbstractType<?> comparator = getNextComparator(i, bb1, bb2);
+            AbstractType<?> comparator = getComparator(i, bb1, bb2);
 
             ByteBuffer value1 = getWithShortLength(bb1);
             ByteBuffer value2 = getWithShortLength(bb2);
 
-            int cmp = comparator.compare(value1, value2);
+            int cmp = comparator.compareCollectionMembers(value1, value2, previous);
             if (cmp != 0)
                 return cmp;
+
+            previous = value1;
 
             byte b1 = bb1.get();
             byte b2 = bb2.get();
@@ -118,7 +121,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         int i = 0;
         while (bb.remaining() > 0)
         {
-            getNextComparator(i++, bb);
+            getComparator(i++, bb);
             l.add(getWithShortLength(bb));
             bb.get(); // skip end-of-component
         }
@@ -136,7 +139,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
             if (bb.remaining() != bytes.remaining())
                 sb.append(":");
 
-            AbstractType<?> comparator = getAndAppendNextComparator(i, bb, sb);
+            AbstractType<?> comparator = getAndAppendComparator(i, bb, sb);
             ByteBuffer value = getWithShortLength(bb);
 
             sb.append(comparator.getString(value));
@@ -173,7 +176,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 
         while (bb.remaining() > 0)
         {
-            AbstractType comparator = getNextComparator(i, bb);
+            AbstractType comparator = getComparator(i, bb);
             ByteBuffer value = getWithShortLength(bb);
 
             list.add( new CompositeComponent(comparator,value) );
@@ -206,7 +209,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
                 break;
             }
 
-            ParsedComparator p = parseNextComparator(i, part);
+            ParsedComparator p = parseComparator(i, part);
             AbstractType<?> type = p.getAbstractType();
             part = p.getRemainingPart();
 
@@ -239,9 +242,10 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         ByteBuffer bb = bytes.duplicate();
 
         int i = 0;
+        ByteBuffer previous = null;
         while (bb.remaining() > 0)
         {
-            AbstractType<?> comparator = validateNextComparator(i, bb);
+            AbstractType<?> comparator = validateComparator(i, bb);
 
             if (bb.remaining() < 2)
                 throw new MarshalException("Not enough bytes to read value size of component " + i);
@@ -251,16 +255,20 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
                 throw new MarshalException("Not enough bytes to read value of component " + i);
             ByteBuffer value = getBytes(bb, length);
 
-            comparator.validate(value);
+            comparator.validateCollectionMember(value, previous);
 
             if (bb.remaining() == 0)
                 throw new MarshalException("Not enough bytes to read the end-of-component byte of component" + i);
             byte b = bb.get();
             if (b != 0 && bb.remaining() != 0)
                 throw new MarshalException("Invalid bytes remaining after an end-of-component at component" + i);
+
+            previous = value;
             ++i;
         }
     }
+
+    public abstract ByteBuffer decompose(Object... objects);
 
     public ByteBuffer compose(ByteBuffer bytes)
     {
@@ -272,11 +280,32 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         return value;
     }
 
-    abstract protected AbstractType<?> getNextComparator(int i, ByteBuffer bb);
-    abstract protected AbstractType<?> getNextComparator(int i, ByteBuffer bb1, ByteBuffer bb2);
-    abstract protected AbstractType<?> getAndAppendNextComparator(int i, ByteBuffer bb, StringBuilder sb);
-    abstract protected ParsedComparator parseNextComparator(int i, String part);
-    abstract protected AbstractType<?> validateNextComparator(int i, ByteBuffer bb) throws MarshalException;
+    /**
+     * @return the comparator for the given component. static CompositeType will consult
+     * @param i; DynamicCompositeType will read the type information from @param bb
+     */
+    abstract protected AbstractType<?> getComparator(int i, ByteBuffer bb);
+
+    /**
+     * Adds DynamicCompositeType type information from @param bb1 to @param bb2.
+     * @param i is ignored.
+     */
+    abstract protected AbstractType<?> getComparator(int i, ByteBuffer bb1, ByteBuffer bb2);
+
+    /**
+     * Adds type information from @param bb to @param sb.  @param i is ignored.
+     */
+    abstract protected AbstractType<?> getAndAppendComparator(int i, ByteBuffer bb, StringBuilder sb);
+
+    /**
+     * Like getComparator, but validates that @param i does not exceed the defined range
+     */
+    abstract protected AbstractType<?> validateComparator(int i, ByteBuffer bb) throws MarshalException;
+
+    /**
+     * Used by fromString
+     */
+    abstract protected ParsedComparator parseComparator(int i, String part);
 
     protected static interface ParsedComparator
     {

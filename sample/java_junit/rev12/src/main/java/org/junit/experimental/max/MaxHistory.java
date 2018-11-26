@@ -2,7 +2,6 @@ package org.junit.experimental.max;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -13,76 +12,67 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.junit.runner.Description;
+import org.junit.runner.Result;
 import org.junit.runner.notification.Failure;
 import org.junit.runner.notification.RunListener;
 
+/**
+ * Stores a subset of the history of each test:
+ * <ul>
+ * <li>Last failure timestamp
+ * <li>Duration of last execution
+ * </ul>
+ */
 public class MaxHistory implements Serializable {
 	private static final long serialVersionUID= 1L;
 
-
-	public static MaxHistory forFolder(File storedResults) {
-		try {
-			if (storedResults.exists())
-				return readHistory(storedResults);
-		} catch (CouldNotReadCoreException e) {
-			e.printStackTrace();
-			storedResults.delete();
-		}
-		return new MaxHistory(storedResults);
+	/**
+	 * Loads a {@link MaxHistory} from {@code file}, or generates a new one that
+	 * will be saved to {@code file}.
+	 */
+	public static MaxHistory forFolder(File file) {
+		if (file.exists())
+			try {
+				return readHistory(file);
+			} catch (CouldNotReadCoreException e) {
+				e.printStackTrace();
+				file.delete();
+			}
+		return new MaxHistory(file);
 	}
-	
-	private static MaxHistory readHistory(File storedResults) throws CouldNotReadCoreException {
-		// TODO: rule of three
-		// TODO: Really?
-		ObjectInputStream stream;
-		FileInputStream file= null;
+
+	private static MaxHistory readHistory(File storedResults)
+			throws CouldNotReadCoreException {
 		try {
-			file= new FileInputStream(storedResults);
-		} catch (FileNotFoundException e) {
+			FileInputStream file= new FileInputStream(storedResults);
+			try {
+				ObjectInputStream stream= new ObjectInputStream(file);
+				try {
+					return (MaxHistory) stream.readObject();
+				} finally {
+					stream.close();
+				}
+			} finally {
+				file.close();
+			}
+		} catch (Exception e) {
 			throw new CouldNotReadCoreException(e);
 		}
-		try {
-			try {
-				stream= new ObjectInputStream(file);
-			} catch (IOException e) {
-				throw new CouldNotReadCoreException(e);
-			}
-			try {
-				return (MaxHistory) stream.readObject();
-			} catch (Exception e) {
-				throw new CouldNotReadCoreException(e); //TODO think about what we can do better here
-			} finally {
-				try {
-					stream.close();
-				} catch (IOException e) {
-					throw new CouldNotReadCoreException(e);
-				}
-			}
-		} finally {
-			try {
-				file.close();
-			} catch (IOException e) {
-				// TODO can't imagine what's gone wrong here, but who cares?
-			}
-		}
-	}
-	public final Map<String, Long> fDurations= new HashMap<String, Long>();
-
-	public final Map<String, Long> fFailureTimestamps= new HashMap<String, Long>();
-
-	public final File fFolder;
-
-	public MaxHistory(File storedResults) {
-		fFolder= storedResults;
 	}
 
-	public File getFile() {
-		return fFolder;
+	private final Map<String, Long> fDurations= new HashMap<String, Long>();
+
+	private final Map<String, Long> fFailureTimestamps= new HashMap<String, Long>();
+
+	private final File fHistoryStore;
+
+	private MaxHistory(File storedResults) {
+		fHistoryStore= storedResults;
 	}
 
-	public void save() throws IOException {
+	private void save() throws IOException {
 		ObjectOutputStream stream= new ObjectOutputStream(new FileOutputStream(
-				fFolder));
+				fHistoryStore));
 		stream.writeObject(this);
 		stream.close();
 	}
@@ -115,7 +105,7 @@ public class MaxHistory implements Serializable {
 		@Override
 		public void testStarted(Description description) throws Exception {
 			starts.put(description, System.nanoTime()); // Get most accurate
-														// possible time
+			// possible time
 		}
 
 		@Override
@@ -129,6 +119,11 @@ public class MaxHistory implements Serializable {
 		public void testFailure(Failure failure) throws Exception {
 			putTestFailureTimestamp(failure.getDescription(), overallStart);
 		}
+
+		@Override
+		public void testRunFinished(Result result) throws Exception {
+			save();
+		}
 	}
 
 	private class TestComparator implements Comparator<Description> {
@@ -139,27 +134,32 @@ public class MaxHistory implements Serializable {
 			if (isNewTest(o2))
 				return 1;
 			// Then most recently failed first
-			int result= getFailure(o2).compareTo(getFailure(o1)); 
-			return result != 0
-				? result
-				// Then shorter tests first
-				: getTestDuration(o1).compareTo(getTestDuration(o2));
+			int result= getFailure(o2).compareTo(getFailure(o1));
+			return result != 0 ? result
+			// Then shorter tests first
+					: getTestDuration(o1).compareTo(getTestDuration(o2));
 		}
-	
+
 		private Long getFailure(Description key) {
 			Long result= getFailureTimestamp(key);
-			if (result == null) 
+			if (result == null)
 				return 0L; // 0 = "never failed (that I know about)"
 			return result;
 		}
 	}
 
-
-	public RememberingListener listener() {
+	/**
+	 * @return a listener that will update this history based on the test
+	 *         results reported.
+	 */
+	public RunListener listener() {
 		return new RememberingListener();
 	}
 
-	// TODO (Feb 23, 2009 10:41:36 PM): V
+	/**
+	 * @return a comparator that ranks tests based on the JUnit Max sorting
+	 *         rules, as described in the {@link MaxCore} class comment.
+	 */
 	public Comparator<Description> testComparator() {
 		return new TestComparator();
 	}

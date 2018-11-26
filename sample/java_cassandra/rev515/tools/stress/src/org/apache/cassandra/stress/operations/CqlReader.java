@@ -23,7 +23,6 @@ package org.apache.cassandra.stress.operations;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -45,10 +44,7 @@ public class CqlReader extends CqlOperation<ByteBuffer[][]>
 
         if (state.settings.columns.slice)
         {
-            if (state.isCql2())
-                query.append("FIRST ").append(state.settings.columns.maxColumnsPerKey).append(" ''..''");
-            else
-                query.append("*");
+            query.append("*");
         }
         else
         {
@@ -58,7 +54,7 @@ public class CqlReader extends CqlOperation<ByteBuffer[][]>
                 {
                     if (i > 0)
                         query.append(",");
-                    query.append(wrapInQuotesIfRequired(ByteBufferUtil.string(state.settings.columns.names.get(i))));
+                    query.append(wrapInQuotes(ByteBufferUtil.string(state.settings.columns.names.get(i))));
                 }
             }
             catch (CharacterCodingException e)
@@ -67,10 +63,8 @@ public class CqlReader extends CqlOperation<ByteBuffer[][]>
             }
         }
 
-        query.append(" FROM ").append(wrapInQuotesIfRequired(state.type.table));
+        query.append(" FROM ").append(wrapInQuotes(state.type.table));
 
-        if (state.isCql2())
-            query.append(" USING CONSISTENCY ").append(state.settings.command.consistencyLevel);
         query.append(" WHERE KEY=?");
         return query.toString();
     }

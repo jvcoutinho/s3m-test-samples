@@ -251,7 +251,6 @@ public class MavenResolver extends ExternalResourceResolver implements PatternBa
     }
 
     public Set<? extends ComponentArtifactMetaData> getTypedArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
-
         if (artifactType == ComponentMetaDataArtifact.class) {
             Artifact pomArtifact = DefaultArtifact.newPomArtifact(IvyUtil.createModuleRevisionId(module.getId()), new Date());
             return ImmutableSet.<ComponentArtifactMetaData>of(new DefaultModuleVersionArtifactMetaData(module, pomArtifact));
@@ -263,19 +262,13 @@ public class MavenResolver extends ExternalResourceResolver implements PatternBa
     @Override
     protected Set<? extends ComponentArtifactMetaData> getOptionalMainArtifacts(ModuleVersionMetaData module) {
         if (module.isMetaDataOnly()) {
-            ModuleVersionArtifactMetaData possibleJarArtifact = createArtifactMetaData(module, "jar", null);
+            ModuleVersionArtifactIdentifier artifactId = new DefaultModuleVersionArtifactIdentifier(module.getComponentId(), module.getId(), module.getId().getName(), "jar", "jar", Collections.<String, String>emptyMap());
+            ModuleVersionArtifactMetaData possibleJarArtifact = new DefaultModuleVersionArtifactMetaData(artifactId);
             if (artifactExists(possibleJarArtifact)) {
                 return ImmutableSet.of(possibleJarArtifact);
             }
         }
         return Collections.emptySet();
-    }
-
-    private ModuleVersionArtifactMetaData createArtifactMetaData(ModuleVersionMetaData module, String type, String classifier) {
-        Map extraAttributes = classifier == null ? Collections.emptyMap() : Collections.singletonMap("m:classifier", classifier);
-        Artifact artifact = new DefaultArtifact(module.getDescriptor().getModuleRevisionId(), null,
-                module.getId().getName(), type, "jar", extraAttributes);
-        return new DefaultModuleVersionArtifactMetaData(module, artifact);
     }
 
     protected static class TimestampedModuleSource implements ModuleSource {

@@ -188,6 +188,17 @@ public class Cassandra {
     public void batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level) throws InvalidRequestException, UnavailableException, TimedOutException, org.apache.thrift.TException;
 
     /**
+     *   Atomically mutate many columns or super columns for many row keys. See also: Mutation.
+     * 
+     *   mutation_map maps key to column family to a list of Mutation objects to take place at that scope.
+     * *
+     * 
+     * @param mutation_map
+     * @param consistency_level
+     */
+    public void atomic_batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level) throws InvalidRequestException, UnavailableException, TimedOutException, org.apache.thrift.TException;
+
+    /**
      * Truncate will mark and entire column family as deleted.
      * From the user's perspective a successful call to truncate will result complete data deletion from cfname.
      * Internally, however, disk space will not be immediatily released, as with all deletes in cassandra, this one
@@ -274,6 +285,14 @@ public class Cassandra {
     public List<String> describe_splits(String cfName, String start_token, String end_token, int keys_per_split) throws InvalidRequestException, org.apache.thrift.TException;
 
     /**
+     * Enables tracing for the next query in this connection and returns the UUID for that trace session
+     * The next query will be traced idependently of trace probability and the returned UUID can be used to query the trace keyspace
+     */
+    public ByteBuffer trace_next_query() throws org.apache.thrift.TException;
+
+    public List<CfSplit> describe_splits_ex(String cfName, String start_token, String end_token, int keys_per_split) throws InvalidRequestException, org.apache.thrift.TException;
+
+    /**
      * adds a column family. returns the new schema id.
      * 
      * @param cf_def
@@ -324,6 +343,8 @@ public class Cassandra {
      */
     public CqlResult execute_cql_query(ByteBuffer query, Compression compression) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException;
 
+    public CqlResult execute_cql3_query(ByteBuffer query, Compression compression, ConsistencyLevel consistency) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException;
+
     /**
      * Prepare a CQL (Cassandra Query Language) statement by compiling and returning
      * - the type of CQL statement
@@ -335,6 +356,8 @@ public class Cassandra {
      */
     public CqlPreparedResult prepare_cql_query(ByteBuffer query, Compression compression) throws InvalidRequestException, org.apache.thrift.TException;
 
+    public CqlPreparedResult prepare_cql3_query(ByteBuffer query, Compression compression) throws InvalidRequestException, org.apache.thrift.TException;
+
     /**
      * Executes a prepared CQL (Cassandra Query Language) statement by passing an id token and  a list of variables
      * to bind and returns a CqlResult containing the results.
@@ -344,6 +367,13 @@ public class Cassandra {
      */
     public CqlResult execute_prepared_cql_query(int itemId, List<ByteBuffer> values) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException;
 
+    public CqlResult execute_prepared_cql3_query(int itemId, List<ByteBuffer> values, ConsistencyLevel consistency) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException;
+
+    /**
+     * @Deprecated This is now a no-op. Please use the CQL3 specific methods instead.
+     * 
+     * @param version
+     */
     public void set_cql_version(String version) throws InvalidRequestException, org.apache.thrift.TException;
 
   }
@@ -380,6 +410,8 @@ public class Cassandra {
 
     public void batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.batch_mutate_call> resultHandler) throws org.apache.thrift.TException;
 
+    public void atomic_batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.atomic_batch_mutate_call> resultHandler) throws org.apache.thrift.TException;
+
     public void truncate(String cfname, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.truncate_call> resultHandler) throws org.apache.thrift.TException;
 
     public void describe_schema_versions(org.apache.thrift.async.AsyncMethodCallback<AsyncClient.describe_schema_versions_call> resultHandler) throws org.apache.thrift.TException;
@@ -402,6 +434,10 @@ public class Cassandra {
 
     public void describe_splits(String cfName, String start_token, String end_token, int keys_per_split, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.describe_splits_call> resultHandler) throws org.apache.thrift.TException;
 
+    public void trace_next_query(org.apache.thrift.async.AsyncMethodCallback<AsyncClient.trace_next_query_call> resultHandler) throws org.apache.thrift.TException;
+
+    public void describe_splits_ex(String cfName, String start_token, String end_token, int keys_per_split, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.describe_splits_ex_call> resultHandler) throws org.apache.thrift.TException;
+
     public void system_add_column_family(CfDef cf_def, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.system_add_column_family_call> resultHandler) throws org.apache.thrift.TException;
 
     public void system_drop_column_family(String column_family, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.system_drop_column_family_call> resultHandler) throws org.apache.thrift.TException;
@@ -416,9 +452,15 @@ public class Cassandra {
 
     public void execute_cql_query(ByteBuffer query, Compression compression, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.execute_cql_query_call> resultHandler) throws org.apache.thrift.TException;
 
+    public void execute_cql3_query(ByteBuffer query, Compression compression, ConsistencyLevel consistency, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.execute_cql3_query_call> resultHandler) throws org.apache.thrift.TException;
+
     public void prepare_cql_query(ByteBuffer query, Compression compression, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.prepare_cql_query_call> resultHandler) throws org.apache.thrift.TException;
 
+    public void prepare_cql3_query(ByteBuffer query, Compression compression, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.prepare_cql3_query_call> resultHandler) throws org.apache.thrift.TException;
+
     public void execute_prepared_cql_query(int itemId, List<ByteBuffer> values, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.execute_prepared_cql_query_call> resultHandler) throws org.apache.thrift.TException;
+
+    public void execute_prepared_cql3_query(int itemId, List<ByteBuffer> values, ConsistencyLevel consistency, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.execute_prepared_cql3_query_call> resultHandler) throws org.apache.thrift.TException;
 
     public void set_cql_version(String version, org.apache.thrift.async.AsyncMethodCallback<AsyncClient.set_cql_version_call> resultHandler) throws org.apache.thrift.TException;
 
@@ -932,6 +974,36 @@ public class Cassandra {
       return;
     }
 
+    public void atomic_batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level) throws InvalidRequestException, UnavailableException, TimedOutException, org.apache.thrift.TException
+    {
+      send_atomic_batch_mutate(mutation_map, consistency_level);
+      recv_atomic_batch_mutate();
+    }
+
+    public void send_atomic_batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level) throws org.apache.thrift.TException
+    {
+      atomic_batch_mutate_args args = new atomic_batch_mutate_args();
+      args.setMutation_map(mutation_map);
+      args.setConsistency_level(consistency_level);
+      sendBase("atomic_batch_mutate", args);
+    }
+
+    public void recv_atomic_batch_mutate() throws InvalidRequestException, UnavailableException, TimedOutException, org.apache.thrift.TException
+    {
+      atomic_batch_mutate_result result = new atomic_batch_mutate_result();
+      receiveBase(result, "atomic_batch_mutate");
+      if (result.ire != null) {
+        throw result.ire;
+      }
+      if (result.ue != null) {
+        throw result.ue;
+      }
+      if (result.te != null) {
+        throw result.te;
+      }
+      return;
+    }
+
     public void truncate(String cfname) throws InvalidRequestException, UnavailableException, TimedOutException, org.apache.thrift.TException
     {
       send_truncate(cfname);
@@ -1208,6 +1280,57 @@ public class Cassandra {
       throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "describe_splits failed: unknown result");
     }
 
+    public ByteBuffer trace_next_query() throws org.apache.thrift.TException
+    {
+      send_trace_next_query();
+      return recv_trace_next_query();
+    }
+
+    public void send_trace_next_query() throws org.apache.thrift.TException
+    {
+      trace_next_query_args args = new trace_next_query_args();
+      sendBase("trace_next_query", args);
+    }
+
+    public ByteBuffer recv_trace_next_query() throws org.apache.thrift.TException
+    {
+      trace_next_query_result result = new trace_next_query_result();
+      receiveBase(result, "trace_next_query");
+      if (result.isSetSuccess()) {
+        return result.success;
+      }
+      throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "trace_next_query failed: unknown result");
+    }
+
+    public List<CfSplit> describe_splits_ex(String cfName, String start_token, String end_token, int keys_per_split) throws InvalidRequestException, org.apache.thrift.TException
+    {
+      send_describe_splits_ex(cfName, start_token, end_token, keys_per_split);
+      return recv_describe_splits_ex();
+    }
+
+    public void send_describe_splits_ex(String cfName, String start_token, String end_token, int keys_per_split) throws org.apache.thrift.TException
+    {
+      describe_splits_ex_args args = new describe_splits_ex_args();
+      args.setCfName(cfName);
+      args.setStart_token(start_token);
+      args.setEnd_token(end_token);
+      args.setKeys_per_split(keys_per_split);
+      sendBase("describe_splits_ex", args);
+    }
+
+    public List<CfSplit> recv_describe_splits_ex() throws InvalidRequestException, org.apache.thrift.TException
+    {
+      describe_splits_ex_result result = new describe_splits_ex_result();
+      receiveBase(result, "describe_splits_ex");
+      if (result.isSetSuccess()) {
+        return result.success;
+      }
+      if (result.ire != null) {
+        throw result.ire;
+      }
+      throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "describe_splits_ex failed: unknown result");
+    }
+
     public String system_add_column_family(CfDef cf_def) throws InvalidRequestException, SchemaDisagreementException, org.apache.thrift.TException
     {
       send_system_add_column_family(cf_def);
@@ -1418,6 +1541,43 @@ public class Cassandra {
       throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "execute_cql_query failed: unknown result");
     }
 
+    public CqlResult execute_cql3_query(ByteBuffer query, Compression compression, ConsistencyLevel consistency) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException
+    {
+      send_execute_cql3_query(query, compression, consistency);
+      return recv_execute_cql3_query();
+    }
+
+    public void send_execute_cql3_query(ByteBuffer query, Compression compression, ConsistencyLevel consistency) throws org.apache.thrift.TException
+    {
+      execute_cql3_query_args args = new execute_cql3_query_args();
+      args.setQuery(query);
+      args.setCompression(compression);
+      args.setConsistency(consistency);
+      sendBase("execute_cql3_query", args);
+    }
+
+    public CqlResult recv_execute_cql3_query() throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException
+    {
+      execute_cql3_query_result result = new execute_cql3_query_result();
+      receiveBase(result, "execute_cql3_query");
+      if (result.isSetSuccess()) {
+        return result.success;
+      }
+      if (result.ire != null) {
+        throw result.ire;
+      }
+      if (result.ue != null) {
+        throw result.ue;
+      }
+      if (result.te != null) {
+        throw result.te;
+      }
+      if (result.sde != null) {
+        throw result.sde;
+      }
+      throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "execute_cql3_query failed: unknown result");
+    }
+
     public CqlPreparedResult prepare_cql_query(ByteBuffer query, Compression compression) throws InvalidRequestException, org.apache.thrift.TException
     {
       send_prepare_cql_query(query, compression);
@@ -1443,6 +1603,33 @@ public class Cassandra {
         throw result.ire;
       }
       throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "prepare_cql_query failed: unknown result");
+    }
+
+    public CqlPreparedResult prepare_cql3_query(ByteBuffer query, Compression compression) throws InvalidRequestException, org.apache.thrift.TException
+    {
+      send_prepare_cql3_query(query, compression);
+      return recv_prepare_cql3_query();
+    }
+
+    public void send_prepare_cql3_query(ByteBuffer query, Compression compression) throws org.apache.thrift.TException
+    {
+      prepare_cql3_query_args args = new prepare_cql3_query_args();
+      args.setQuery(query);
+      args.setCompression(compression);
+      sendBase("prepare_cql3_query", args);
+    }
+
+    public CqlPreparedResult recv_prepare_cql3_query() throws InvalidRequestException, org.apache.thrift.TException
+    {
+      prepare_cql3_query_result result = new prepare_cql3_query_result();
+      receiveBase(result, "prepare_cql3_query");
+      if (result.isSetSuccess()) {
+        return result.success;
+      }
+      if (result.ire != null) {
+        throw result.ire;
+      }
+      throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "prepare_cql3_query failed: unknown result");
     }
 
     public CqlResult execute_prepared_cql_query(int itemId, List<ByteBuffer> values) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException
@@ -1479,6 +1666,43 @@ public class Cassandra {
         throw result.sde;
       }
       throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "execute_prepared_cql_query failed: unknown result");
+    }
+
+    public CqlResult execute_prepared_cql3_query(int itemId, List<ByteBuffer> values, ConsistencyLevel consistency) throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException
+    {
+      send_execute_prepared_cql3_query(itemId, values, consistency);
+      return recv_execute_prepared_cql3_query();
+    }
+
+    public void send_execute_prepared_cql3_query(int itemId, List<ByteBuffer> values, ConsistencyLevel consistency) throws org.apache.thrift.TException
+    {
+      execute_prepared_cql3_query_args args = new execute_prepared_cql3_query_args();
+      args.setItemId(itemId);
+      args.setValues(values);
+      args.setConsistency(consistency);
+      sendBase("execute_prepared_cql3_query", args);
+    }
+
+    public CqlResult recv_execute_prepared_cql3_query() throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException
+    {
+      execute_prepared_cql3_query_result result = new execute_prepared_cql3_query_result();
+      receiveBase(result, "execute_prepared_cql3_query");
+      if (result.isSetSuccess()) {
+        return result.success;
+      }
+      if (result.ire != null) {
+        throw result.ire;
+      }
+      if (result.ue != null) {
+        throw result.ue;
+      }
+      if (result.te != null) {
+        throw result.te;
+      }
+      if (result.sde != null) {
+        throw result.sde;
+      }
+      throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "execute_prepared_cql3_query failed: unknown result");
     }
 
     public void set_cql_version(String version) throws InvalidRequestException, org.apache.thrift.TException
@@ -2107,6 +2331,41 @@ public class Cassandra {
       }
     }
 
+    public void atomic_batch_mutate(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level, org.apache.thrift.async.AsyncMethodCallback<atomic_batch_mutate_call> resultHandler) throws org.apache.thrift.TException {
+      checkReady();
+      atomic_batch_mutate_call method_call = new atomic_batch_mutate_call(mutation_map, consistency_level, resultHandler, this, ___protocolFactory, ___transport);
+      this.___currentMethod = method_call;
+      ___manager.call(method_call);
+    }
+
+    public static class atomic_batch_mutate_call extends org.apache.thrift.async.TAsyncMethodCall {
+      private Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map;
+      private ConsistencyLevel consistency_level;
+      public atomic_batch_mutate_call(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map, ConsistencyLevel consistency_level, org.apache.thrift.async.AsyncMethodCallback<atomic_batch_mutate_call> resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+        super(client, protocolFactory, transport, resultHandler, false);
+        this.mutation_map = mutation_map;
+        this.consistency_level = consistency_level;
+      }
+
+      public void write_args(org.apache.thrift.protocol.TProtocol prot) throws org.apache.thrift.TException {
+        prot.writeMessageBegin(new org.apache.thrift.protocol.TMessage("atomic_batch_mutate", org.apache.thrift.protocol.TMessageType.CALL, 0));
+        atomic_batch_mutate_args args = new atomic_batch_mutate_args();
+        args.setMutation_map(mutation_map);
+        args.setConsistency_level(consistency_level);
+        args.write(prot);
+        prot.writeMessageEnd();
+      }
+
+      public void getResult() throws InvalidRequestException, UnavailableException, TimedOutException, org.apache.thrift.TException {
+        if (getState() != org.apache.thrift.async.TAsyncMethodCall.State.RESPONSE_READ) {
+          throw new IllegalStateException("Method call not finished!");
+        }
+        org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
+        org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
+        (new Client(prot)).recv_atomic_batch_mutate();
+      }
+    }
+
     public void truncate(String cfname, org.apache.thrift.async.AsyncMethodCallback<truncate_call> resultHandler) throws org.apache.thrift.TException {
       checkReady();
       truncate_call method_call = new truncate_call(cfname, resultHandler, this, ___protocolFactory, ___transport);
@@ -2447,6 +2706,76 @@ public class Cassandra {
       }
     }
 
+    public void trace_next_query(org.apache.thrift.async.AsyncMethodCallback<trace_next_query_call> resultHandler) throws org.apache.thrift.TException {
+      checkReady();
+      trace_next_query_call method_call = new trace_next_query_call(resultHandler, this, ___protocolFactory, ___transport);
+      this.___currentMethod = method_call;
+      ___manager.call(method_call);
+    }
+
+    public static class trace_next_query_call extends org.apache.thrift.async.TAsyncMethodCall {
+      public trace_next_query_call(org.apache.thrift.async.AsyncMethodCallback<trace_next_query_call> resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+        super(client, protocolFactory, transport, resultHandler, false);
+      }
+
+      public void write_args(org.apache.thrift.protocol.TProtocol prot) throws org.apache.thrift.TException {
+        prot.writeMessageBegin(new org.apache.thrift.protocol.TMessage("trace_next_query", org.apache.thrift.protocol.TMessageType.CALL, 0));
+        trace_next_query_args args = new trace_next_query_args();
+        args.write(prot);
+        prot.writeMessageEnd();
+      }
+
+      public ByteBuffer getResult() throws org.apache.thrift.TException {
+        if (getState() != org.apache.thrift.async.TAsyncMethodCall.State.RESPONSE_READ) {
+          throw new IllegalStateException("Method call not finished!");
+        }
+        org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
+        org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
+        return (new Client(prot)).recv_trace_next_query();
+      }
+    }
+
+    public void describe_splits_ex(String cfName, String start_token, String end_token, int keys_per_split, org.apache.thrift.async.AsyncMethodCallback<describe_splits_ex_call> resultHandler) throws org.apache.thrift.TException {
+      checkReady();
+      describe_splits_ex_call method_call = new describe_splits_ex_call(cfName, start_token, end_token, keys_per_split, resultHandler, this, ___protocolFactory, ___transport);
+      this.___currentMethod = method_call;
+      ___manager.call(method_call);
+    }
+
+    public static class describe_splits_ex_call extends org.apache.thrift.async.TAsyncMethodCall {
+      private String cfName;
+      private String start_token;
+      private String end_token;
+      private int keys_per_split;
+      public describe_splits_ex_call(String cfName, String start_token, String end_token, int keys_per_split, org.apache.thrift.async.AsyncMethodCallback<describe_splits_ex_call> resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+        super(client, protocolFactory, transport, resultHandler, false);
+        this.cfName = cfName;
+        this.start_token = start_token;
+        this.end_token = end_token;
+        this.keys_per_split = keys_per_split;
+      }
+
+      public void write_args(org.apache.thrift.protocol.TProtocol prot) throws org.apache.thrift.TException {
+        prot.writeMessageBegin(new org.apache.thrift.protocol.TMessage("describe_splits_ex", org.apache.thrift.protocol.TMessageType.CALL, 0));
+        describe_splits_ex_args args = new describe_splits_ex_args();
+        args.setCfName(cfName);
+        args.setStart_token(start_token);
+        args.setEnd_token(end_token);
+        args.setKeys_per_split(keys_per_split);
+        args.write(prot);
+        prot.writeMessageEnd();
+      }
+
+      public List<CfSplit> getResult() throws InvalidRequestException, org.apache.thrift.TException {
+        if (getState() != org.apache.thrift.async.TAsyncMethodCall.State.RESPONSE_READ) {
+          throw new IllegalStateException("Method call not finished!");
+        }
+        org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
+        org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
+        return (new Client(prot)).recv_describe_splits_ex();
+      }
+    }
+
     public void system_add_column_family(CfDef cf_def, org.apache.thrift.async.AsyncMethodCallback<system_add_column_family_call> resultHandler) throws org.apache.thrift.TException {
       checkReady();
       system_add_column_family_call method_call = new system_add_column_family_call(cf_def, resultHandler, this, ___protocolFactory, ___transport);
@@ -2674,6 +3003,44 @@ public class Cassandra {
       }
     }
 
+    public void execute_cql3_query(ByteBuffer query, Compression compression, ConsistencyLevel consistency, org.apache.thrift.async.AsyncMethodCallback<execute_cql3_query_call> resultHandler) throws org.apache.thrift.TException {
+      checkReady();
+      execute_cql3_query_call method_call = new execute_cql3_query_call(query, compression, consistency, resultHandler, this, ___protocolFactory, ___transport);
+      this.___currentMethod = method_call;
+      ___manager.call(method_call);
+    }
+
+    public static class execute_cql3_query_call extends org.apache.thrift.async.TAsyncMethodCall {
+      private ByteBuffer query;
+      private Compression compression;
+      private ConsistencyLevel consistency;
+      public execute_cql3_query_call(ByteBuffer query, Compression compression, ConsistencyLevel consistency, org.apache.thrift.async.AsyncMethodCallback<execute_cql3_query_call> resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+        super(client, protocolFactory, transport, resultHandler, false);
+        this.query = query;
+        this.compression = compression;
+        this.consistency = consistency;
+      }
+
+      public void write_args(org.apache.thrift.protocol.TProtocol prot) throws org.apache.thrift.TException {
+        prot.writeMessageBegin(new org.apache.thrift.protocol.TMessage("execute_cql3_query", org.apache.thrift.protocol.TMessageType.CALL, 0));
+        execute_cql3_query_args args = new execute_cql3_query_args();
+        args.setQuery(query);
+        args.setCompression(compression);
+        args.setConsistency(consistency);
+        args.write(prot);
+        prot.writeMessageEnd();
+      }
+
+      public CqlResult getResult() throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException {
+        if (getState() != org.apache.thrift.async.TAsyncMethodCall.State.RESPONSE_READ) {
+          throw new IllegalStateException("Method call not finished!");
+        }
+        org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
+        org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
+        return (new Client(prot)).recv_execute_cql3_query();
+      }
+    }
+
     public void prepare_cql_query(ByteBuffer query, Compression compression, org.apache.thrift.async.AsyncMethodCallback<prepare_cql_query_call> resultHandler) throws org.apache.thrift.TException {
       checkReady();
       prepare_cql_query_call method_call = new prepare_cql_query_call(query, compression, resultHandler, this, ___protocolFactory, ___transport);
@@ -2709,6 +3076,41 @@ public class Cassandra {
       }
     }
 
+    public void prepare_cql3_query(ByteBuffer query, Compression compression, org.apache.thrift.async.AsyncMethodCallback<prepare_cql3_query_call> resultHandler) throws org.apache.thrift.TException {
+      checkReady();
+      prepare_cql3_query_call method_call = new prepare_cql3_query_call(query, compression, resultHandler, this, ___protocolFactory, ___transport);
+      this.___currentMethod = method_call;
+      ___manager.call(method_call);
+    }
+
+    public static class prepare_cql3_query_call extends org.apache.thrift.async.TAsyncMethodCall {
+      private ByteBuffer query;
+      private Compression compression;
+      public prepare_cql3_query_call(ByteBuffer query, Compression compression, org.apache.thrift.async.AsyncMethodCallback<prepare_cql3_query_call> resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+        super(client, protocolFactory, transport, resultHandler, false);
+        this.query = query;
+        this.compression = compression;
+      }
+
+      public void write_args(org.apache.thrift.protocol.TProtocol prot) throws org.apache.thrift.TException {
+        prot.writeMessageBegin(new org.apache.thrift.protocol.TMessage("prepare_cql3_query", org.apache.thrift.protocol.TMessageType.CALL, 0));
+        prepare_cql3_query_args args = new prepare_cql3_query_args();
+        args.setQuery(query);
+        args.setCompression(compression);
+        args.write(prot);
+        prot.writeMessageEnd();
+      }
+
+      public CqlPreparedResult getResult() throws InvalidRequestException, org.apache.thrift.TException {
+        if (getState() != org.apache.thrift.async.TAsyncMethodCall.State.RESPONSE_READ) {
+          throw new IllegalStateException("Method call not finished!");
+        }
+        org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
+        org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
+        return (new Client(prot)).recv_prepare_cql3_query();
+      }
+    }
+
     public void execute_prepared_cql_query(int itemId, List<ByteBuffer> values, org.apache.thrift.async.AsyncMethodCallback<execute_prepared_cql_query_call> resultHandler) throws org.apache.thrift.TException {
       checkReady();
       execute_prepared_cql_query_call method_call = new execute_prepared_cql_query_call(itemId, values, resultHandler, this, ___protocolFactory, ___transport);
@@ -2741,6 +3143,44 @@ public class Cassandra {
         org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
         org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
         return (new Client(prot)).recv_execute_prepared_cql_query();
+      }
+    }
+
+    public void execute_prepared_cql3_query(int itemId, List<ByteBuffer> values, ConsistencyLevel consistency, org.apache.thrift.async.AsyncMethodCallback<execute_prepared_cql3_query_call> resultHandler) throws org.apache.thrift.TException {
+      checkReady();
+      execute_prepared_cql3_query_call method_call = new execute_prepared_cql3_query_call(itemId, values, consistency, resultHandler, this, ___protocolFactory, ___transport);
+      this.___currentMethod = method_call;
+      ___manager.call(method_call);
+    }
+
+    public static class execute_prepared_cql3_query_call extends org.apache.thrift.async.TAsyncMethodCall {
+      private int itemId;
+      private List<ByteBuffer> values;
+      private ConsistencyLevel consistency;
+      public execute_prepared_cql3_query_call(int itemId, List<ByteBuffer> values, ConsistencyLevel consistency, org.apache.thrift.async.AsyncMethodCallback<execute_prepared_cql3_query_call> resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+        super(client, protocolFactory, transport, resultHandler, false);
+        this.itemId = itemId;
+        this.values = values;
+        this.consistency = consistency;
+      }
+
+      public void write_args(org.apache.thrift.protocol.TProtocol prot) throws org.apache.thrift.TException {
+        prot.writeMessageBegin(new org.apache.thrift.protocol.TMessage("execute_prepared_cql3_query", org.apache.thrift.protocol.TMessageType.CALL, 0));
+        execute_prepared_cql3_query_args args = new execute_prepared_cql3_query_args();
+        args.setItemId(itemId);
+        args.setValues(values);
+        args.setConsistency(consistency);
+        args.write(prot);
+        prot.writeMessageEnd();
+      }
+
+      public CqlResult getResult() throws InvalidRequestException, UnavailableException, TimedOutException, SchemaDisagreementException, org.apache.thrift.TException {
+        if (getState() != org.apache.thrift.async.TAsyncMethodCall.State.RESPONSE_READ) {
+          throw new IllegalStateException("Method call not finished!");
+        }
+        org.apache.thrift.transport.TMemoryInputTransport memoryTransport = new org.apache.thrift.transport.TMemoryInputTransport(getFrameBuffer().array());
+        org.apache.thrift.protocol.TProtocol prot = client.getProtocolFactory().getProtocol(memoryTransport);
+        return (new Client(prot)).recv_execute_prepared_cql3_query();
       }
     }
 
@@ -2804,6 +3244,7 @@ public class Cassandra {
       processMap.put("remove", new remove());
       processMap.put("remove_counter", new remove_counter());
       processMap.put("batch_mutate", new batch_mutate());
+      processMap.put("atomic_batch_mutate", new atomic_batch_mutate());
       processMap.put("truncate", new truncate());
       processMap.put("describe_schema_versions", new describe_schema_versions());
       processMap.put("describe_keyspaces", new describe_keyspaces());
@@ -2815,6 +3256,8 @@ public class Cassandra {
       processMap.put("describe_snitch", new describe_snitch());
       processMap.put("describe_keyspace", new describe_keyspace());
       processMap.put("describe_splits", new describe_splits());
+      processMap.put("trace_next_query", new trace_next_query());
+      processMap.put("describe_splits_ex", new describe_splits_ex());
       processMap.put("system_add_column_family", new system_add_column_family());
       processMap.put("system_drop_column_family", new system_drop_column_family());
       processMap.put("system_add_keyspace", new system_add_keyspace());
@@ -2822,8 +3265,11 @@ public class Cassandra {
       processMap.put("system_update_keyspace", new system_update_keyspace());
       processMap.put("system_update_column_family", new system_update_column_family());
       processMap.put("execute_cql_query", new execute_cql_query());
+      processMap.put("execute_cql3_query", new execute_cql3_query());
       processMap.put("prepare_cql_query", new prepare_cql_query());
+      processMap.put("prepare_cql3_query", new prepare_cql3_query());
       processMap.put("execute_prepared_cql_query", new execute_prepared_cql_query());
+      processMap.put("execute_prepared_cql3_query", new execute_prepared_cql3_query());
       processMap.put("set_cql_version", new set_cql_version());
       return processMap;
     }
@@ -3185,6 +3631,30 @@ public class Cassandra {
       }
     }
 
+    private static class atomic_batch_mutate<I extends Iface> extends org.apache.thrift.ProcessFunction<I, atomic_batch_mutate_args> {
+      public atomic_batch_mutate() {
+        super("atomic_batch_mutate");
+      }
+
+      protected atomic_batch_mutate_args getEmptyArgsInstance() {
+        return new atomic_batch_mutate_args();
+      }
+
+      protected atomic_batch_mutate_result getResult(I iface, atomic_batch_mutate_args args) throws org.apache.thrift.TException {
+        atomic_batch_mutate_result result = new atomic_batch_mutate_result();
+        try {
+          iface.atomic_batch_mutate(args.mutation_map, args.consistency_level);
+        } catch (InvalidRequestException ire) {
+          result.ire = ire;
+        } catch (UnavailableException ue) {
+          result.ue = ue;
+        } catch (TimedOutException te) {
+          result.te = te;
+        }
+        return result;
+      }
+    }
+
     private static class truncate<I extends Iface> extends org.apache.thrift.ProcessFunction<I, truncate_args> {
       public truncate() {
         super("truncate");
@@ -3395,6 +3865,42 @@ public class Cassandra {
       }
     }
 
+    private static class trace_next_query<I extends Iface> extends org.apache.thrift.ProcessFunction<I, trace_next_query_args> {
+      public trace_next_query() {
+        super("trace_next_query");
+      }
+
+      protected trace_next_query_args getEmptyArgsInstance() {
+        return new trace_next_query_args();
+      }
+
+      protected trace_next_query_result getResult(I iface, trace_next_query_args args) throws org.apache.thrift.TException {
+        trace_next_query_result result = new trace_next_query_result();
+        result.success = iface.trace_next_query();
+        return result;
+      }
+    }
+
+    private static class describe_splits_ex<I extends Iface> extends org.apache.thrift.ProcessFunction<I, describe_splits_ex_args> {
+      public describe_splits_ex() {
+        super("describe_splits_ex");
+      }
+
+      protected describe_splits_ex_args getEmptyArgsInstance() {
+        return new describe_splits_ex_args();
+      }
+
+      protected describe_splits_ex_result getResult(I iface, describe_splits_ex_args args) throws org.apache.thrift.TException {
+        describe_splits_ex_result result = new describe_splits_ex_result();
+        try {
+          result.success = iface.describe_splits_ex(args.cfName, args.start_token, args.end_token, args.keys_per_split);
+        } catch (InvalidRequestException ire) {
+          result.ire = ire;
+        }
+        return result;
+      }
+    }
+
     private static class system_add_column_family<I extends Iface> extends org.apache.thrift.ProcessFunction<I, system_add_column_family_args> {
       public system_add_column_family() {
         super("system_add_column_family");
@@ -3553,6 +4059,32 @@ public class Cassandra {
       }
     }
 
+    private static class execute_cql3_query<I extends Iface> extends org.apache.thrift.ProcessFunction<I, execute_cql3_query_args> {
+      public execute_cql3_query() {
+        super("execute_cql3_query");
+      }
+
+      protected execute_cql3_query_args getEmptyArgsInstance() {
+        return new execute_cql3_query_args();
+      }
+
+      protected execute_cql3_query_result getResult(I iface, execute_cql3_query_args args) throws org.apache.thrift.TException {
+        execute_cql3_query_result result = new execute_cql3_query_result();
+        try {
+          result.success = iface.execute_cql3_query(args.query, args.compression, args.consistency);
+        } catch (InvalidRequestException ire) {
+          result.ire = ire;
+        } catch (UnavailableException ue) {
+          result.ue = ue;
+        } catch (TimedOutException te) {
+          result.te = te;
+        } catch (SchemaDisagreementException sde) {
+          result.sde = sde;
+        }
+        return result;
+      }
+    }
+
     private static class prepare_cql_query<I extends Iface> extends org.apache.thrift.ProcessFunction<I, prepare_cql_query_args> {
       public prepare_cql_query() {
         super("prepare_cql_query");
@@ -3573,6 +4105,26 @@ public class Cassandra {
       }
     }
 
+    private static class prepare_cql3_query<I extends Iface> extends org.apache.thrift.ProcessFunction<I, prepare_cql3_query_args> {
+      public prepare_cql3_query() {
+        super("prepare_cql3_query");
+      }
+
+      protected prepare_cql3_query_args getEmptyArgsInstance() {
+        return new prepare_cql3_query_args();
+      }
+
+      protected prepare_cql3_query_result getResult(I iface, prepare_cql3_query_args args) throws org.apache.thrift.TException {
+        prepare_cql3_query_result result = new prepare_cql3_query_result();
+        try {
+          result.success = iface.prepare_cql3_query(args.query, args.compression);
+        } catch (InvalidRequestException ire) {
+          result.ire = ire;
+        }
+        return result;
+      }
+    }
+
     private static class execute_prepared_cql_query<I extends Iface> extends org.apache.thrift.ProcessFunction<I, execute_prepared_cql_query_args> {
       public execute_prepared_cql_query() {
         super("execute_prepared_cql_query");
@@ -3586,6 +4138,32 @@ public class Cassandra {
         execute_prepared_cql_query_result result = new execute_prepared_cql_query_result();
         try {
           result.success = iface.execute_prepared_cql_query(args.itemId, args.values);
+        } catch (InvalidRequestException ire) {
+          result.ire = ire;
+        } catch (UnavailableException ue) {
+          result.ue = ue;
+        } catch (TimedOutException te) {
+          result.te = te;
+        } catch (SchemaDisagreementException sde) {
+          result.sde = sde;
+        }
+        return result;
+      }
+    }
+
+    private static class execute_prepared_cql3_query<I extends Iface> extends org.apache.thrift.ProcessFunction<I, execute_prepared_cql3_query_args> {
+      public execute_prepared_cql3_query() {
+        super("execute_prepared_cql3_query");
+      }
+
+      protected execute_prepared_cql3_query_args getEmptyArgsInstance() {
+        return new execute_prepared_cql3_query_args();
+      }
+
+      protected execute_prepared_cql3_query_result getResult(I iface, execute_prepared_cql3_query_args args) throws org.apache.thrift.TException {
+        execute_prepared_cql3_query_result result = new execute_prepared_cql3_query_result();
+        try {
+          result.success = iface.execute_prepared_cql3_query(args.itemId, args.values, args.consistency);
         } catch (InvalidRequestException ire) {
           result.ire = ire;
         } catch (UnavailableException ue) {
@@ -17817,6 +18395,8 @@ public class Cassandra {
 
     private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
       try {
+        // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
+        __isset_bit_vector = new BitSet(1);
         read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
       } catch (org.apache.thrift.TException te) {
         throw new java.io.IOException(te);
@@ -20357,6 +20937,1022 @@ public class Cassandra {
 
   }
 
+  public static class atomic_batch_mutate_args implements org.apache.thrift.TBase<atomic_batch_mutate_args, atomic_batch_mutate_args._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("atomic_batch_mutate_args");
+
+    private static final org.apache.thrift.protocol.TField MUTATION_MAP_FIELD_DESC = new org.apache.thrift.protocol.TField("mutation_map", org.apache.thrift.protocol.TType.MAP, (short)1);
+    private static final org.apache.thrift.protocol.TField CONSISTENCY_LEVEL_FIELD_DESC = new org.apache.thrift.protocol.TField("consistency_level", org.apache.thrift.protocol.TType.I32, (short)2);
+
+    public Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map; // required
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public ConsistencyLevel consistency_level; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      MUTATION_MAP((short)1, "mutation_map"),
+      /**
+       * 
+       * @see ConsistencyLevel
+       */
+      CONSISTENCY_LEVEL((short)2, "consistency_level");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 1: // MUTATION_MAP
+            return MUTATION_MAP;
+          case 2: // CONSISTENCY_LEVEL
+            return CONSISTENCY_LEVEL;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.MUTATION_MAP, new org.apache.thrift.meta_data.FieldMetaData("mutation_map", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.MapMetaData(org.apache.thrift.protocol.TType.MAP, 
+              new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING              , true), 
+              new org.apache.thrift.meta_data.MapMetaData(org.apache.thrift.protocol.TType.MAP, 
+                  new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING), 
+                  new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+                      new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, Mutation.class))))));
+      tmpMap.put(_Fields.CONSISTENCY_LEVEL, new org.apache.thrift.meta_data.FieldMetaData("consistency_level", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.EnumMetaData(org.apache.thrift.protocol.TType.ENUM, ConsistencyLevel.class)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(atomic_batch_mutate_args.class, metaDataMap);
+    }
+
+    public atomic_batch_mutate_args() {
+      this.consistency_level = org.apache.cassandra.thrift.ConsistencyLevel.ONE;
+
+    }
+
+    public atomic_batch_mutate_args(
+      Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map,
+      ConsistencyLevel consistency_level)
+    {
+      this();
+      this.mutation_map = mutation_map;
+      this.consistency_level = consistency_level;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public atomic_batch_mutate_args(atomic_batch_mutate_args other) {
+      if (other.isSetMutation_map()) {
+        Map<ByteBuffer,Map<String,List<Mutation>>> __this__mutation_map = new HashMap<ByteBuffer,Map<String,List<Mutation>>>();
+        for (Map.Entry<ByteBuffer, Map<String,List<Mutation>>> other_element : other.mutation_map.entrySet()) {
+
+          ByteBuffer other_element_key = other_element.getKey();
+          Map<String,List<Mutation>> other_element_value = other_element.getValue();
+
+          ByteBuffer __this__mutation_map_copy_key = org.apache.thrift.TBaseHelper.copyBinary(other_element_key);
+;
+
+          Map<String,List<Mutation>> __this__mutation_map_copy_value = new HashMap<String,List<Mutation>>();
+          for (Map.Entry<String, List<Mutation>> other_element_value_element : other_element_value.entrySet()) {
+
+            String other_element_value_element_key = other_element_value_element.getKey();
+            List<Mutation> other_element_value_element_value = other_element_value_element.getValue();
+
+            String __this__mutation_map_copy_value_copy_key = other_element_value_element_key;
+
+            List<Mutation> __this__mutation_map_copy_value_copy_value = new ArrayList<Mutation>();
+            for (Mutation other_element_value_element_value_element : other_element_value_element_value) {
+              __this__mutation_map_copy_value_copy_value.add(new Mutation(other_element_value_element_value_element));
+            }
+
+            __this__mutation_map_copy_value.put(__this__mutation_map_copy_value_copy_key, __this__mutation_map_copy_value_copy_value);
+          }
+
+          __this__mutation_map.put(__this__mutation_map_copy_key, __this__mutation_map_copy_value);
+        }
+        this.mutation_map = __this__mutation_map;
+      }
+      if (other.isSetConsistency_level()) {
+        this.consistency_level = other.consistency_level;
+      }
+    }
+
+    public atomic_batch_mutate_args deepCopy() {
+      return new atomic_batch_mutate_args(this);
+    }
+
+    @Override
+    public void clear() {
+      this.mutation_map = null;
+      this.consistency_level = org.apache.cassandra.thrift.ConsistencyLevel.ONE;
+
+    }
+
+    public int getMutation_mapSize() {
+      return (this.mutation_map == null) ? 0 : this.mutation_map.size();
+    }
+
+    public void putToMutation_map(ByteBuffer key, Map<String,List<Mutation>> val) {
+      if (this.mutation_map == null) {
+        this.mutation_map = new HashMap<ByteBuffer,Map<String,List<Mutation>>>();
+      }
+      this.mutation_map.put(key, val);
+    }
+
+    public Map<ByteBuffer,Map<String,List<Mutation>>> getMutation_map() {
+      return this.mutation_map;
+    }
+
+    public atomic_batch_mutate_args setMutation_map(Map<ByteBuffer,Map<String,List<Mutation>>> mutation_map) {
+      this.mutation_map = mutation_map;
+      return this;
+    }
+
+    public void unsetMutation_map() {
+      this.mutation_map = null;
+    }
+
+    /** Returns true if field mutation_map is set (has been assigned a value) and false otherwise */
+    public boolean isSetMutation_map() {
+      return this.mutation_map != null;
+    }
+
+    public void setMutation_mapIsSet(boolean value) {
+      if (!value) {
+        this.mutation_map = null;
+      }
+    }
+
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public ConsistencyLevel getConsistency_level() {
+      return this.consistency_level;
+    }
+
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public atomic_batch_mutate_args setConsistency_level(ConsistencyLevel consistency_level) {
+      this.consistency_level = consistency_level;
+      return this;
+    }
+
+    public void unsetConsistency_level() {
+      this.consistency_level = null;
+    }
+
+    /** Returns true if field consistency_level is set (has been assigned a value) and false otherwise */
+    public boolean isSetConsistency_level() {
+      return this.consistency_level != null;
+    }
+
+    public void setConsistency_levelIsSet(boolean value) {
+      if (!value) {
+        this.consistency_level = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case MUTATION_MAP:
+        if (value == null) {
+          unsetMutation_map();
+        } else {
+          setMutation_map((Map<ByteBuffer,Map<String,List<Mutation>>>)value);
+        }
+        break;
+
+      case CONSISTENCY_LEVEL:
+        if (value == null) {
+          unsetConsistency_level();
+        } else {
+          setConsistency_level((ConsistencyLevel)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case MUTATION_MAP:
+        return getMutation_map();
+
+      case CONSISTENCY_LEVEL:
+        return getConsistency_level();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case MUTATION_MAP:
+        return isSetMutation_map();
+      case CONSISTENCY_LEVEL:
+        return isSetConsistency_level();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof atomic_batch_mutate_args)
+        return this.equals((atomic_batch_mutate_args)that);
+      return false;
+    }
+
+    public boolean equals(atomic_batch_mutate_args that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_mutation_map = true && this.isSetMutation_map();
+      boolean that_present_mutation_map = true && that.isSetMutation_map();
+      if (this_present_mutation_map || that_present_mutation_map) {
+        if (!(this_present_mutation_map && that_present_mutation_map))
+          return false;
+        if (!this.mutation_map.equals(that.mutation_map))
+          return false;
+      }
+
+      boolean this_present_consistency_level = true && this.isSetConsistency_level();
+      boolean that_present_consistency_level = true && that.isSetConsistency_level();
+      if (this_present_consistency_level || that_present_consistency_level) {
+        if (!(this_present_consistency_level && that_present_consistency_level))
+          return false;
+        if (!this.consistency_level.equals(that.consistency_level))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_mutation_map = true && (isSetMutation_map());
+      builder.append(present_mutation_map);
+      if (present_mutation_map)
+        builder.append(mutation_map);
+
+      boolean present_consistency_level = true && (isSetConsistency_level());
+      builder.append(present_consistency_level);
+      if (present_consistency_level)
+        builder.append(consistency_level.getValue());
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(atomic_batch_mutate_args other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      atomic_batch_mutate_args typedOther = (atomic_batch_mutate_args)other;
+
+      lastComparison = Boolean.valueOf(isSetMutation_map()).compareTo(typedOther.isSetMutation_map());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetMutation_map()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.mutation_map, typedOther.mutation_map);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetConsistency_level()).compareTo(typedOther.isSetConsistency_level());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetConsistency_level()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.consistency_level, typedOther.consistency_level);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 1: // MUTATION_MAP
+            if (field.type == org.apache.thrift.protocol.TType.MAP) {
+              {
+                org.apache.thrift.protocol.TMap _map147 = iprot.readMapBegin();
+                this.mutation_map = new HashMap<ByteBuffer,Map<String,List<Mutation>>>(2*_map147.size);
+                for (int _i148 = 0; _i148 < _map147.size; ++_i148)
+                {
+                  ByteBuffer _key149; // required
+                  Map<String,List<Mutation>> _val150; // required
+                  _key149 = iprot.readBinary();
+                  {
+                    org.apache.thrift.protocol.TMap _map151 = iprot.readMapBegin();
+                    _val150 = new HashMap<String,List<Mutation>>(2*_map151.size);
+                    for (int _i152 = 0; _i152 < _map151.size; ++_i152)
+                    {
+                      String _key153; // required
+                      List<Mutation> _val154; // required
+                      _key153 = iprot.readString();
+                      {
+                        org.apache.thrift.protocol.TList _list155 = iprot.readListBegin();
+                        _val154 = new ArrayList<Mutation>(_list155.size);
+                        for (int _i156 = 0; _i156 < _list155.size; ++_i156)
+                        {
+                          Mutation _elem157; // required
+                          _elem157 = new Mutation();
+                          _elem157.read(iprot);
+                          _val154.add(_elem157);
+                        }
+                        iprot.readListEnd();
+                      }
+                      _val150.put(_key153, _val154);
+                    }
+                    iprot.readMapEnd();
+                  }
+                  this.mutation_map.put(_key149, _val150);
+                }
+                iprot.readMapEnd();
+              }
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // CONSISTENCY_LEVEL
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.consistency_level = ConsistencyLevel.findByValue(iprot.readI32());
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      validate();
+
+      oprot.writeStructBegin(STRUCT_DESC);
+      if (this.mutation_map != null) {
+        oprot.writeFieldBegin(MUTATION_MAP_FIELD_DESC);
+        {
+          oprot.writeMapBegin(new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.MAP, this.mutation_map.size()));
+          for (Map.Entry<ByteBuffer, Map<String,List<Mutation>>> _iter158 : this.mutation_map.entrySet())
+          {
+            oprot.writeBinary(_iter158.getKey());
+            {
+              oprot.writeMapBegin(new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.LIST, _iter158.getValue().size()));
+              for (Map.Entry<String, List<Mutation>> _iter159 : _iter158.getValue().entrySet())
+              {
+                oprot.writeString(_iter159.getKey());
+                {
+                  oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRUCT, _iter159.getValue().size()));
+                  for (Mutation _iter160 : _iter159.getValue())
+                  {
+                    _iter160.write(oprot);
+                  }
+                  oprot.writeListEnd();
+                }
+              }
+              oprot.writeMapEnd();
+            }
+          }
+          oprot.writeMapEnd();
+        }
+        oprot.writeFieldEnd();
+      }
+      if (this.consistency_level != null) {
+        oprot.writeFieldBegin(CONSISTENCY_LEVEL_FIELD_DESC);
+        oprot.writeI32(this.consistency_level.getValue());
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("atomic_batch_mutate_args(");
+      boolean first = true;
+
+      sb.append("mutation_map:");
+      if (this.mutation_map == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.mutation_map);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("consistency_level:");
+      if (this.consistency_level == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.consistency_level);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+      if (mutation_map == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'mutation_map' was not present! Struct: " + toString());
+      }
+      if (consistency_level == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'consistency_level' was not present! Struct: " + toString());
+      }
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class atomic_batch_mutate_result implements org.apache.thrift.TBase<atomic_batch_mutate_result, atomic_batch_mutate_result._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("atomic_batch_mutate_result");
+
+    private static final org.apache.thrift.protocol.TField IRE_FIELD_DESC = new org.apache.thrift.protocol.TField("ire", org.apache.thrift.protocol.TType.STRUCT, (short)1);
+    private static final org.apache.thrift.protocol.TField UE_FIELD_DESC = new org.apache.thrift.protocol.TField("ue", org.apache.thrift.protocol.TType.STRUCT, (short)2);
+    private static final org.apache.thrift.protocol.TField TE_FIELD_DESC = new org.apache.thrift.protocol.TField("te", org.apache.thrift.protocol.TType.STRUCT, (short)3);
+
+    public InvalidRequestException ire; // required
+    public UnavailableException ue; // required
+    public TimedOutException te; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      IRE((short)1, "ire"),
+      UE((short)2, "ue"),
+      TE((short)3, "te");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 1: // IRE
+            return IRE;
+          case 2: // UE
+            return UE;
+          case 3: // TE
+            return TE;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.IRE, new org.apache.thrift.meta_data.FieldMetaData("ire", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.UE, new org.apache.thrift.meta_data.FieldMetaData("ue", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.TE, new org.apache.thrift.meta_data.FieldMetaData("te", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(atomic_batch_mutate_result.class, metaDataMap);
+    }
+
+    public atomic_batch_mutate_result() {
+    }
+
+    public atomic_batch_mutate_result(
+      InvalidRequestException ire,
+      UnavailableException ue,
+      TimedOutException te)
+    {
+      this();
+      this.ire = ire;
+      this.ue = ue;
+      this.te = te;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public atomic_batch_mutate_result(atomic_batch_mutate_result other) {
+      if (other.isSetIre()) {
+        this.ire = new InvalidRequestException(other.ire);
+      }
+      if (other.isSetUe()) {
+        this.ue = new UnavailableException(other.ue);
+      }
+      if (other.isSetTe()) {
+        this.te = new TimedOutException(other.te);
+      }
+    }
+
+    public atomic_batch_mutate_result deepCopy() {
+      return new atomic_batch_mutate_result(this);
+    }
+
+    @Override
+    public void clear() {
+      this.ire = null;
+      this.ue = null;
+      this.te = null;
+    }
+
+    public InvalidRequestException getIre() {
+      return this.ire;
+    }
+
+    public atomic_batch_mutate_result setIre(InvalidRequestException ire) {
+      this.ire = ire;
+      return this;
+    }
+
+    public void unsetIre() {
+      this.ire = null;
+    }
+
+    /** Returns true if field ire is set (has been assigned a value) and false otherwise */
+    public boolean isSetIre() {
+      return this.ire != null;
+    }
+
+    public void setIreIsSet(boolean value) {
+      if (!value) {
+        this.ire = null;
+      }
+    }
+
+    public UnavailableException getUe() {
+      return this.ue;
+    }
+
+    public atomic_batch_mutate_result setUe(UnavailableException ue) {
+      this.ue = ue;
+      return this;
+    }
+
+    public void unsetUe() {
+      this.ue = null;
+    }
+
+    /** Returns true if field ue is set (has been assigned a value) and false otherwise */
+    public boolean isSetUe() {
+      return this.ue != null;
+    }
+
+    public void setUeIsSet(boolean value) {
+      if (!value) {
+        this.ue = null;
+      }
+    }
+
+    public TimedOutException getTe() {
+      return this.te;
+    }
+
+    public atomic_batch_mutate_result setTe(TimedOutException te) {
+      this.te = te;
+      return this;
+    }
+
+    public void unsetTe() {
+      this.te = null;
+    }
+
+    /** Returns true if field te is set (has been assigned a value) and false otherwise */
+    public boolean isSetTe() {
+      return this.te != null;
+    }
+
+    public void setTeIsSet(boolean value) {
+      if (!value) {
+        this.te = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case IRE:
+        if (value == null) {
+          unsetIre();
+        } else {
+          setIre((InvalidRequestException)value);
+        }
+        break;
+
+      case UE:
+        if (value == null) {
+          unsetUe();
+        } else {
+          setUe((UnavailableException)value);
+        }
+        break;
+
+      case TE:
+        if (value == null) {
+          unsetTe();
+        } else {
+          setTe((TimedOutException)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case IRE:
+        return getIre();
+
+      case UE:
+        return getUe();
+
+      case TE:
+        return getTe();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case IRE:
+        return isSetIre();
+      case UE:
+        return isSetUe();
+      case TE:
+        return isSetTe();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof atomic_batch_mutate_result)
+        return this.equals((atomic_batch_mutate_result)that);
+      return false;
+    }
+
+    public boolean equals(atomic_batch_mutate_result that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_ire = true && this.isSetIre();
+      boolean that_present_ire = true && that.isSetIre();
+      if (this_present_ire || that_present_ire) {
+        if (!(this_present_ire && that_present_ire))
+          return false;
+        if (!this.ire.equals(that.ire))
+          return false;
+      }
+
+      boolean this_present_ue = true && this.isSetUe();
+      boolean that_present_ue = true && that.isSetUe();
+      if (this_present_ue || that_present_ue) {
+        if (!(this_present_ue && that_present_ue))
+          return false;
+        if (!this.ue.equals(that.ue))
+          return false;
+      }
+
+      boolean this_present_te = true && this.isSetTe();
+      boolean that_present_te = true && that.isSetTe();
+      if (this_present_te || that_present_te) {
+        if (!(this_present_te && that_present_te))
+          return false;
+        if (!this.te.equals(that.te))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_ire = true && (isSetIre());
+      builder.append(present_ire);
+      if (present_ire)
+        builder.append(ire);
+
+      boolean present_ue = true && (isSetUe());
+      builder.append(present_ue);
+      if (present_ue)
+        builder.append(ue);
+
+      boolean present_te = true && (isSetTe());
+      builder.append(present_te);
+      if (present_te)
+        builder.append(te);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(atomic_batch_mutate_result other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      atomic_batch_mutate_result typedOther = (atomic_batch_mutate_result)other;
+
+      lastComparison = Boolean.valueOf(isSetIre()).compareTo(typedOther.isSetIre());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetIre()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ire, typedOther.ire);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetUe()).compareTo(typedOther.isSetUe());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetUe()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ue, typedOther.ue);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetTe()).compareTo(typedOther.isSetTe());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetTe()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.te, typedOther.te);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 1: // IRE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ire = new InvalidRequestException();
+              this.ire.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // UE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ue = new UnavailableException();
+              this.ue.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 3: // TE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.te = new TimedOutException();
+              this.te.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      oprot.writeStructBegin(STRUCT_DESC);
+
+      if (this.isSetIre()) {
+        oprot.writeFieldBegin(IRE_FIELD_DESC);
+        this.ire.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetUe()) {
+        oprot.writeFieldBegin(UE_FIELD_DESC);
+        this.ue.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetTe()) {
+        oprot.writeFieldBegin(TE_FIELD_DESC);
+        this.te.write(oprot);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("atomic_batch_mutate_result(");
+      boolean first = true;
+
+      sb.append("ire:");
+      if (this.ire == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ire);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ue:");
+      if (this.ue == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ue);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("te:");
+      if (this.te == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.te);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
   public static class truncate_args implements org.apache.thrift.TBase<truncate_args, truncate_args._Fields>, java.io.Serializable, Cloneable   {
     private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("truncate_args");
 
@@ -21701,25 +23297,25 @@ public class Cassandra {
           case 0: // SUCCESS
             if (field.type == org.apache.thrift.protocol.TType.MAP) {
               {
-                org.apache.thrift.protocol.TMap _map147 = iprot.readMapBegin();
-                this.success = new HashMap<String,List<String>>(2*_map147.size);
-                for (int _i148 = 0; _i148 < _map147.size; ++_i148)
+                org.apache.thrift.protocol.TMap _map161 = iprot.readMapBegin();
+                this.success = new HashMap<String,List<String>>(2*_map161.size);
+                for (int _i162 = 0; _i162 < _map161.size; ++_i162)
                 {
-                  String _key149; // required
-                  List<String> _val150; // required
-                  _key149 = iprot.readString();
+                  String _key163; // required
+                  List<String> _val164; // required
+                  _key163 = iprot.readString();
                   {
-                    org.apache.thrift.protocol.TList _list151 = iprot.readListBegin();
-                    _val150 = new ArrayList<String>(_list151.size);
-                    for (int _i152 = 0; _i152 < _list151.size; ++_i152)
+                    org.apache.thrift.protocol.TList _list165 = iprot.readListBegin();
+                    _val164 = new ArrayList<String>(_list165.size);
+                    for (int _i166 = 0; _i166 < _list165.size; ++_i166)
                     {
-                      String _elem153; // required
-                      _elem153 = iprot.readString();
-                      _val150.add(_elem153);
+                      String _elem167; // required
+                      _elem167 = iprot.readString();
+                      _val164.add(_elem167);
                     }
                     iprot.readListEnd();
                   }
-                  this.success.put(_key149, _val150);
+                  this.success.put(_key163, _val164);
                 }
                 iprot.readMapEnd();
               }
@@ -21753,14 +23349,14 @@ public class Cassandra {
         oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
         {
           oprot.writeMapBegin(new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.LIST, this.success.size()));
-          for (Map.Entry<String, List<String>> _iter154 : this.success.entrySet())
+          for (Map.Entry<String, List<String>> _iter168 : this.success.entrySet())
           {
-            oprot.writeString(_iter154.getKey());
+            oprot.writeString(_iter168.getKey());
             {
-              oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRING, _iter154.getValue().size()));
-              for (String _iter155 : _iter154.getValue())
+              oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRING, _iter168.getValue().size()));
+              for (String _iter169 : _iter168.getValue())
               {
-                oprot.writeString(_iter155);
+                oprot.writeString(_iter169);
               }
               oprot.writeListEnd();
             }
@@ -22359,14 +23955,14 @@ public class Cassandra {
           case 0: // SUCCESS
             if (field.type == org.apache.thrift.protocol.TType.LIST) {
               {
-                org.apache.thrift.protocol.TList _list156 = iprot.readListBegin();
-                this.success = new ArrayList<KsDef>(_list156.size);
-                for (int _i157 = 0; _i157 < _list156.size; ++_i157)
+                org.apache.thrift.protocol.TList _list170 = iprot.readListBegin();
+                this.success = new ArrayList<KsDef>(_list170.size);
+                for (int _i171 = 0; _i171 < _list170.size; ++_i171)
                 {
-                  KsDef _elem158; // required
-                  _elem158 = new KsDef();
-                  _elem158.read(iprot);
-                  this.success.add(_elem158);
+                  KsDef _elem172; // required
+                  _elem172 = new KsDef();
+                  _elem172.read(iprot);
+                  this.success.add(_elem172);
                 }
                 iprot.readListEnd();
               }
@@ -22400,9 +23996,9 @@ public class Cassandra {
         oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
         {
           oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRUCT, this.success.size()));
-          for (KsDef _iter159 : this.success)
+          for (KsDef _iter173 : this.success)
           {
-            _iter159.write(oprot);
+            _iter173.write(oprot);
           }
           oprot.writeListEnd();
         }
@@ -24115,14 +25711,14 @@ public class Cassandra {
           case 0: // SUCCESS
             if (field.type == org.apache.thrift.protocol.TType.LIST) {
               {
-                org.apache.thrift.protocol.TList _list160 = iprot.readListBegin();
-                this.success = new ArrayList<TokenRange>(_list160.size);
-                for (int _i161 = 0; _i161 < _list160.size; ++_i161)
+                org.apache.thrift.protocol.TList _list174 = iprot.readListBegin();
+                this.success = new ArrayList<TokenRange>(_list174.size);
+                for (int _i175 = 0; _i175 < _list174.size; ++_i175)
                 {
-                  TokenRange _elem162; // required
-                  _elem162 = new TokenRange();
-                  _elem162.read(iprot);
-                  this.success.add(_elem162);
+                  TokenRange _elem176; // required
+                  _elem176 = new TokenRange();
+                  _elem176.read(iprot);
+                  this.success.add(_elem176);
                 }
                 iprot.readListEnd();
               }
@@ -24156,9 +25752,9 @@ public class Cassandra {
         oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
         {
           oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRUCT, this.success.size()));
-          for (TokenRange _iter163 : this.success)
+          for (TokenRange _iter177 : this.success)
           {
-            _iter163.write(oprot);
+            _iter177.write(oprot);
           }
           oprot.writeListEnd();
         }
@@ -24759,15 +26355,15 @@ public class Cassandra {
           case 0: // SUCCESS
             if (field.type == org.apache.thrift.protocol.TType.MAP) {
               {
-                org.apache.thrift.protocol.TMap _map164 = iprot.readMapBegin();
-                this.success = new HashMap<String,String>(2*_map164.size);
-                for (int _i165 = 0; _i165 < _map164.size; ++_i165)
+                org.apache.thrift.protocol.TMap _map178 = iprot.readMapBegin();
+                this.success = new HashMap<String,String>(2*_map178.size);
+                for (int _i179 = 0; _i179 < _map178.size; ++_i179)
                 {
-                  String _key166; // required
-                  String _val167; // required
-                  _key166 = iprot.readString();
-                  _val167 = iprot.readString();
-                  this.success.put(_key166, _val167);
+                  String _key180; // required
+                  String _val181; // required
+                  _key180 = iprot.readString();
+                  _val181 = iprot.readString();
+                  this.success.put(_key180, _val181);
                 }
                 iprot.readMapEnd();
               }
@@ -24801,10 +26397,10 @@ public class Cassandra {
         oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
         {
           oprot.writeMapBegin(new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.STRING, this.success.size()));
-          for (Map.Entry<String, String> _iter168 : this.success.entrySet())
+          for (Map.Entry<String, String> _iter182 : this.success.entrySet())
           {
-            oprot.writeString(_iter168.getKey());
-            oprot.writeString(_iter168.getValue());
+            oprot.writeString(_iter182.getKey());
+            oprot.writeString(_iter182.getValue());
           }
           oprot.writeMapEnd();
         }
@@ -27608,13 +29204,13 @@ public class Cassandra {
           case 0: // SUCCESS
             if (field.type == org.apache.thrift.protocol.TType.LIST) {
               {
-                org.apache.thrift.protocol.TList _list169 = iprot.readListBegin();
-                this.success = new ArrayList<String>(_list169.size);
-                for (int _i170 = 0; _i170 < _list169.size; ++_i170)
+                org.apache.thrift.protocol.TList _list183 = iprot.readListBegin();
+                this.success = new ArrayList<String>(_list183.size);
+                for (int _i184 = 0; _i184 < _list183.size; ++_i184)
                 {
-                  String _elem171; // required
-                  _elem171 = iprot.readString();
-                  this.success.add(_elem171);
+                  String _elem185; // required
+                  _elem185 = iprot.readString();
+                  this.success.add(_elem185);
                 }
                 iprot.readListEnd();
               }
@@ -27648,9 +29244,9 @@ public class Cassandra {
         oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
         {
           oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRING, this.success.size()));
-          for (String _iter172 : this.success)
+          for (String _iter186 : this.success)
           {
-            oprot.writeString(_iter172);
+            oprot.writeString(_iter186);
           }
           oprot.writeListEnd();
         }
@@ -27667,6 +29263,1558 @@ public class Cassandra {
     @Override
     public String toString() {
       StringBuilder sb = new StringBuilder("describe_splits_result(");
+      boolean first = true;
+
+      sb.append("success:");
+      if (this.success == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.success);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ire:");
+      if (this.ire == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ire);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class trace_next_query_args implements org.apache.thrift.TBase<trace_next_query_args, trace_next_query_args._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("trace_next_query_args");
+
+
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+;
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(trace_next_query_args.class, metaDataMap);
+    }
+
+    public trace_next_query_args() {
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public trace_next_query_args(trace_next_query_args other) {
+    }
+
+    public trace_next_query_args deepCopy() {
+      return new trace_next_query_args(this);
+    }
+
+    @Override
+    public void clear() {
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof trace_next_query_args)
+        return this.equals((trace_next_query_args)that);
+      return false;
+    }
+
+    public boolean equals(trace_next_query_args that) {
+      if (that == null)
+        return false;
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(trace_next_query_args other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      trace_next_query_args typedOther = (trace_next_query_args)other;
+
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      validate();
+
+      oprot.writeStructBegin(STRUCT_DESC);
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("trace_next_query_args(");
+      boolean first = true;
+
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class trace_next_query_result implements org.apache.thrift.TBase<trace_next_query_result, trace_next_query_result._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("trace_next_query_result");
+
+    private static final org.apache.thrift.protocol.TField SUCCESS_FIELD_DESC = new org.apache.thrift.protocol.TField("success", org.apache.thrift.protocol.TType.STRING, (short)0);
+
+    public ByteBuffer success; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      SUCCESS((short)0, "success");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 0: // SUCCESS
+            return SUCCESS;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.SUCCESS, new org.apache.thrift.meta_data.FieldMetaData("success", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING          , true)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(trace_next_query_result.class, metaDataMap);
+    }
+
+    public trace_next_query_result() {
+    }
+
+    public trace_next_query_result(
+      ByteBuffer success)
+    {
+      this();
+      this.success = success;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public trace_next_query_result(trace_next_query_result other) {
+      if (other.isSetSuccess()) {
+        this.success = org.apache.thrift.TBaseHelper.copyBinary(other.success);
+;
+      }
+    }
+
+    public trace_next_query_result deepCopy() {
+      return new trace_next_query_result(this);
+    }
+
+    @Override
+    public void clear() {
+      this.success = null;
+    }
+
+    public byte[] getSuccess() {
+      setSuccess(org.apache.thrift.TBaseHelper.rightSize(success));
+      return success == null ? null : success.array();
+    }
+
+    public ByteBuffer bufferForSuccess() {
+      return success;
+    }
+
+    public trace_next_query_result setSuccess(byte[] success) {
+      setSuccess(success == null ? (ByteBuffer)null : ByteBuffer.wrap(success));
+      return this;
+    }
+
+    public trace_next_query_result setSuccess(ByteBuffer success) {
+      this.success = success;
+      return this;
+    }
+
+    public void unsetSuccess() {
+      this.success = null;
+    }
+
+    /** Returns true if field success is set (has been assigned a value) and false otherwise */
+    public boolean isSetSuccess() {
+      return this.success != null;
+    }
+
+    public void setSuccessIsSet(boolean value) {
+      if (!value) {
+        this.success = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case SUCCESS:
+        if (value == null) {
+          unsetSuccess();
+        } else {
+          setSuccess((ByteBuffer)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case SUCCESS:
+        return getSuccess();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case SUCCESS:
+        return isSetSuccess();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof trace_next_query_result)
+        return this.equals((trace_next_query_result)that);
+      return false;
+    }
+
+    public boolean equals(trace_next_query_result that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_success = true && this.isSetSuccess();
+      boolean that_present_success = true && that.isSetSuccess();
+      if (this_present_success || that_present_success) {
+        if (!(this_present_success && that_present_success))
+          return false;
+        if (!this.success.equals(that.success))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_success = true && (isSetSuccess());
+      builder.append(present_success);
+      if (present_success)
+        builder.append(success);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(trace_next_query_result other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      trace_next_query_result typedOther = (trace_next_query_result)other;
+
+      lastComparison = Boolean.valueOf(isSetSuccess()).compareTo(typedOther.isSetSuccess());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSuccess()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.success, typedOther.success);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 0: // SUCCESS
+            if (field.type == org.apache.thrift.protocol.TType.STRING) {
+              this.success = iprot.readBinary();
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      oprot.writeStructBegin(STRUCT_DESC);
+
+      if (this.isSetSuccess()) {
+        oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
+        oprot.writeBinary(this.success);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("trace_next_query_result(");
+      boolean first = true;
+
+      sb.append("success:");
+      if (this.success == null) {
+        sb.append("null");
+      } else {
+        org.apache.thrift.TBaseHelper.toString(this.success, sb);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class describe_splits_ex_args implements org.apache.thrift.TBase<describe_splits_ex_args, describe_splits_ex_args._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("describe_splits_ex_args");
+
+    private static final org.apache.thrift.protocol.TField CF_NAME_FIELD_DESC = new org.apache.thrift.protocol.TField("cfName", org.apache.thrift.protocol.TType.STRING, (short)1);
+    private static final org.apache.thrift.protocol.TField START_TOKEN_FIELD_DESC = new org.apache.thrift.protocol.TField("start_token", org.apache.thrift.protocol.TType.STRING, (short)2);
+    private static final org.apache.thrift.protocol.TField END_TOKEN_FIELD_DESC = new org.apache.thrift.protocol.TField("end_token", org.apache.thrift.protocol.TType.STRING, (short)3);
+    private static final org.apache.thrift.protocol.TField KEYS_PER_SPLIT_FIELD_DESC = new org.apache.thrift.protocol.TField("keys_per_split", org.apache.thrift.protocol.TType.I32, (short)4);
+
+    public String cfName; // required
+    public String start_token; // required
+    public String end_token; // required
+    public int keys_per_split; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      CF_NAME((short)1, "cfName"),
+      START_TOKEN((short)2, "start_token"),
+      END_TOKEN((short)3, "end_token"),
+      KEYS_PER_SPLIT((short)4, "keys_per_split");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 1: // CF_NAME
+            return CF_NAME;
+          case 2: // START_TOKEN
+            return START_TOKEN;
+          case 3: // END_TOKEN
+            return END_TOKEN;
+          case 4: // KEYS_PER_SPLIT
+            return KEYS_PER_SPLIT;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+    private static final int __KEYS_PER_SPLIT_ISSET_ID = 0;
+    private BitSet __isset_bit_vector = new BitSet(1);
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.CF_NAME, new org.apache.thrift.meta_data.FieldMetaData("cfName", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING)));
+      tmpMap.put(_Fields.START_TOKEN, new org.apache.thrift.meta_data.FieldMetaData("start_token", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING)));
+      tmpMap.put(_Fields.END_TOKEN, new org.apache.thrift.meta_data.FieldMetaData("end_token", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING)));
+      tmpMap.put(_Fields.KEYS_PER_SPLIT, new org.apache.thrift.meta_data.FieldMetaData("keys_per_split", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.I32)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(describe_splits_ex_args.class, metaDataMap);
+    }
+
+    public describe_splits_ex_args() {
+    }
+
+    public describe_splits_ex_args(
+      String cfName,
+      String start_token,
+      String end_token,
+      int keys_per_split)
+    {
+      this();
+      this.cfName = cfName;
+      this.start_token = start_token;
+      this.end_token = end_token;
+      this.keys_per_split = keys_per_split;
+      setKeys_per_splitIsSet(true);
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public describe_splits_ex_args(describe_splits_ex_args other) {
+      __isset_bit_vector.clear();
+      __isset_bit_vector.or(other.__isset_bit_vector);
+      if (other.isSetCfName()) {
+        this.cfName = other.cfName;
+      }
+      if (other.isSetStart_token()) {
+        this.start_token = other.start_token;
+      }
+      if (other.isSetEnd_token()) {
+        this.end_token = other.end_token;
+      }
+      this.keys_per_split = other.keys_per_split;
+    }
+
+    public describe_splits_ex_args deepCopy() {
+      return new describe_splits_ex_args(this);
+    }
+
+    @Override
+    public void clear() {
+      this.cfName = null;
+      this.start_token = null;
+      this.end_token = null;
+      setKeys_per_splitIsSet(false);
+      this.keys_per_split = 0;
+    }
+
+    public String getCfName() {
+      return this.cfName;
+    }
+
+    public describe_splits_ex_args setCfName(String cfName) {
+      this.cfName = cfName;
+      return this;
+    }
+
+    public void unsetCfName() {
+      this.cfName = null;
+    }
+
+    /** Returns true if field cfName is set (has been assigned a value) and false otherwise */
+    public boolean isSetCfName() {
+      return this.cfName != null;
+    }
+
+    public void setCfNameIsSet(boolean value) {
+      if (!value) {
+        this.cfName = null;
+      }
+    }
+
+    public String getStart_token() {
+      return this.start_token;
+    }
+
+    public describe_splits_ex_args setStart_token(String start_token) {
+      this.start_token = start_token;
+      return this;
+    }
+
+    public void unsetStart_token() {
+      this.start_token = null;
+    }
+
+    /** Returns true if field start_token is set (has been assigned a value) and false otherwise */
+    public boolean isSetStart_token() {
+      return this.start_token != null;
+    }
+
+    public void setStart_tokenIsSet(boolean value) {
+      if (!value) {
+        this.start_token = null;
+      }
+    }
+
+    public String getEnd_token() {
+      return this.end_token;
+    }
+
+    public describe_splits_ex_args setEnd_token(String end_token) {
+      this.end_token = end_token;
+      return this;
+    }
+
+    public void unsetEnd_token() {
+      this.end_token = null;
+    }
+
+    /** Returns true if field end_token is set (has been assigned a value) and false otherwise */
+    public boolean isSetEnd_token() {
+      return this.end_token != null;
+    }
+
+    public void setEnd_tokenIsSet(boolean value) {
+      if (!value) {
+        this.end_token = null;
+      }
+    }
+
+    public int getKeys_per_split() {
+      return this.keys_per_split;
+    }
+
+    public describe_splits_ex_args setKeys_per_split(int keys_per_split) {
+      this.keys_per_split = keys_per_split;
+      setKeys_per_splitIsSet(true);
+      return this;
+    }
+
+    public void unsetKeys_per_split() {
+      __isset_bit_vector.clear(__KEYS_PER_SPLIT_ISSET_ID);
+    }
+
+    /** Returns true if field keys_per_split is set (has been assigned a value) and false otherwise */
+    public boolean isSetKeys_per_split() {
+      return __isset_bit_vector.get(__KEYS_PER_SPLIT_ISSET_ID);
+    }
+
+    public void setKeys_per_splitIsSet(boolean value) {
+      __isset_bit_vector.set(__KEYS_PER_SPLIT_ISSET_ID, value);
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case CF_NAME:
+        if (value == null) {
+          unsetCfName();
+        } else {
+          setCfName((String)value);
+        }
+        break;
+
+      case START_TOKEN:
+        if (value == null) {
+          unsetStart_token();
+        } else {
+          setStart_token((String)value);
+        }
+        break;
+
+      case END_TOKEN:
+        if (value == null) {
+          unsetEnd_token();
+        } else {
+          setEnd_token((String)value);
+        }
+        break;
+
+      case KEYS_PER_SPLIT:
+        if (value == null) {
+          unsetKeys_per_split();
+        } else {
+          setKeys_per_split((Integer)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case CF_NAME:
+        return getCfName();
+
+      case START_TOKEN:
+        return getStart_token();
+
+      case END_TOKEN:
+        return getEnd_token();
+
+      case KEYS_PER_SPLIT:
+        return Integer.valueOf(getKeys_per_split());
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case CF_NAME:
+        return isSetCfName();
+      case START_TOKEN:
+        return isSetStart_token();
+      case END_TOKEN:
+        return isSetEnd_token();
+      case KEYS_PER_SPLIT:
+        return isSetKeys_per_split();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof describe_splits_ex_args)
+        return this.equals((describe_splits_ex_args)that);
+      return false;
+    }
+
+    public boolean equals(describe_splits_ex_args that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_cfName = true && this.isSetCfName();
+      boolean that_present_cfName = true && that.isSetCfName();
+      if (this_present_cfName || that_present_cfName) {
+        if (!(this_present_cfName && that_present_cfName))
+          return false;
+        if (!this.cfName.equals(that.cfName))
+          return false;
+      }
+
+      boolean this_present_start_token = true && this.isSetStart_token();
+      boolean that_present_start_token = true && that.isSetStart_token();
+      if (this_present_start_token || that_present_start_token) {
+        if (!(this_present_start_token && that_present_start_token))
+          return false;
+        if (!this.start_token.equals(that.start_token))
+          return false;
+      }
+
+      boolean this_present_end_token = true && this.isSetEnd_token();
+      boolean that_present_end_token = true && that.isSetEnd_token();
+      if (this_present_end_token || that_present_end_token) {
+        if (!(this_present_end_token && that_present_end_token))
+          return false;
+        if (!this.end_token.equals(that.end_token))
+          return false;
+      }
+
+      boolean this_present_keys_per_split = true;
+      boolean that_present_keys_per_split = true;
+      if (this_present_keys_per_split || that_present_keys_per_split) {
+        if (!(this_present_keys_per_split && that_present_keys_per_split))
+          return false;
+        if (this.keys_per_split != that.keys_per_split)
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_cfName = true && (isSetCfName());
+      builder.append(present_cfName);
+      if (present_cfName)
+        builder.append(cfName);
+
+      boolean present_start_token = true && (isSetStart_token());
+      builder.append(present_start_token);
+      if (present_start_token)
+        builder.append(start_token);
+
+      boolean present_end_token = true && (isSetEnd_token());
+      builder.append(present_end_token);
+      if (present_end_token)
+        builder.append(end_token);
+
+      boolean present_keys_per_split = true;
+      builder.append(present_keys_per_split);
+      if (present_keys_per_split)
+        builder.append(keys_per_split);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(describe_splits_ex_args other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      describe_splits_ex_args typedOther = (describe_splits_ex_args)other;
+
+      lastComparison = Boolean.valueOf(isSetCfName()).compareTo(typedOther.isSetCfName());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetCfName()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.cfName, typedOther.cfName);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetStart_token()).compareTo(typedOther.isSetStart_token());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetStart_token()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.start_token, typedOther.start_token);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetEnd_token()).compareTo(typedOther.isSetEnd_token());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetEnd_token()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.end_token, typedOther.end_token);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetKeys_per_split()).compareTo(typedOther.isSetKeys_per_split());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetKeys_per_split()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.keys_per_split, typedOther.keys_per_split);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 1: // CF_NAME
+            if (field.type == org.apache.thrift.protocol.TType.STRING) {
+              this.cfName = iprot.readString();
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // START_TOKEN
+            if (field.type == org.apache.thrift.protocol.TType.STRING) {
+              this.start_token = iprot.readString();
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 3: // END_TOKEN
+            if (field.type == org.apache.thrift.protocol.TType.STRING) {
+              this.end_token = iprot.readString();
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 4: // KEYS_PER_SPLIT
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.keys_per_split = iprot.readI32();
+              setKeys_per_splitIsSet(true);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      if (!isSetKeys_per_split()) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'keys_per_split' was not found in serialized data! Struct: " + toString());
+      }
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      validate();
+
+      oprot.writeStructBegin(STRUCT_DESC);
+      if (this.cfName != null) {
+        oprot.writeFieldBegin(CF_NAME_FIELD_DESC);
+        oprot.writeString(this.cfName);
+        oprot.writeFieldEnd();
+      }
+      if (this.start_token != null) {
+        oprot.writeFieldBegin(START_TOKEN_FIELD_DESC);
+        oprot.writeString(this.start_token);
+        oprot.writeFieldEnd();
+      }
+      if (this.end_token != null) {
+        oprot.writeFieldBegin(END_TOKEN_FIELD_DESC);
+        oprot.writeString(this.end_token);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldBegin(KEYS_PER_SPLIT_FIELD_DESC);
+      oprot.writeI32(this.keys_per_split);
+      oprot.writeFieldEnd();
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("describe_splits_ex_args(");
+      boolean first = true;
+
+      sb.append("cfName:");
+      if (this.cfName == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.cfName);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("start_token:");
+      if (this.start_token == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.start_token);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("end_token:");
+      if (this.end_token == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.end_token);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("keys_per_split:");
+      sb.append(this.keys_per_split);
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+      if (cfName == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'cfName' was not present! Struct: " + toString());
+      }
+      if (start_token == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'start_token' was not present! Struct: " + toString());
+      }
+      if (end_token == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'end_token' was not present! Struct: " + toString());
+      }
+      // alas, we cannot check 'keys_per_split' because it's a primitive and you chose the non-beans generator.
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
+        __isset_bit_vector = new BitSet(1);
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class describe_splits_ex_result implements org.apache.thrift.TBase<describe_splits_ex_result, describe_splits_ex_result._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("describe_splits_ex_result");
+
+    private static final org.apache.thrift.protocol.TField SUCCESS_FIELD_DESC = new org.apache.thrift.protocol.TField("success", org.apache.thrift.protocol.TType.LIST, (short)0);
+    private static final org.apache.thrift.protocol.TField IRE_FIELD_DESC = new org.apache.thrift.protocol.TField("ire", org.apache.thrift.protocol.TType.STRUCT, (short)1);
+
+    public List<CfSplit> success; // required
+    public InvalidRequestException ire; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      SUCCESS((short)0, "success"),
+      IRE((short)1, "ire");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 0: // SUCCESS
+            return SUCCESS;
+          case 1: // IRE
+            return IRE;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.SUCCESS, new org.apache.thrift.meta_data.FieldMetaData("success", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+              new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, CfSplit.class))));
+      tmpMap.put(_Fields.IRE, new org.apache.thrift.meta_data.FieldMetaData("ire", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(describe_splits_ex_result.class, metaDataMap);
+    }
+
+    public describe_splits_ex_result() {
+    }
+
+    public describe_splits_ex_result(
+      List<CfSplit> success,
+      InvalidRequestException ire)
+    {
+      this();
+      this.success = success;
+      this.ire = ire;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public describe_splits_ex_result(describe_splits_ex_result other) {
+      if (other.isSetSuccess()) {
+        List<CfSplit> __this__success = new ArrayList<CfSplit>();
+        for (CfSplit other_element : other.success) {
+          __this__success.add(new CfSplit(other_element));
+        }
+        this.success = __this__success;
+      }
+      if (other.isSetIre()) {
+        this.ire = new InvalidRequestException(other.ire);
+      }
+    }
+
+    public describe_splits_ex_result deepCopy() {
+      return new describe_splits_ex_result(this);
+    }
+
+    @Override
+    public void clear() {
+      this.success = null;
+      this.ire = null;
+    }
+
+    public int getSuccessSize() {
+      return (this.success == null) ? 0 : this.success.size();
+    }
+
+    public java.util.Iterator<CfSplit> getSuccessIterator() {
+      return (this.success == null) ? null : this.success.iterator();
+    }
+
+    public void addToSuccess(CfSplit elem) {
+      if (this.success == null) {
+        this.success = new ArrayList<CfSplit>();
+      }
+      this.success.add(elem);
+    }
+
+    public List<CfSplit> getSuccess() {
+      return this.success;
+    }
+
+    public describe_splits_ex_result setSuccess(List<CfSplit> success) {
+      this.success = success;
+      return this;
+    }
+
+    public void unsetSuccess() {
+      this.success = null;
+    }
+
+    /** Returns true if field success is set (has been assigned a value) and false otherwise */
+    public boolean isSetSuccess() {
+      return this.success != null;
+    }
+
+    public void setSuccessIsSet(boolean value) {
+      if (!value) {
+        this.success = null;
+      }
+    }
+
+    public InvalidRequestException getIre() {
+      return this.ire;
+    }
+
+    public describe_splits_ex_result setIre(InvalidRequestException ire) {
+      this.ire = ire;
+      return this;
+    }
+
+    public void unsetIre() {
+      this.ire = null;
+    }
+
+    /** Returns true if field ire is set (has been assigned a value) and false otherwise */
+    public boolean isSetIre() {
+      return this.ire != null;
+    }
+
+    public void setIreIsSet(boolean value) {
+      if (!value) {
+        this.ire = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case SUCCESS:
+        if (value == null) {
+          unsetSuccess();
+        } else {
+          setSuccess((List<CfSplit>)value);
+        }
+        break;
+
+      case IRE:
+        if (value == null) {
+          unsetIre();
+        } else {
+          setIre((InvalidRequestException)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case SUCCESS:
+        return getSuccess();
+
+      case IRE:
+        return getIre();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case SUCCESS:
+        return isSetSuccess();
+      case IRE:
+        return isSetIre();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof describe_splits_ex_result)
+        return this.equals((describe_splits_ex_result)that);
+      return false;
+    }
+
+    public boolean equals(describe_splits_ex_result that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_success = true && this.isSetSuccess();
+      boolean that_present_success = true && that.isSetSuccess();
+      if (this_present_success || that_present_success) {
+        if (!(this_present_success && that_present_success))
+          return false;
+        if (!this.success.equals(that.success))
+          return false;
+      }
+
+      boolean this_present_ire = true && this.isSetIre();
+      boolean that_present_ire = true && that.isSetIre();
+      if (this_present_ire || that_present_ire) {
+        if (!(this_present_ire && that_present_ire))
+          return false;
+        if (!this.ire.equals(that.ire))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_success = true && (isSetSuccess());
+      builder.append(present_success);
+      if (present_success)
+        builder.append(success);
+
+      boolean present_ire = true && (isSetIre());
+      builder.append(present_ire);
+      if (present_ire)
+        builder.append(ire);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(describe_splits_ex_result other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      describe_splits_ex_result typedOther = (describe_splits_ex_result)other;
+
+      lastComparison = Boolean.valueOf(isSetSuccess()).compareTo(typedOther.isSetSuccess());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSuccess()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.success, typedOther.success);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetIre()).compareTo(typedOther.isSetIre());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetIre()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ire, typedOther.ire);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 0: // SUCCESS
+            if (field.type == org.apache.thrift.protocol.TType.LIST) {
+              {
+                org.apache.thrift.protocol.TList _list187 = iprot.readListBegin();
+                this.success = new ArrayList<CfSplit>(_list187.size);
+                for (int _i188 = 0; _i188 < _list187.size; ++_i188)
+                {
+                  CfSplit _elem189; // required
+                  _elem189 = new CfSplit();
+                  _elem189.read(iprot);
+                  this.success.add(_elem189);
+                }
+                iprot.readListEnd();
+              }
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 1: // IRE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ire = new InvalidRequestException();
+              this.ire.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      oprot.writeStructBegin(STRUCT_DESC);
+
+      if (this.isSetSuccess()) {
+        oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
+        {
+          oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRUCT, this.success.size()));
+          for (CfSplit _iter190 : this.success)
+          {
+            _iter190.write(oprot);
+          }
+          oprot.writeListEnd();
+        }
+        oprot.writeFieldEnd();
+      } else if (this.isSetIre()) {
+        oprot.writeFieldBegin(IRE_FIELD_DESC);
+        this.ire.write(oprot);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("describe_splits_ex_result(");
       boolean first = true;
 
       sb.append("success:");
@@ -33613,6 +36761,1230 @@ public class Cassandra {
 
   }
 
+  public static class execute_cql3_query_args implements org.apache.thrift.TBase<execute_cql3_query_args, execute_cql3_query_args._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("execute_cql3_query_args");
+
+    private static final org.apache.thrift.protocol.TField QUERY_FIELD_DESC = new org.apache.thrift.protocol.TField("query", org.apache.thrift.protocol.TType.STRING, (short)1);
+    private static final org.apache.thrift.protocol.TField COMPRESSION_FIELD_DESC = new org.apache.thrift.protocol.TField("compression", org.apache.thrift.protocol.TType.I32, (short)2);
+    private static final org.apache.thrift.protocol.TField CONSISTENCY_FIELD_DESC = new org.apache.thrift.protocol.TField("consistency", org.apache.thrift.protocol.TType.I32, (short)3);
+
+    public ByteBuffer query; // required
+    /**
+     * 
+     * @see Compression
+     */
+    public Compression compression; // required
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public ConsistencyLevel consistency; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      QUERY((short)1, "query"),
+      /**
+       * 
+       * @see Compression
+       */
+      COMPRESSION((short)2, "compression"),
+      /**
+       * 
+       * @see ConsistencyLevel
+       */
+      CONSISTENCY((short)3, "consistency");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 1: // QUERY
+            return QUERY;
+          case 2: // COMPRESSION
+            return COMPRESSION;
+          case 3: // CONSISTENCY
+            return CONSISTENCY;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.QUERY, new org.apache.thrift.meta_data.FieldMetaData("query", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING          , true)));
+      tmpMap.put(_Fields.COMPRESSION, new org.apache.thrift.meta_data.FieldMetaData("compression", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.EnumMetaData(org.apache.thrift.protocol.TType.ENUM, Compression.class)));
+      tmpMap.put(_Fields.CONSISTENCY, new org.apache.thrift.meta_data.FieldMetaData("consistency", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.EnumMetaData(org.apache.thrift.protocol.TType.ENUM, ConsistencyLevel.class)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(execute_cql3_query_args.class, metaDataMap);
+    }
+
+    public execute_cql3_query_args() {
+    }
+
+    public execute_cql3_query_args(
+      ByteBuffer query,
+      Compression compression,
+      ConsistencyLevel consistency)
+    {
+      this();
+      this.query = query;
+      this.compression = compression;
+      this.consistency = consistency;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public execute_cql3_query_args(execute_cql3_query_args other) {
+      if (other.isSetQuery()) {
+        this.query = org.apache.thrift.TBaseHelper.copyBinary(other.query);
+;
+      }
+      if (other.isSetCompression()) {
+        this.compression = other.compression;
+      }
+      if (other.isSetConsistency()) {
+        this.consistency = other.consistency;
+      }
+    }
+
+    public execute_cql3_query_args deepCopy() {
+      return new execute_cql3_query_args(this);
+    }
+
+    @Override
+    public void clear() {
+      this.query = null;
+      this.compression = null;
+      this.consistency = null;
+    }
+
+    public byte[] getQuery() {
+      setQuery(org.apache.thrift.TBaseHelper.rightSize(query));
+      return query == null ? null : query.array();
+    }
+
+    public ByteBuffer bufferForQuery() {
+      return query;
+    }
+
+    public execute_cql3_query_args setQuery(byte[] query) {
+      setQuery(query == null ? (ByteBuffer)null : ByteBuffer.wrap(query));
+      return this;
+    }
+
+    public execute_cql3_query_args setQuery(ByteBuffer query) {
+      this.query = query;
+      return this;
+    }
+
+    public void unsetQuery() {
+      this.query = null;
+    }
+
+    /** Returns true if field query is set (has been assigned a value) and false otherwise */
+    public boolean isSetQuery() {
+      return this.query != null;
+    }
+
+    public void setQueryIsSet(boolean value) {
+      if (!value) {
+        this.query = null;
+      }
+    }
+
+    /**
+     * 
+     * @see Compression
+     */
+    public Compression getCompression() {
+      return this.compression;
+    }
+
+    /**
+     * 
+     * @see Compression
+     */
+    public execute_cql3_query_args setCompression(Compression compression) {
+      this.compression = compression;
+      return this;
+    }
+
+    public void unsetCompression() {
+      this.compression = null;
+    }
+
+    /** Returns true if field compression is set (has been assigned a value) and false otherwise */
+    public boolean isSetCompression() {
+      return this.compression != null;
+    }
+
+    public void setCompressionIsSet(boolean value) {
+      if (!value) {
+        this.compression = null;
+      }
+    }
+
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public ConsistencyLevel getConsistency() {
+      return this.consistency;
+    }
+
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public execute_cql3_query_args setConsistency(ConsistencyLevel consistency) {
+      this.consistency = consistency;
+      return this;
+    }
+
+    public void unsetConsistency() {
+      this.consistency = null;
+    }
+
+    /** Returns true if field consistency is set (has been assigned a value) and false otherwise */
+    public boolean isSetConsistency() {
+      return this.consistency != null;
+    }
+
+    public void setConsistencyIsSet(boolean value) {
+      if (!value) {
+        this.consistency = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case QUERY:
+        if (value == null) {
+          unsetQuery();
+        } else {
+          setQuery((ByteBuffer)value);
+        }
+        break;
+
+      case COMPRESSION:
+        if (value == null) {
+          unsetCompression();
+        } else {
+          setCompression((Compression)value);
+        }
+        break;
+
+      case CONSISTENCY:
+        if (value == null) {
+          unsetConsistency();
+        } else {
+          setConsistency((ConsistencyLevel)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case QUERY:
+        return getQuery();
+
+      case COMPRESSION:
+        return getCompression();
+
+      case CONSISTENCY:
+        return getConsistency();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case QUERY:
+        return isSetQuery();
+      case COMPRESSION:
+        return isSetCompression();
+      case CONSISTENCY:
+        return isSetConsistency();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof execute_cql3_query_args)
+        return this.equals((execute_cql3_query_args)that);
+      return false;
+    }
+
+    public boolean equals(execute_cql3_query_args that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_query = true && this.isSetQuery();
+      boolean that_present_query = true && that.isSetQuery();
+      if (this_present_query || that_present_query) {
+        if (!(this_present_query && that_present_query))
+          return false;
+        if (!this.query.equals(that.query))
+          return false;
+      }
+
+      boolean this_present_compression = true && this.isSetCompression();
+      boolean that_present_compression = true && that.isSetCompression();
+      if (this_present_compression || that_present_compression) {
+        if (!(this_present_compression && that_present_compression))
+          return false;
+        if (!this.compression.equals(that.compression))
+          return false;
+      }
+
+      boolean this_present_consistency = true && this.isSetConsistency();
+      boolean that_present_consistency = true && that.isSetConsistency();
+      if (this_present_consistency || that_present_consistency) {
+        if (!(this_present_consistency && that_present_consistency))
+          return false;
+        if (!this.consistency.equals(that.consistency))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_query = true && (isSetQuery());
+      builder.append(present_query);
+      if (present_query)
+        builder.append(query);
+
+      boolean present_compression = true && (isSetCompression());
+      builder.append(present_compression);
+      if (present_compression)
+        builder.append(compression.getValue());
+
+      boolean present_consistency = true && (isSetConsistency());
+      builder.append(present_consistency);
+      if (present_consistency)
+        builder.append(consistency.getValue());
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(execute_cql3_query_args other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      execute_cql3_query_args typedOther = (execute_cql3_query_args)other;
+
+      lastComparison = Boolean.valueOf(isSetQuery()).compareTo(typedOther.isSetQuery());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetQuery()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.query, typedOther.query);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetCompression()).compareTo(typedOther.isSetCompression());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetCompression()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.compression, typedOther.compression);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetConsistency()).compareTo(typedOther.isSetConsistency());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetConsistency()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.consistency, typedOther.consistency);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 1: // QUERY
+            if (field.type == org.apache.thrift.protocol.TType.STRING) {
+              this.query = iprot.readBinary();
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // COMPRESSION
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.compression = Compression.findByValue(iprot.readI32());
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 3: // CONSISTENCY
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.consistency = ConsistencyLevel.findByValue(iprot.readI32());
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      validate();
+
+      oprot.writeStructBegin(STRUCT_DESC);
+      if (this.query != null) {
+        oprot.writeFieldBegin(QUERY_FIELD_DESC);
+        oprot.writeBinary(this.query);
+        oprot.writeFieldEnd();
+      }
+      if (this.compression != null) {
+        oprot.writeFieldBegin(COMPRESSION_FIELD_DESC);
+        oprot.writeI32(this.compression.getValue());
+        oprot.writeFieldEnd();
+      }
+      if (this.consistency != null) {
+        oprot.writeFieldBegin(CONSISTENCY_FIELD_DESC);
+        oprot.writeI32(this.consistency.getValue());
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("execute_cql3_query_args(");
+      boolean first = true;
+
+      sb.append("query:");
+      if (this.query == null) {
+        sb.append("null");
+      } else {
+        org.apache.thrift.TBaseHelper.toString(this.query, sb);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("compression:");
+      if (this.compression == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.compression);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("consistency:");
+      if (this.consistency == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.consistency);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+      if (query == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'query' was not present! Struct: " + toString());
+      }
+      if (compression == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'compression' was not present! Struct: " + toString());
+      }
+      if (consistency == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'consistency' was not present! Struct: " + toString());
+      }
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class execute_cql3_query_result implements org.apache.thrift.TBase<execute_cql3_query_result, execute_cql3_query_result._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("execute_cql3_query_result");
+
+    private static final org.apache.thrift.protocol.TField SUCCESS_FIELD_DESC = new org.apache.thrift.protocol.TField("success", org.apache.thrift.protocol.TType.STRUCT, (short)0);
+    private static final org.apache.thrift.protocol.TField IRE_FIELD_DESC = new org.apache.thrift.protocol.TField("ire", org.apache.thrift.protocol.TType.STRUCT, (short)1);
+    private static final org.apache.thrift.protocol.TField UE_FIELD_DESC = new org.apache.thrift.protocol.TField("ue", org.apache.thrift.protocol.TType.STRUCT, (short)2);
+    private static final org.apache.thrift.protocol.TField TE_FIELD_DESC = new org.apache.thrift.protocol.TField("te", org.apache.thrift.protocol.TType.STRUCT, (short)3);
+    private static final org.apache.thrift.protocol.TField SDE_FIELD_DESC = new org.apache.thrift.protocol.TField("sde", org.apache.thrift.protocol.TType.STRUCT, (short)4);
+
+    public CqlResult success; // required
+    public InvalidRequestException ire; // required
+    public UnavailableException ue; // required
+    public TimedOutException te; // required
+    public SchemaDisagreementException sde; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      SUCCESS((short)0, "success"),
+      IRE((short)1, "ire"),
+      UE((short)2, "ue"),
+      TE((short)3, "te"),
+      SDE((short)4, "sde");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 0: // SUCCESS
+            return SUCCESS;
+          case 1: // IRE
+            return IRE;
+          case 2: // UE
+            return UE;
+          case 3: // TE
+            return TE;
+          case 4: // SDE
+            return SDE;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.SUCCESS, new org.apache.thrift.meta_data.FieldMetaData("success", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, CqlResult.class)));
+      tmpMap.put(_Fields.IRE, new org.apache.thrift.meta_data.FieldMetaData("ire", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.UE, new org.apache.thrift.meta_data.FieldMetaData("ue", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.TE, new org.apache.thrift.meta_data.FieldMetaData("te", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.SDE, new org.apache.thrift.meta_data.FieldMetaData("sde", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(execute_cql3_query_result.class, metaDataMap);
+    }
+
+    public execute_cql3_query_result() {
+    }
+
+    public execute_cql3_query_result(
+      CqlResult success,
+      InvalidRequestException ire,
+      UnavailableException ue,
+      TimedOutException te,
+      SchemaDisagreementException sde)
+    {
+      this();
+      this.success = success;
+      this.ire = ire;
+      this.ue = ue;
+      this.te = te;
+      this.sde = sde;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public execute_cql3_query_result(execute_cql3_query_result other) {
+      if (other.isSetSuccess()) {
+        this.success = new CqlResult(other.success);
+      }
+      if (other.isSetIre()) {
+        this.ire = new InvalidRequestException(other.ire);
+      }
+      if (other.isSetUe()) {
+        this.ue = new UnavailableException(other.ue);
+      }
+      if (other.isSetTe()) {
+        this.te = new TimedOutException(other.te);
+      }
+      if (other.isSetSde()) {
+        this.sde = new SchemaDisagreementException(other.sde);
+      }
+    }
+
+    public execute_cql3_query_result deepCopy() {
+      return new execute_cql3_query_result(this);
+    }
+
+    @Override
+    public void clear() {
+      this.success = null;
+      this.ire = null;
+      this.ue = null;
+      this.te = null;
+      this.sde = null;
+    }
+
+    public CqlResult getSuccess() {
+      return this.success;
+    }
+
+    public execute_cql3_query_result setSuccess(CqlResult success) {
+      this.success = success;
+      return this;
+    }
+
+    public void unsetSuccess() {
+      this.success = null;
+    }
+
+    /** Returns true if field success is set (has been assigned a value) and false otherwise */
+    public boolean isSetSuccess() {
+      return this.success != null;
+    }
+
+    public void setSuccessIsSet(boolean value) {
+      if (!value) {
+        this.success = null;
+      }
+    }
+
+    public InvalidRequestException getIre() {
+      return this.ire;
+    }
+
+    public execute_cql3_query_result setIre(InvalidRequestException ire) {
+      this.ire = ire;
+      return this;
+    }
+
+    public void unsetIre() {
+      this.ire = null;
+    }
+
+    /** Returns true if field ire is set (has been assigned a value) and false otherwise */
+    public boolean isSetIre() {
+      return this.ire != null;
+    }
+
+    public void setIreIsSet(boolean value) {
+      if (!value) {
+        this.ire = null;
+      }
+    }
+
+    public UnavailableException getUe() {
+      return this.ue;
+    }
+
+    public execute_cql3_query_result setUe(UnavailableException ue) {
+      this.ue = ue;
+      return this;
+    }
+
+    public void unsetUe() {
+      this.ue = null;
+    }
+
+    /** Returns true if field ue is set (has been assigned a value) and false otherwise */
+    public boolean isSetUe() {
+      return this.ue != null;
+    }
+
+    public void setUeIsSet(boolean value) {
+      if (!value) {
+        this.ue = null;
+      }
+    }
+
+    public TimedOutException getTe() {
+      return this.te;
+    }
+
+    public execute_cql3_query_result setTe(TimedOutException te) {
+      this.te = te;
+      return this;
+    }
+
+    public void unsetTe() {
+      this.te = null;
+    }
+
+    /** Returns true if field te is set (has been assigned a value) and false otherwise */
+    public boolean isSetTe() {
+      return this.te != null;
+    }
+
+    public void setTeIsSet(boolean value) {
+      if (!value) {
+        this.te = null;
+      }
+    }
+
+    public SchemaDisagreementException getSde() {
+      return this.sde;
+    }
+
+    public execute_cql3_query_result setSde(SchemaDisagreementException sde) {
+      this.sde = sde;
+      return this;
+    }
+
+    public void unsetSde() {
+      this.sde = null;
+    }
+
+    /** Returns true if field sde is set (has been assigned a value) and false otherwise */
+    public boolean isSetSde() {
+      return this.sde != null;
+    }
+
+    public void setSdeIsSet(boolean value) {
+      if (!value) {
+        this.sde = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case SUCCESS:
+        if (value == null) {
+          unsetSuccess();
+        } else {
+          setSuccess((CqlResult)value);
+        }
+        break;
+
+      case IRE:
+        if (value == null) {
+          unsetIre();
+        } else {
+          setIre((InvalidRequestException)value);
+        }
+        break;
+
+      case UE:
+        if (value == null) {
+          unsetUe();
+        } else {
+          setUe((UnavailableException)value);
+        }
+        break;
+
+      case TE:
+        if (value == null) {
+          unsetTe();
+        } else {
+          setTe((TimedOutException)value);
+        }
+        break;
+
+      case SDE:
+        if (value == null) {
+          unsetSde();
+        } else {
+          setSde((SchemaDisagreementException)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case SUCCESS:
+        return getSuccess();
+
+      case IRE:
+        return getIre();
+
+      case UE:
+        return getUe();
+
+      case TE:
+        return getTe();
+
+      case SDE:
+        return getSde();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case SUCCESS:
+        return isSetSuccess();
+      case IRE:
+        return isSetIre();
+      case UE:
+        return isSetUe();
+      case TE:
+        return isSetTe();
+      case SDE:
+        return isSetSde();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof execute_cql3_query_result)
+        return this.equals((execute_cql3_query_result)that);
+      return false;
+    }
+
+    public boolean equals(execute_cql3_query_result that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_success = true && this.isSetSuccess();
+      boolean that_present_success = true && that.isSetSuccess();
+      if (this_present_success || that_present_success) {
+        if (!(this_present_success && that_present_success))
+          return false;
+        if (!this.success.equals(that.success))
+          return false;
+      }
+
+      boolean this_present_ire = true && this.isSetIre();
+      boolean that_present_ire = true && that.isSetIre();
+      if (this_present_ire || that_present_ire) {
+        if (!(this_present_ire && that_present_ire))
+          return false;
+        if (!this.ire.equals(that.ire))
+          return false;
+      }
+
+      boolean this_present_ue = true && this.isSetUe();
+      boolean that_present_ue = true && that.isSetUe();
+      if (this_present_ue || that_present_ue) {
+        if (!(this_present_ue && that_present_ue))
+          return false;
+        if (!this.ue.equals(that.ue))
+          return false;
+      }
+
+      boolean this_present_te = true && this.isSetTe();
+      boolean that_present_te = true && that.isSetTe();
+      if (this_present_te || that_present_te) {
+        if (!(this_present_te && that_present_te))
+          return false;
+        if (!this.te.equals(that.te))
+          return false;
+      }
+
+      boolean this_present_sde = true && this.isSetSde();
+      boolean that_present_sde = true && that.isSetSde();
+      if (this_present_sde || that_present_sde) {
+        if (!(this_present_sde && that_present_sde))
+          return false;
+        if (!this.sde.equals(that.sde))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_success = true && (isSetSuccess());
+      builder.append(present_success);
+      if (present_success)
+        builder.append(success);
+
+      boolean present_ire = true && (isSetIre());
+      builder.append(present_ire);
+      if (present_ire)
+        builder.append(ire);
+
+      boolean present_ue = true && (isSetUe());
+      builder.append(present_ue);
+      if (present_ue)
+        builder.append(ue);
+
+      boolean present_te = true && (isSetTe());
+      builder.append(present_te);
+      if (present_te)
+        builder.append(te);
+
+      boolean present_sde = true && (isSetSde());
+      builder.append(present_sde);
+      if (present_sde)
+        builder.append(sde);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(execute_cql3_query_result other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      execute_cql3_query_result typedOther = (execute_cql3_query_result)other;
+
+      lastComparison = Boolean.valueOf(isSetSuccess()).compareTo(typedOther.isSetSuccess());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSuccess()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.success, typedOther.success);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetIre()).compareTo(typedOther.isSetIre());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetIre()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ire, typedOther.ire);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetUe()).compareTo(typedOther.isSetUe());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetUe()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ue, typedOther.ue);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetTe()).compareTo(typedOther.isSetTe());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetTe()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.te, typedOther.te);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetSde()).compareTo(typedOther.isSetSde());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSde()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.sde, typedOther.sde);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 0: // SUCCESS
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.success = new CqlResult();
+              this.success.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 1: // IRE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ire = new InvalidRequestException();
+              this.ire.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // UE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ue = new UnavailableException();
+              this.ue.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 3: // TE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.te = new TimedOutException();
+              this.te.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 4: // SDE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.sde = new SchemaDisagreementException();
+              this.sde.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      oprot.writeStructBegin(STRUCT_DESC);
+
+      if (this.isSetSuccess()) {
+        oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
+        this.success.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetIre()) {
+        oprot.writeFieldBegin(IRE_FIELD_DESC);
+        this.ire.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetUe()) {
+        oprot.writeFieldBegin(UE_FIELD_DESC);
+        this.ue.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetTe()) {
+        oprot.writeFieldBegin(TE_FIELD_DESC);
+        this.te.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetSde()) {
+        oprot.writeFieldBegin(SDE_FIELD_DESC);
+        this.sde.write(oprot);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("execute_cql3_query_result(");
+      boolean first = true;
+
+      sb.append("success:");
+      if (this.success == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.success);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ire:");
+      if (this.ire == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ire);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ue:");
+      if (this.ue == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ue);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("te:");
+      if (this.te == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.te);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("sde:");
+      if (this.sde == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.sde);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
   public static class prepare_cql_query_args implements org.apache.thrift.TBase<prepare_cql_query_args, prepare_cql_query_args._Fields>, java.io.Serializable, Cloneable   {
     private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("prepare_cql_query_args");
 
@@ -34442,6 +38814,835 @@ public class Cassandra {
 
   }
 
+  public static class prepare_cql3_query_args implements org.apache.thrift.TBase<prepare_cql3_query_args, prepare_cql3_query_args._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("prepare_cql3_query_args");
+
+    private static final org.apache.thrift.protocol.TField QUERY_FIELD_DESC = new org.apache.thrift.protocol.TField("query", org.apache.thrift.protocol.TType.STRING, (short)1);
+    private static final org.apache.thrift.protocol.TField COMPRESSION_FIELD_DESC = new org.apache.thrift.protocol.TField("compression", org.apache.thrift.protocol.TType.I32, (short)2);
+
+    public ByteBuffer query; // required
+    /**
+     * 
+     * @see Compression
+     */
+    public Compression compression; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      QUERY((short)1, "query"),
+      /**
+       * 
+       * @see Compression
+       */
+      COMPRESSION((short)2, "compression");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 1: // QUERY
+            return QUERY;
+          case 2: // COMPRESSION
+            return COMPRESSION;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.QUERY, new org.apache.thrift.meta_data.FieldMetaData("query", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING          , true)));
+      tmpMap.put(_Fields.COMPRESSION, new org.apache.thrift.meta_data.FieldMetaData("compression", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.EnumMetaData(org.apache.thrift.protocol.TType.ENUM, Compression.class)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(prepare_cql3_query_args.class, metaDataMap);
+    }
+
+    public prepare_cql3_query_args() {
+    }
+
+    public prepare_cql3_query_args(
+      ByteBuffer query,
+      Compression compression)
+    {
+      this();
+      this.query = query;
+      this.compression = compression;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public prepare_cql3_query_args(prepare_cql3_query_args other) {
+      if (other.isSetQuery()) {
+        this.query = org.apache.thrift.TBaseHelper.copyBinary(other.query);
+;
+      }
+      if (other.isSetCompression()) {
+        this.compression = other.compression;
+      }
+    }
+
+    public prepare_cql3_query_args deepCopy() {
+      return new prepare_cql3_query_args(this);
+    }
+
+    @Override
+    public void clear() {
+      this.query = null;
+      this.compression = null;
+    }
+
+    public byte[] getQuery() {
+      setQuery(org.apache.thrift.TBaseHelper.rightSize(query));
+      return query == null ? null : query.array();
+    }
+
+    public ByteBuffer bufferForQuery() {
+      return query;
+    }
+
+    public prepare_cql3_query_args setQuery(byte[] query) {
+      setQuery(query == null ? (ByteBuffer)null : ByteBuffer.wrap(query));
+      return this;
+    }
+
+    public prepare_cql3_query_args setQuery(ByteBuffer query) {
+      this.query = query;
+      return this;
+    }
+
+    public void unsetQuery() {
+      this.query = null;
+    }
+
+    /** Returns true if field query is set (has been assigned a value) and false otherwise */
+    public boolean isSetQuery() {
+      return this.query != null;
+    }
+
+    public void setQueryIsSet(boolean value) {
+      if (!value) {
+        this.query = null;
+      }
+    }
+
+    /**
+     * 
+     * @see Compression
+     */
+    public Compression getCompression() {
+      return this.compression;
+    }
+
+    /**
+     * 
+     * @see Compression
+     */
+    public prepare_cql3_query_args setCompression(Compression compression) {
+      this.compression = compression;
+      return this;
+    }
+
+    public void unsetCompression() {
+      this.compression = null;
+    }
+
+    /** Returns true if field compression is set (has been assigned a value) and false otherwise */
+    public boolean isSetCompression() {
+      return this.compression != null;
+    }
+
+    public void setCompressionIsSet(boolean value) {
+      if (!value) {
+        this.compression = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case QUERY:
+        if (value == null) {
+          unsetQuery();
+        } else {
+          setQuery((ByteBuffer)value);
+        }
+        break;
+
+      case COMPRESSION:
+        if (value == null) {
+          unsetCompression();
+        } else {
+          setCompression((Compression)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case QUERY:
+        return getQuery();
+
+      case COMPRESSION:
+        return getCompression();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case QUERY:
+        return isSetQuery();
+      case COMPRESSION:
+        return isSetCompression();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof prepare_cql3_query_args)
+        return this.equals((prepare_cql3_query_args)that);
+      return false;
+    }
+
+    public boolean equals(prepare_cql3_query_args that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_query = true && this.isSetQuery();
+      boolean that_present_query = true && that.isSetQuery();
+      if (this_present_query || that_present_query) {
+        if (!(this_present_query && that_present_query))
+          return false;
+        if (!this.query.equals(that.query))
+          return false;
+      }
+
+      boolean this_present_compression = true && this.isSetCompression();
+      boolean that_present_compression = true && that.isSetCompression();
+      if (this_present_compression || that_present_compression) {
+        if (!(this_present_compression && that_present_compression))
+          return false;
+        if (!this.compression.equals(that.compression))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_query = true && (isSetQuery());
+      builder.append(present_query);
+      if (present_query)
+        builder.append(query);
+
+      boolean present_compression = true && (isSetCompression());
+      builder.append(present_compression);
+      if (present_compression)
+        builder.append(compression.getValue());
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(prepare_cql3_query_args other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      prepare_cql3_query_args typedOther = (prepare_cql3_query_args)other;
+
+      lastComparison = Boolean.valueOf(isSetQuery()).compareTo(typedOther.isSetQuery());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetQuery()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.query, typedOther.query);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetCompression()).compareTo(typedOther.isSetCompression());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetCompression()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.compression, typedOther.compression);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 1: // QUERY
+            if (field.type == org.apache.thrift.protocol.TType.STRING) {
+              this.query = iprot.readBinary();
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // COMPRESSION
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.compression = Compression.findByValue(iprot.readI32());
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      validate();
+
+      oprot.writeStructBegin(STRUCT_DESC);
+      if (this.query != null) {
+        oprot.writeFieldBegin(QUERY_FIELD_DESC);
+        oprot.writeBinary(this.query);
+        oprot.writeFieldEnd();
+      }
+      if (this.compression != null) {
+        oprot.writeFieldBegin(COMPRESSION_FIELD_DESC);
+        oprot.writeI32(this.compression.getValue());
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("prepare_cql3_query_args(");
+      boolean first = true;
+
+      sb.append("query:");
+      if (this.query == null) {
+        sb.append("null");
+      } else {
+        org.apache.thrift.TBaseHelper.toString(this.query, sb);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("compression:");
+      if (this.compression == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.compression);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+      if (query == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'query' was not present! Struct: " + toString());
+      }
+      if (compression == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'compression' was not present! Struct: " + toString());
+      }
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class prepare_cql3_query_result implements org.apache.thrift.TBase<prepare_cql3_query_result, prepare_cql3_query_result._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("prepare_cql3_query_result");
+
+    private static final org.apache.thrift.protocol.TField SUCCESS_FIELD_DESC = new org.apache.thrift.protocol.TField("success", org.apache.thrift.protocol.TType.STRUCT, (short)0);
+    private static final org.apache.thrift.protocol.TField IRE_FIELD_DESC = new org.apache.thrift.protocol.TField("ire", org.apache.thrift.protocol.TType.STRUCT, (short)1);
+
+    public CqlPreparedResult success; // required
+    public InvalidRequestException ire; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      SUCCESS((short)0, "success"),
+      IRE((short)1, "ire");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 0: // SUCCESS
+            return SUCCESS;
+          case 1: // IRE
+            return IRE;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.SUCCESS, new org.apache.thrift.meta_data.FieldMetaData("success", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, CqlPreparedResult.class)));
+      tmpMap.put(_Fields.IRE, new org.apache.thrift.meta_data.FieldMetaData("ire", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(prepare_cql3_query_result.class, metaDataMap);
+    }
+
+    public prepare_cql3_query_result() {
+    }
+
+    public prepare_cql3_query_result(
+      CqlPreparedResult success,
+      InvalidRequestException ire)
+    {
+      this();
+      this.success = success;
+      this.ire = ire;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public prepare_cql3_query_result(prepare_cql3_query_result other) {
+      if (other.isSetSuccess()) {
+        this.success = new CqlPreparedResult(other.success);
+      }
+      if (other.isSetIre()) {
+        this.ire = new InvalidRequestException(other.ire);
+      }
+    }
+
+    public prepare_cql3_query_result deepCopy() {
+      return new prepare_cql3_query_result(this);
+    }
+
+    @Override
+    public void clear() {
+      this.success = null;
+      this.ire = null;
+    }
+
+    public CqlPreparedResult getSuccess() {
+      return this.success;
+    }
+
+    public prepare_cql3_query_result setSuccess(CqlPreparedResult success) {
+      this.success = success;
+      return this;
+    }
+
+    public void unsetSuccess() {
+      this.success = null;
+    }
+
+    /** Returns true if field success is set (has been assigned a value) and false otherwise */
+    public boolean isSetSuccess() {
+      return this.success != null;
+    }
+
+    public void setSuccessIsSet(boolean value) {
+      if (!value) {
+        this.success = null;
+      }
+    }
+
+    public InvalidRequestException getIre() {
+      return this.ire;
+    }
+
+    public prepare_cql3_query_result setIre(InvalidRequestException ire) {
+      this.ire = ire;
+      return this;
+    }
+
+    public void unsetIre() {
+      this.ire = null;
+    }
+
+    /** Returns true if field ire is set (has been assigned a value) and false otherwise */
+    public boolean isSetIre() {
+      return this.ire != null;
+    }
+
+    public void setIreIsSet(boolean value) {
+      if (!value) {
+        this.ire = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case SUCCESS:
+        if (value == null) {
+          unsetSuccess();
+        } else {
+          setSuccess((CqlPreparedResult)value);
+        }
+        break;
+
+      case IRE:
+        if (value == null) {
+          unsetIre();
+        } else {
+          setIre((InvalidRequestException)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case SUCCESS:
+        return getSuccess();
+
+      case IRE:
+        return getIre();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case SUCCESS:
+        return isSetSuccess();
+      case IRE:
+        return isSetIre();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof prepare_cql3_query_result)
+        return this.equals((prepare_cql3_query_result)that);
+      return false;
+    }
+
+    public boolean equals(prepare_cql3_query_result that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_success = true && this.isSetSuccess();
+      boolean that_present_success = true && that.isSetSuccess();
+      if (this_present_success || that_present_success) {
+        if (!(this_present_success && that_present_success))
+          return false;
+        if (!this.success.equals(that.success))
+          return false;
+      }
+
+      boolean this_present_ire = true && this.isSetIre();
+      boolean that_present_ire = true && that.isSetIre();
+      if (this_present_ire || that_present_ire) {
+        if (!(this_present_ire && that_present_ire))
+          return false;
+        if (!this.ire.equals(that.ire))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_success = true && (isSetSuccess());
+      builder.append(present_success);
+      if (present_success)
+        builder.append(success);
+
+      boolean present_ire = true && (isSetIre());
+      builder.append(present_ire);
+      if (present_ire)
+        builder.append(ire);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(prepare_cql3_query_result other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      prepare_cql3_query_result typedOther = (prepare_cql3_query_result)other;
+
+      lastComparison = Boolean.valueOf(isSetSuccess()).compareTo(typedOther.isSetSuccess());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSuccess()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.success, typedOther.success);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetIre()).compareTo(typedOther.isSetIre());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetIre()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ire, typedOther.ire);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 0: // SUCCESS
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.success = new CqlPreparedResult();
+              this.success.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 1: // IRE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ire = new InvalidRequestException();
+              this.ire.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      oprot.writeStructBegin(STRUCT_DESC);
+
+      if (this.isSetSuccess()) {
+        oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
+        this.success.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetIre()) {
+        oprot.writeFieldBegin(IRE_FIELD_DESC);
+        this.ire.write(oprot);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("prepare_cql3_query_result(");
+      boolean first = true;
+
+      sb.append("success:");
+      if (this.success == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.success);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ire:");
+      if (this.ire == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ire);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
   public static class execute_prepared_cql_query_args implements org.apache.thrift.TBase<execute_prepared_cql_query_args, execute_prepared_cql_query_args._Fields>, java.io.Serializable, Cloneable   {
     private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("execute_prepared_cql_query_args");
 
@@ -34787,13 +39988,13 @@ public class Cassandra {
           case 2: // VALUES
             if (field.type == org.apache.thrift.protocol.TType.LIST) {
               {
-                org.apache.thrift.protocol.TList _list173 = iprot.readListBegin();
-                this.values = new ArrayList<ByteBuffer>(_list173.size);
-                for (int _i174 = 0; _i174 < _list173.size; ++_i174)
+                org.apache.thrift.protocol.TList _list191 = iprot.readListBegin();
+                this.values = new ArrayList<ByteBuffer>(_list191.size);
+                for (int _i192 = 0; _i192 < _list191.size; ++_i192)
                 {
-                  ByteBuffer _elem175; // required
-                  _elem175 = iprot.readBinary();
-                  this.values.add(_elem175);
+                  ByteBuffer _elem193; // required
+                  _elem193 = iprot.readBinary();
+                  this.values.add(_elem193);
                 }
                 iprot.readListEnd();
               }
@@ -34826,9 +40027,9 @@ public class Cassandra {
         oprot.writeFieldBegin(VALUES_FIELD_DESC);
         {
           oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRING, this.values.size()));
-          for (ByteBuffer _iter176 : this.values)
+          for (ByteBuffer _iter194 : this.values)
           {
-            oprot.writeBinary(_iter176);
+            oprot.writeBinary(_iter194);
           }
           oprot.writeListEnd();
         }
@@ -34876,6 +40077,8 @@ public class Cassandra {
 
     private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
       try {
+        // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
+        __isset_bit_vector = new BitSet(1);
         read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
       } catch (org.apache.thrift.TException te) {
         throw new java.io.IOException(te);
@@ -35497,6 +40700,1243 @@ public class Cassandra {
     @Override
     public String toString() {
       StringBuilder sb = new StringBuilder("execute_prepared_cql_query_result(");
+      boolean first = true;
+
+      sb.append("success:");
+      if (this.success == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.success);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ire:");
+      if (this.ire == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ire);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("ue:");
+      if (this.ue == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.ue);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("te:");
+      if (this.te == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.te);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("sde:");
+      if (this.sde == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.sde);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class execute_prepared_cql3_query_args implements org.apache.thrift.TBase<execute_prepared_cql3_query_args, execute_prepared_cql3_query_args._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("execute_prepared_cql3_query_args");
+
+    private static final org.apache.thrift.protocol.TField ITEM_ID_FIELD_DESC = new org.apache.thrift.protocol.TField("itemId", org.apache.thrift.protocol.TType.I32, (short)1);
+    private static final org.apache.thrift.protocol.TField VALUES_FIELD_DESC = new org.apache.thrift.protocol.TField("values", org.apache.thrift.protocol.TType.LIST, (short)2);
+    private static final org.apache.thrift.protocol.TField CONSISTENCY_FIELD_DESC = new org.apache.thrift.protocol.TField("consistency", org.apache.thrift.protocol.TType.I32, (short)3);
+
+    public int itemId; // required
+    public List<ByteBuffer> values; // required
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public ConsistencyLevel consistency; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      ITEM_ID((short)1, "itemId"),
+      VALUES((short)2, "values"),
+      /**
+       * 
+       * @see ConsistencyLevel
+       */
+      CONSISTENCY((short)3, "consistency");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 1: // ITEM_ID
+            return ITEM_ID;
+          case 2: // VALUES
+            return VALUES;
+          case 3: // CONSISTENCY
+            return CONSISTENCY;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+    private static final int __ITEMID_ISSET_ID = 0;
+    private BitSet __isset_bit_vector = new BitSet(1);
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.ITEM_ID, new org.apache.thrift.meta_data.FieldMetaData("itemId", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.I32)));
+      tmpMap.put(_Fields.VALUES, new org.apache.thrift.meta_data.FieldMetaData("values", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+              new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING              , true))));
+      tmpMap.put(_Fields.CONSISTENCY, new org.apache.thrift.meta_data.FieldMetaData("consistency", org.apache.thrift.TFieldRequirementType.REQUIRED, 
+          new org.apache.thrift.meta_data.EnumMetaData(org.apache.thrift.protocol.TType.ENUM, ConsistencyLevel.class)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(execute_prepared_cql3_query_args.class, metaDataMap);
+    }
+
+    public execute_prepared_cql3_query_args() {
+    }
+
+    public execute_prepared_cql3_query_args(
+      int itemId,
+      List<ByteBuffer> values,
+      ConsistencyLevel consistency)
+    {
+      this();
+      this.itemId = itemId;
+      setItemIdIsSet(true);
+      this.values = values;
+      this.consistency = consistency;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public execute_prepared_cql3_query_args(execute_prepared_cql3_query_args other) {
+      __isset_bit_vector.clear();
+      __isset_bit_vector.or(other.__isset_bit_vector);
+      this.itemId = other.itemId;
+      if (other.isSetValues()) {
+        List<ByteBuffer> __this__values = new ArrayList<ByteBuffer>();
+        for (ByteBuffer other_element : other.values) {
+          ByteBuffer temp_binary_element = org.apache.thrift.TBaseHelper.copyBinary(other_element);
+;
+          __this__values.add(temp_binary_element);
+        }
+        this.values = __this__values;
+      }
+      if (other.isSetConsistency()) {
+        this.consistency = other.consistency;
+      }
+    }
+
+    public execute_prepared_cql3_query_args deepCopy() {
+      return new execute_prepared_cql3_query_args(this);
+    }
+
+    @Override
+    public void clear() {
+      setItemIdIsSet(false);
+      this.itemId = 0;
+      this.values = null;
+      this.consistency = null;
+    }
+
+    public int getItemId() {
+      return this.itemId;
+    }
+
+    public execute_prepared_cql3_query_args setItemId(int itemId) {
+      this.itemId = itemId;
+      setItemIdIsSet(true);
+      return this;
+    }
+
+    public void unsetItemId() {
+      __isset_bit_vector.clear(__ITEMID_ISSET_ID);
+    }
+
+    /** Returns true if field itemId is set (has been assigned a value) and false otherwise */
+    public boolean isSetItemId() {
+      return __isset_bit_vector.get(__ITEMID_ISSET_ID);
+    }
+
+    public void setItemIdIsSet(boolean value) {
+      __isset_bit_vector.set(__ITEMID_ISSET_ID, value);
+    }
+
+    public int getValuesSize() {
+      return (this.values == null) ? 0 : this.values.size();
+    }
+
+    public java.util.Iterator<ByteBuffer> getValuesIterator() {
+      return (this.values == null) ? null : this.values.iterator();
+    }
+
+    public void addToValues(ByteBuffer elem) {
+      if (this.values == null) {
+        this.values = new ArrayList<ByteBuffer>();
+      }
+      this.values.add(elem);
+    }
+
+    public List<ByteBuffer> getValues() {
+      return this.values;
+    }
+
+    public execute_prepared_cql3_query_args setValues(List<ByteBuffer> values) {
+      this.values = values;
+      return this;
+    }
+
+    public void unsetValues() {
+      this.values = null;
+    }
+
+    /** Returns true if field values is set (has been assigned a value) and false otherwise */
+    public boolean isSetValues() {
+      return this.values != null;
+    }
+
+    public void setValuesIsSet(boolean value) {
+      if (!value) {
+        this.values = null;
+      }
+    }
+
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public ConsistencyLevel getConsistency() {
+      return this.consistency;
+    }
+
+    /**
+     * 
+     * @see ConsistencyLevel
+     */
+    public execute_prepared_cql3_query_args setConsistency(ConsistencyLevel consistency) {
+      this.consistency = consistency;
+      return this;
+    }
+
+    public void unsetConsistency() {
+      this.consistency = null;
+    }
+
+    /** Returns true if field consistency is set (has been assigned a value) and false otherwise */
+    public boolean isSetConsistency() {
+      return this.consistency != null;
+    }
+
+    public void setConsistencyIsSet(boolean value) {
+      if (!value) {
+        this.consistency = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case ITEM_ID:
+        if (value == null) {
+          unsetItemId();
+        } else {
+          setItemId((Integer)value);
+        }
+        break;
+
+      case VALUES:
+        if (value == null) {
+          unsetValues();
+        } else {
+          setValues((List<ByteBuffer>)value);
+        }
+        break;
+
+      case CONSISTENCY:
+        if (value == null) {
+          unsetConsistency();
+        } else {
+          setConsistency((ConsistencyLevel)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case ITEM_ID:
+        return Integer.valueOf(getItemId());
+
+      case VALUES:
+        return getValues();
+
+      case CONSISTENCY:
+        return getConsistency();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case ITEM_ID:
+        return isSetItemId();
+      case VALUES:
+        return isSetValues();
+      case CONSISTENCY:
+        return isSetConsistency();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof execute_prepared_cql3_query_args)
+        return this.equals((execute_prepared_cql3_query_args)that);
+      return false;
+    }
+
+    public boolean equals(execute_prepared_cql3_query_args that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_itemId = true;
+      boolean that_present_itemId = true;
+      if (this_present_itemId || that_present_itemId) {
+        if (!(this_present_itemId && that_present_itemId))
+          return false;
+        if (this.itemId != that.itemId)
+          return false;
+      }
+
+      boolean this_present_values = true && this.isSetValues();
+      boolean that_present_values = true && that.isSetValues();
+      if (this_present_values || that_present_values) {
+        if (!(this_present_values && that_present_values))
+          return false;
+        if (!this.values.equals(that.values))
+          return false;
+      }
+
+      boolean this_present_consistency = true && this.isSetConsistency();
+      boolean that_present_consistency = true && that.isSetConsistency();
+      if (this_present_consistency || that_present_consistency) {
+        if (!(this_present_consistency && that_present_consistency))
+          return false;
+        if (!this.consistency.equals(that.consistency))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_itemId = true;
+      builder.append(present_itemId);
+      if (present_itemId)
+        builder.append(itemId);
+
+      boolean present_values = true && (isSetValues());
+      builder.append(present_values);
+      if (present_values)
+        builder.append(values);
+
+      boolean present_consistency = true && (isSetConsistency());
+      builder.append(present_consistency);
+      if (present_consistency)
+        builder.append(consistency.getValue());
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(execute_prepared_cql3_query_args other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      execute_prepared_cql3_query_args typedOther = (execute_prepared_cql3_query_args)other;
+
+      lastComparison = Boolean.valueOf(isSetItemId()).compareTo(typedOther.isSetItemId());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetItemId()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.itemId, typedOther.itemId);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetValues()).compareTo(typedOther.isSetValues());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetValues()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.values, typedOther.values);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetConsistency()).compareTo(typedOther.isSetConsistency());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetConsistency()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.consistency, typedOther.consistency);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 1: // ITEM_ID
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.itemId = iprot.readI32();
+              setItemIdIsSet(true);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // VALUES
+            if (field.type == org.apache.thrift.protocol.TType.LIST) {
+              {
+                org.apache.thrift.protocol.TList _list195 = iprot.readListBegin();
+                this.values = new ArrayList<ByteBuffer>(_list195.size);
+                for (int _i196 = 0; _i196 < _list195.size; ++_i196)
+                {
+                  ByteBuffer _elem197; // required
+                  _elem197 = iprot.readBinary();
+                  this.values.add(_elem197);
+                }
+                iprot.readListEnd();
+              }
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 3: // CONSISTENCY
+            if (field.type == org.apache.thrift.protocol.TType.I32) {
+              this.consistency = ConsistencyLevel.findByValue(iprot.readI32());
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      if (!isSetItemId()) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'itemId' was not found in serialized data! Struct: " + toString());
+      }
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      validate();
+
+      oprot.writeStructBegin(STRUCT_DESC);
+      oprot.writeFieldBegin(ITEM_ID_FIELD_DESC);
+      oprot.writeI32(this.itemId);
+      oprot.writeFieldEnd();
+      if (this.values != null) {
+        oprot.writeFieldBegin(VALUES_FIELD_DESC);
+        {
+          oprot.writeListBegin(new org.apache.thrift.protocol.TList(org.apache.thrift.protocol.TType.STRING, this.values.size()));
+          for (ByteBuffer _iter198 : this.values)
+          {
+            oprot.writeBinary(_iter198);
+          }
+          oprot.writeListEnd();
+        }
+        oprot.writeFieldEnd();
+      }
+      if (this.consistency != null) {
+        oprot.writeFieldBegin(CONSISTENCY_FIELD_DESC);
+        oprot.writeI32(this.consistency.getValue());
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("execute_prepared_cql3_query_args(");
+      boolean first = true;
+
+      sb.append("itemId:");
+      sb.append(this.itemId);
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("values:");
+      if (this.values == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.values);
+      }
+      first = false;
+      if (!first) sb.append(", ");
+      sb.append("consistency:");
+      if (this.consistency == null) {
+        sb.append("null");
+      } else {
+        sb.append(this.consistency);
+      }
+      first = false;
+      sb.append(")");
+      return sb.toString();
+    }
+
+    public void validate() throws org.apache.thrift.TException {
+      // check for required fields
+      // alas, we cannot check 'itemId' because it's a primitive and you chose the non-beans generator.
+      if (values == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'values' was not present! Struct: " + toString());
+      }
+      if (consistency == null) {
+        throw new org.apache.thrift.protocol.TProtocolException("Required field 'consistency' was not present! Struct: " + toString());
+      }
+    }
+
+    private void writeObject(java.io.ObjectOutputStream out) throws java.io.IOException {
+      try {
+        write(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(out)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+    private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+      try {
+        // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
+        __isset_bit_vector = new BitSet(1);
+        read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+      } catch (org.apache.thrift.TException te) {
+        throw new java.io.IOException(te);
+      }
+    }
+
+  }
+
+  public static class execute_prepared_cql3_query_result implements org.apache.thrift.TBase<execute_prepared_cql3_query_result, execute_prepared_cql3_query_result._Fields>, java.io.Serializable, Cloneable   {
+    private static final org.apache.thrift.protocol.TStruct STRUCT_DESC = new org.apache.thrift.protocol.TStruct("execute_prepared_cql3_query_result");
+
+    private static final org.apache.thrift.protocol.TField SUCCESS_FIELD_DESC = new org.apache.thrift.protocol.TField("success", org.apache.thrift.protocol.TType.STRUCT, (short)0);
+    private static final org.apache.thrift.protocol.TField IRE_FIELD_DESC = new org.apache.thrift.protocol.TField("ire", org.apache.thrift.protocol.TType.STRUCT, (short)1);
+    private static final org.apache.thrift.protocol.TField UE_FIELD_DESC = new org.apache.thrift.protocol.TField("ue", org.apache.thrift.protocol.TType.STRUCT, (short)2);
+    private static final org.apache.thrift.protocol.TField TE_FIELD_DESC = new org.apache.thrift.protocol.TField("te", org.apache.thrift.protocol.TType.STRUCT, (short)3);
+    private static final org.apache.thrift.protocol.TField SDE_FIELD_DESC = new org.apache.thrift.protocol.TField("sde", org.apache.thrift.protocol.TType.STRUCT, (short)4);
+
+    public CqlResult success; // required
+    public InvalidRequestException ire; // required
+    public UnavailableException ue; // required
+    public TimedOutException te; // required
+    public SchemaDisagreementException sde; // required
+
+    /** The set of fields this struct contains, along with convenience methods for finding and manipulating them. */
+    public enum _Fields implements org.apache.thrift.TFieldIdEnum {
+      SUCCESS((short)0, "success"),
+      IRE((short)1, "ire"),
+      UE((short)2, "ue"),
+      TE((short)3, "te"),
+      SDE((short)4, "sde");
+
+      private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+
+      static {
+        for (_Fields field : EnumSet.allOf(_Fields.class)) {
+          byName.put(field.getFieldName(), field);
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, or null if its not found.
+       */
+      public static _Fields findByThriftId(int fieldId) {
+        switch(fieldId) {
+          case 0: // SUCCESS
+            return SUCCESS;
+          case 1: // IRE
+            return IRE;
+          case 2: // UE
+            return UE;
+          case 3: // TE
+            return TE;
+          case 4: // SDE
+            return SDE;
+          default:
+            return null;
+        }
+      }
+
+      /**
+       * Find the _Fields constant that matches fieldId, throwing an exception
+       * if it is not found.
+       */
+      public static _Fields findByThriftIdOrThrow(int fieldId) {
+        _Fields fields = findByThriftId(fieldId);
+        if (fields == null) throw new IllegalArgumentException("Field " + fieldId + " doesn't exist!");
+        return fields;
+      }
+
+      /**
+       * Find the _Fields constant that matches name, or null if its not found.
+       */
+      public static _Fields findByName(String name) {
+        return byName.get(name);
+      }
+
+      private final short _thriftId;
+      private final String _fieldName;
+
+      _Fields(short thriftId, String fieldName) {
+        _thriftId = thriftId;
+        _fieldName = fieldName;
+      }
+
+      public short getThriftFieldId() {
+        return _thriftId;
+      }
+
+      public String getFieldName() {
+        return _fieldName;
+      }
+    }
+
+    // isset id assignments
+
+    public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+    static {
+      Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+      tmpMap.put(_Fields.SUCCESS, new org.apache.thrift.meta_data.FieldMetaData("success", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.StructMetaData(org.apache.thrift.protocol.TType.STRUCT, CqlResult.class)));
+      tmpMap.put(_Fields.IRE, new org.apache.thrift.meta_data.FieldMetaData("ire", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.UE, new org.apache.thrift.meta_data.FieldMetaData("ue", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.TE, new org.apache.thrift.meta_data.FieldMetaData("te", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      tmpMap.put(_Fields.SDE, new org.apache.thrift.meta_data.FieldMetaData("sde", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRUCT)));
+      metaDataMap = Collections.unmodifiableMap(tmpMap);
+      org.apache.thrift.meta_data.FieldMetaData.addStructMetaDataMap(execute_prepared_cql3_query_result.class, metaDataMap);
+    }
+
+    public execute_prepared_cql3_query_result() {
+    }
+
+    public execute_prepared_cql3_query_result(
+      CqlResult success,
+      InvalidRequestException ire,
+      UnavailableException ue,
+      TimedOutException te,
+      SchemaDisagreementException sde)
+    {
+      this();
+      this.success = success;
+      this.ire = ire;
+      this.ue = ue;
+      this.te = te;
+      this.sde = sde;
+    }
+
+    /**
+     * Performs a deep copy on <i>other</i>.
+     */
+    public execute_prepared_cql3_query_result(execute_prepared_cql3_query_result other) {
+      if (other.isSetSuccess()) {
+        this.success = new CqlResult(other.success);
+      }
+      if (other.isSetIre()) {
+        this.ire = new InvalidRequestException(other.ire);
+      }
+      if (other.isSetUe()) {
+        this.ue = new UnavailableException(other.ue);
+      }
+      if (other.isSetTe()) {
+        this.te = new TimedOutException(other.te);
+      }
+      if (other.isSetSde()) {
+        this.sde = new SchemaDisagreementException(other.sde);
+      }
+    }
+
+    public execute_prepared_cql3_query_result deepCopy() {
+      return new execute_prepared_cql3_query_result(this);
+    }
+
+    @Override
+    public void clear() {
+      this.success = null;
+      this.ire = null;
+      this.ue = null;
+      this.te = null;
+      this.sde = null;
+    }
+
+    public CqlResult getSuccess() {
+      return this.success;
+    }
+
+    public execute_prepared_cql3_query_result setSuccess(CqlResult success) {
+      this.success = success;
+      return this;
+    }
+
+    public void unsetSuccess() {
+      this.success = null;
+    }
+
+    /** Returns true if field success is set (has been assigned a value) and false otherwise */
+    public boolean isSetSuccess() {
+      return this.success != null;
+    }
+
+    public void setSuccessIsSet(boolean value) {
+      if (!value) {
+        this.success = null;
+      }
+    }
+
+    public InvalidRequestException getIre() {
+      return this.ire;
+    }
+
+    public execute_prepared_cql3_query_result setIre(InvalidRequestException ire) {
+      this.ire = ire;
+      return this;
+    }
+
+    public void unsetIre() {
+      this.ire = null;
+    }
+
+    /** Returns true if field ire is set (has been assigned a value) and false otherwise */
+    public boolean isSetIre() {
+      return this.ire != null;
+    }
+
+    public void setIreIsSet(boolean value) {
+      if (!value) {
+        this.ire = null;
+      }
+    }
+
+    public UnavailableException getUe() {
+      return this.ue;
+    }
+
+    public execute_prepared_cql3_query_result setUe(UnavailableException ue) {
+      this.ue = ue;
+      return this;
+    }
+
+    public void unsetUe() {
+      this.ue = null;
+    }
+
+    /** Returns true if field ue is set (has been assigned a value) and false otherwise */
+    public boolean isSetUe() {
+      return this.ue != null;
+    }
+
+    public void setUeIsSet(boolean value) {
+      if (!value) {
+        this.ue = null;
+      }
+    }
+
+    public TimedOutException getTe() {
+      return this.te;
+    }
+
+    public execute_prepared_cql3_query_result setTe(TimedOutException te) {
+      this.te = te;
+      return this;
+    }
+
+    public void unsetTe() {
+      this.te = null;
+    }
+
+    /** Returns true if field te is set (has been assigned a value) and false otherwise */
+    public boolean isSetTe() {
+      return this.te != null;
+    }
+
+    public void setTeIsSet(boolean value) {
+      if (!value) {
+        this.te = null;
+      }
+    }
+
+    public SchemaDisagreementException getSde() {
+      return this.sde;
+    }
+
+    public execute_prepared_cql3_query_result setSde(SchemaDisagreementException sde) {
+      this.sde = sde;
+      return this;
+    }
+
+    public void unsetSde() {
+      this.sde = null;
+    }
+
+    /** Returns true if field sde is set (has been assigned a value) and false otherwise */
+    public boolean isSetSde() {
+      return this.sde != null;
+    }
+
+    public void setSdeIsSet(boolean value) {
+      if (!value) {
+        this.sde = null;
+      }
+    }
+
+    public void setFieldValue(_Fields field, Object value) {
+      switch (field) {
+      case SUCCESS:
+        if (value == null) {
+          unsetSuccess();
+        } else {
+          setSuccess((CqlResult)value);
+        }
+        break;
+
+      case IRE:
+        if (value == null) {
+          unsetIre();
+        } else {
+          setIre((InvalidRequestException)value);
+        }
+        break;
+
+      case UE:
+        if (value == null) {
+          unsetUe();
+        } else {
+          setUe((UnavailableException)value);
+        }
+        break;
+
+      case TE:
+        if (value == null) {
+          unsetTe();
+        } else {
+          setTe((TimedOutException)value);
+        }
+        break;
+
+      case SDE:
+        if (value == null) {
+          unsetSde();
+        } else {
+          setSde((SchemaDisagreementException)value);
+        }
+        break;
+
+      }
+    }
+
+    public Object getFieldValue(_Fields field) {
+      switch (field) {
+      case SUCCESS:
+        return getSuccess();
+
+      case IRE:
+        return getIre();
+
+      case UE:
+        return getUe();
+
+      case TE:
+        return getTe();
+
+      case SDE:
+        return getSde();
+
+      }
+      throw new IllegalStateException();
+    }
+
+    /** Returns true if field corresponding to fieldID is set (has been assigned a value) and false otherwise */
+    public boolean isSet(_Fields field) {
+      if (field == null) {
+        throw new IllegalArgumentException();
+      }
+
+      switch (field) {
+      case SUCCESS:
+        return isSetSuccess();
+      case IRE:
+        return isSetIre();
+      case UE:
+        return isSetUe();
+      case TE:
+        return isSetTe();
+      case SDE:
+        return isSetSde();
+      }
+      throw new IllegalStateException();
+    }
+
+    @Override
+    public boolean equals(Object that) {
+      if (that == null)
+        return false;
+      if (that instanceof execute_prepared_cql3_query_result)
+        return this.equals((execute_prepared_cql3_query_result)that);
+      return false;
+    }
+
+    public boolean equals(execute_prepared_cql3_query_result that) {
+      if (that == null)
+        return false;
+
+      boolean this_present_success = true && this.isSetSuccess();
+      boolean that_present_success = true && that.isSetSuccess();
+      if (this_present_success || that_present_success) {
+        if (!(this_present_success && that_present_success))
+          return false;
+        if (!this.success.equals(that.success))
+          return false;
+      }
+
+      boolean this_present_ire = true && this.isSetIre();
+      boolean that_present_ire = true && that.isSetIre();
+      if (this_present_ire || that_present_ire) {
+        if (!(this_present_ire && that_present_ire))
+          return false;
+        if (!this.ire.equals(that.ire))
+          return false;
+      }
+
+      boolean this_present_ue = true && this.isSetUe();
+      boolean that_present_ue = true && that.isSetUe();
+      if (this_present_ue || that_present_ue) {
+        if (!(this_present_ue && that_present_ue))
+          return false;
+        if (!this.ue.equals(that.ue))
+          return false;
+      }
+
+      boolean this_present_te = true && this.isSetTe();
+      boolean that_present_te = true && that.isSetTe();
+      if (this_present_te || that_present_te) {
+        if (!(this_present_te && that_present_te))
+          return false;
+        if (!this.te.equals(that.te))
+          return false;
+      }
+
+      boolean this_present_sde = true && this.isSetSde();
+      boolean that_present_sde = true && that.isSetSde();
+      if (this_present_sde || that_present_sde) {
+        if (!(this_present_sde && that_present_sde))
+          return false;
+        if (!this.sde.equals(that.sde))
+          return false;
+      }
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      HashCodeBuilder builder = new HashCodeBuilder();
+
+      boolean present_success = true && (isSetSuccess());
+      builder.append(present_success);
+      if (present_success)
+        builder.append(success);
+
+      boolean present_ire = true && (isSetIre());
+      builder.append(present_ire);
+      if (present_ire)
+        builder.append(ire);
+
+      boolean present_ue = true && (isSetUe());
+      builder.append(present_ue);
+      if (present_ue)
+        builder.append(ue);
+
+      boolean present_te = true && (isSetTe());
+      builder.append(present_te);
+      if (present_te)
+        builder.append(te);
+
+      boolean present_sde = true && (isSetSde());
+      builder.append(present_sde);
+      if (present_sde)
+        builder.append(sde);
+
+      return builder.toHashCode();
+    }
+
+    public int compareTo(execute_prepared_cql3_query_result other) {
+      if (!getClass().equals(other.getClass())) {
+        return getClass().getName().compareTo(other.getClass().getName());
+      }
+
+      int lastComparison = 0;
+      execute_prepared_cql3_query_result typedOther = (execute_prepared_cql3_query_result)other;
+
+      lastComparison = Boolean.valueOf(isSetSuccess()).compareTo(typedOther.isSetSuccess());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSuccess()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.success, typedOther.success);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetIre()).compareTo(typedOther.isSetIre());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetIre()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ire, typedOther.ire);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetUe()).compareTo(typedOther.isSetUe());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetUe()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.ue, typedOther.ue);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetTe()).compareTo(typedOther.isSetTe());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetTe()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.te, typedOther.te);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      lastComparison = Boolean.valueOf(isSetSde()).compareTo(typedOther.isSetSde());
+      if (lastComparison != 0) {
+        return lastComparison;
+      }
+      if (isSetSde()) {
+        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.sde, typedOther.sde);
+        if (lastComparison != 0) {
+          return lastComparison;
+        }
+      }
+      return 0;
+    }
+
+    public _Fields fieldForId(int fieldId) {
+      return _Fields.findByThriftId(fieldId);
+    }
+
+    public void read(org.apache.thrift.protocol.TProtocol iprot) throws org.apache.thrift.TException {
+      org.apache.thrift.protocol.TField field;
+      iprot.readStructBegin();
+      while (true)
+      {
+        field = iprot.readFieldBegin();
+        if (field.type == org.apache.thrift.protocol.TType.STOP) { 
+          break;
+        }
+        switch (field.id) {
+          case 0: // SUCCESS
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.success = new CqlResult();
+              this.success.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 1: // IRE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ire = new InvalidRequestException();
+              this.ire.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 2: // UE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.ue = new UnavailableException();
+              this.ue.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 3: // TE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.te = new TimedOutException();
+              this.te.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          case 4: // SDE
+            if (field.type == org.apache.thrift.protocol.TType.STRUCT) {
+              this.sde = new SchemaDisagreementException();
+              this.sde.read(iprot);
+            } else { 
+              org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+            }
+            break;
+          default:
+            org.apache.thrift.protocol.TProtocolUtil.skip(iprot, field.type);
+        }
+        iprot.readFieldEnd();
+      }
+      iprot.readStructEnd();
+
+      // check for required fields of primitive type, which can't be checked in the validate method
+      validate();
+    }
+
+    public void write(org.apache.thrift.protocol.TProtocol oprot) throws org.apache.thrift.TException {
+      oprot.writeStructBegin(STRUCT_DESC);
+
+      if (this.isSetSuccess()) {
+        oprot.writeFieldBegin(SUCCESS_FIELD_DESC);
+        this.success.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetIre()) {
+        oprot.writeFieldBegin(IRE_FIELD_DESC);
+        this.ire.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetUe()) {
+        oprot.writeFieldBegin(UE_FIELD_DESC);
+        this.ue.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetTe()) {
+        oprot.writeFieldBegin(TE_FIELD_DESC);
+        this.te.write(oprot);
+        oprot.writeFieldEnd();
+      } else if (this.isSetSde()) {
+        oprot.writeFieldBegin(SDE_FIELD_DESC);
+        this.sde.write(oprot);
+        oprot.writeFieldEnd();
+      }
+      oprot.writeFieldStop();
+      oprot.writeStructEnd();
+    }
+
+    @Override
+    public String toString() {
+      StringBuilder sb = new StringBuilder("execute_prepared_cql3_query_result(");
       boolean first = true;
 
       sb.append("success:");

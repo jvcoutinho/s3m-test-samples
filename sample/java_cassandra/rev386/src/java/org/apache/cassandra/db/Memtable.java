@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,7 +15,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.cassandra.db;
 
 import java.io.File;
@@ -31,7 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
-import org.apache.cassandra.db.columniterator.IColumnIterator;
+import org.apache.cassandra.db.columniterator.OnDiskAtomIterator;
 import org.apache.cassandra.db.columniterator.SimpleAbstractColumnIterator;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.filter.AbstractColumnIterator;
@@ -39,6 +38,7 @@ import org.apache.cassandra.db.filter.NamesQueryFilter;
 import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableWriter;
+import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.SlabAllocator;
 import org.apache.cassandra.utils.WrappedRunnable;
@@ -120,9 +120,7 @@ public class Memtable
 
     public long getLiveSize()
     {
-        // 25% fudge factor on the base throughput * liveRatio calculation.  (Based on observed
-        // pre-slabbing behavior -- not sure what accounts for this. May have changed with introduction of slabbing.)
-        return (long) (currentThroughput.get() * cfs.liveRatio * 1.25);
+        return (long) (currentThroughput.get() * cfs.liveRatio);
     }
 
     public long getSerializedSize()
@@ -226,7 +224,7 @@ public class Memtable
 
     private void resolve(DecoratedKey key, ColumnFamily cf)
     {
-        currentThroughput.addAndGet(cf.size());
+        currentThroughput.addAndGet(cf.dataSize());
         currentOperations.addAndGet((cf.getColumnCount() == 0)
                                     ? cf.isMarkedForDelete() ? 1 : 0
                                     : cf.getColumnCount());
@@ -368,12 +366,10 @@ public class Memtable
     /**
      * obtain an iterator of columns in this memtable in the specified order starting from a given column.
      */
-    public static IColumnIterator getSliceIterator(final DecoratedKey key, final ColumnFamily cf, SliceQueryFilter filter)
+    public static OnDiskAtomIterator getSliceIterator(final DecoratedKey key, final ColumnFamily cf, SliceQueryFilter filter)
     {
         assert cf != null;
-        final Iterator<IColumn> filteredIter = filter.reversed
-                                             ? (filter.start.remaining() == 0 ? cf.reverseIterator() : cf.reverseIterator(filter.start))
-                                             : cf.iterator(filter.start);
+        final Iterator<IColumn> filteredIter = filter.reversed ? cf.reverseIterator(filter.slices) : cf.iterator(filter.slices);
 
         return new AbstractColumnIterator()
         {
@@ -392,14 +388,14 @@ public class Memtable
                 return filteredIter.hasNext();
             }
 
-            public IColumn next()
+            public OnDiskAtom next()
             {
                 return filteredIter.next();
             }
         };
     }
 
-    public static IColumnIterator getNamesIterator(final DecoratedKey key, final ColumnFamily cf, final NamesQueryFilter filter)
+    public static OnDiskAtomIterator getNamesIterator(final DecoratedKey key, final ColumnFamily cf, final NamesQueryFilter filter)
     {
         assert cf != null;
         final boolean isStandard = !cf.isSuper();
@@ -418,7 +414,7 @@ public class Memtable
                 return key;
             }
 
-            protected IColumn computeNext()
+            protected OnDiskAtom computeNext()
             {
                 while (iter.hasNext())
                 {

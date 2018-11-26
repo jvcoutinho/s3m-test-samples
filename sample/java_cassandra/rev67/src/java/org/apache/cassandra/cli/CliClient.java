@@ -18,6 +18,8 @@
 package org.apache.cassandra.cli;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.util.*;
@@ -30,6 +32,7 @@ import org.apache.cassandra.config.ConfigurationException;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.CompactionManagerMBean;
 import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.locator.SimpleSnitch;
 import org.apache.cassandra.thrift.*;
 import org.apache.cassandra.tools.NodeProbe;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -37,7 +40,6 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 import org.apache.thrift.TBaseHelper;
 import org.apache.thrift.TException;
-import org.safehaus.uuid.UUIDGenerator;
 
 // Cli Client Side Library
 public class CliClient extends CliUserHelp
@@ -93,7 +95,8 @@ public class CliClient extends CliUserHelp
         PLACEMENT_STRATEGY,
         STRATEGY_OPTIONS
     }
-    private static final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.SimpleStrategy";
+
+    private static final String DEFAULT_PLACEMENT_STRATEGY = "org.apache.cassandra.locator.NetworkTopologyStrategy";
 
     private Cassandra.Client thriftClient = null;
     private CliSessionState sessionState  = null;
@@ -827,6 +830,30 @@ public class CliClient extends CliUserHelp
             default:
                 //must match one of the above or we'd throw an exception at the valueOf statement above.
                 assert(false);
+            }
+        }
+
+        // using default snitch options if strategy is NetworkTopologyStrategy and no options were set.
+        if (ksDef.getStrategy_class().contains(".NetworkTopologyStrategy"))
+        {
+            Map<String, String> currentStrategyOptions = ksDef.getStrategy_options();
+
+            // adding default data center from SimpleSnitch
+            if (currentStrategyOptions == null || currentStrategyOptions.isEmpty())
+            {
+                SimpleSnitch snitch = new SimpleSnitch();
+                Map<String, String> options = new HashMap<String, String>();
+
+                try
+                {
+                    options.put(snitch.getDatacenter(InetAddress.getLocalHost()), "1");
+                }
+                catch (UnknownHostException e)
+                {
+                    throw new RuntimeException(e.getMessage());
+                }
+
+                ksDef.setStrategy_options(options);
             }
         }
 
@@ -1839,7 +1866,7 @@ public class CliClient extends CliUserHelp
             {
                 if (validator instanceof TimeUUIDType)
                 {
-                    value = ByteBuffer.wrap(UUIDGenerator.getInstance().generateTimeBasedUUID().asByteArray());
+                    value = ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes());
                 }
                 else if (validator instanceof LexicalUUIDType)
                 {

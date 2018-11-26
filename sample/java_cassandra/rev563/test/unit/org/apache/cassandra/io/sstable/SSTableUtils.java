@@ -29,6 +29,9 @@ import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.IColumn;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.utils.ByteBufferUtil;
+
+import org.apache.cassandra.Util;
 
 public class SSTableUtils
 {
@@ -122,7 +125,7 @@ public class SSTableUtils
             for (String key : keys)
             {
                 ColumnFamily cf = ColumnFamily.create(ksname, cfname);
-                cf.addColumn(new Column(ByteBuffer.wrap(key.getBytes()), ByteBuffer.wrap(key.getBytes()), 0));
+                cf.addColumn(new Column(ByteBufferUtil.bytes(key), ByteBufferUtil.bytes(key), 0));
                 map.put(key, cf);
             }
             return write(map);
@@ -130,34 +133,69 @@ public class SSTableUtils
 
         public SSTableReader write(Map<String, ColumnFamily> entries) throws IOException
         {
-            Map<ByteBuffer, ByteBuffer> map = new HashMap<ByteBuffer, ByteBuffer>();
+            SortedMap<DecoratedKey, ColumnFamily> sorted = new TreeMap<DecoratedKey, ColumnFamily>();
             for (Map.Entry<String, ColumnFamily> entry : entries.entrySet())
+                sorted.put(Util.dk(entry.getKey()), entry.getValue());
+
+            final Iterator<Map.Entry<DecoratedKey, ColumnFamily>> iter = sorted.entrySet().iterator();
+            return write(sorted.size(), new Appender()
             {
-                DataOutputBuffer buffer = new DataOutputBuffer();
-                ColumnFamily.serializer().serializeWithIndexes(entry.getValue(), buffer);
-                map.put(ByteBuffer.wrap(entry.getKey().getBytes()),
-                        ByteBuffer.wrap(buffer.asByteArray()));
-            }
-            return writeRaw(map);
+                @Override
+                public boolean append(SSTableWriter writer) throws IOException
+                {
+                    if (!iter.hasNext())
+                        return false;
+                    Map.Entry<DecoratedKey, ColumnFamily> entry = iter.next();
+                    writer.append(entry.getKey(), entry.getValue());
+                    return true;
+                }
+            });
         }
 
         /**
          * @Deprecated: Writes the binary content of a row, which should be encapsulated.
          */
+        @Deprecated
         public SSTableReader writeRaw(Map<ByteBuffer, ByteBuffer> entries) throws IOException
         {
             File datafile = (dest == null) ? tempSSTableFile(ksname, cfname, generation) : new File(dest.filenameFor(Component.DATA));
             SSTableWriter writer = new SSTableWriter(datafile.getAbsolutePath(), entries.size());
-            SortedMap<DecoratedKey, ByteBuffer> sortedEntries = new TreeMap<DecoratedKey, ByteBuffer>();
+            SortedMap<DecoratedKey, ByteBuffer> sorted = new TreeMap<DecoratedKey, ByteBuffer>();
             for (Map.Entry<ByteBuffer, ByteBuffer> entry : entries.entrySet())
-                sortedEntries.put(writer.partitioner.decorateKey(entry.getKey()), entry.getValue());
-            for (Map.Entry<DecoratedKey, ByteBuffer> entry : sortedEntries.entrySet())
-                writer.append(entry.getKey(), entry.getValue());
+                sorted.put(writer.partitioner.decorateKey(entry.getKey()), entry.getValue());
+            final Iterator<Map.Entry<DecoratedKey, ByteBuffer>> iter = sorted.entrySet().iterator();
+            return write(sorted.size(), new Appender()
+            {
+                @Override
+                public boolean append(SSTableWriter writer) throws IOException
+                {
+                    if (!iter.hasNext())
+                        return false;
+                    Map.Entry<DecoratedKey, ByteBuffer> entry = iter.next();
+                    writer.append(entry.getKey(), entry.getValue());
+                    return true;
+                }
+            });
+        }
+
+        public SSTableReader write(int expectedSize, Appender appender) throws IOException
+        {
+            File datafile = (dest == null) ? tempSSTableFile(ksname, cfname, generation) : new File(dest.filenameFor(Component.DATA));
+            SSTableWriter writer = new SSTableWriter(datafile.getAbsolutePath(), expectedSize);
+            long start = System.currentTimeMillis();
+            while (appender.append(writer)) { /* pass */ }
             SSTableReader reader = writer.closeAndOpenReader();
+            // mark all components for removal
             if (cleanup)
-                for (Component comp : reader.components)
-                    new File(reader.descriptor.filenameFor(comp)).deleteOnExit();
+                for (Component component : reader.components)
+                    new File(reader.descriptor.filenameFor(component)).deleteOnExit();
             return reader;
         }
+    }
+
+    public static abstract class Appender
+    {
+        /** Called with an open writer until it returns false. */
+        public abstract boolean append(SSTableWriter writer) throws IOException;
     }
 }

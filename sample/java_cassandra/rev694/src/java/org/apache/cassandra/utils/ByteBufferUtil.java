@@ -28,6 +28,7 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.UUID;
 
@@ -74,7 +75,6 @@ import org.apache.cassandra.io.util.FileUtils;
  */
 public class ByteBufferUtil
 {
-    private static final Charset UTF_8 = Charset.forName("UTF-8");
     public static final ByteBuffer EMPTY_BYTE_BUFFER = ByteBuffer.wrap(new byte[0]);
 
     public static int compareUnsigned(ByteBuffer o1, ByteBuffer o2)
@@ -121,7 +121,7 @@ public class ByteBufferUtil
      */
     public static String string(ByteBuffer buffer) throws CharacterCodingException
     {
-        return string(buffer, UTF_8);
+        return string(buffer, StandardCharsets.UTF_8);
     }
 
     /**
@@ -135,7 +135,7 @@ public class ByteBufferUtil
      */
     public static String string(ByteBuffer buffer, int position, int length) throws CharacterCodingException
     {
-        return string(buffer, position, length, UTF_8);
+        return string(buffer, position, length, StandardCharsets.UTF_8);
     }
 
     /**
@@ -228,7 +228,7 @@ public class ByteBufferUtil
      */
     public static ByteBuffer bytes(String s)
     {
-        return ByteBuffer.wrap(s.getBytes(UTF_8));
+        return ByteBuffer.wrap(s.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -541,5 +541,58 @@ public class ByteBufferUtil
     public static ByteBuffer bytes(UUID uuid)
     {
         return ByteBuffer.wrap(UUIDGen.decompose(uuid));
+    }
+
+    // Returns whether {@code prefix} is a prefix of {@code value}.
+    public static boolean isPrefix(ByteBuffer prefix, ByteBuffer value)
+    {
+        if (prefix.remaining() > value.remaining())
+            return false;
+
+        int diff = value.remaining() - prefix.remaining();
+        return prefix.equals(value.duplicate().limit(value.remaining() - diff));
+    }
+
+    /** trims size of bytebuffer to exactly number of bytes in it, to do not hold too much memory */
+    public static ByteBuffer minimalBufferFor(ByteBuffer buf)
+    {
+        return buf.capacity() > buf.remaining() ? ByteBuffer.wrap(getArray(buf)) : buf;
+    }
+
+    // Doesn't change bb position
+    public static int getShortLength(ByteBuffer bb, int position)
+    {
+        int length = (bb.get(position) & 0xFF) << 8;
+        return length | (bb.get(position + 1) & 0xFF);
+    }
+
+    // changes bb position
+    public static int readShortLength(ByteBuffer bb)
+    {
+        int length = (bb.get() & 0xFF) << 8;
+        return length | (bb.get() & 0xFF);
+    }
+
+    // changes bb position
+    public static void writeShortLength(ByteBuffer bb, int length)
+    {
+        bb.put((byte) ((length >> 8) & 0xFF));
+        bb.put((byte) (length & 0xFF));
+    }
+
+    // changes bb position
+    public static ByteBuffer readBytes(ByteBuffer bb, int length)
+    {
+        ByteBuffer copy = bb.duplicate();
+        copy.limit(copy.position() + length);
+        bb.position(bb.position() + length);
+        return copy;
+    }
+
+    // changes bb position
+    public static ByteBuffer readBytesWithShortLength(ByteBuffer bb)
+    {
+        int length = readShortLength(bb);
+        return readBytes(bb, length);
     }
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright 2010 Lennart Koopmann <lennart@socketfeed.com>
+ * Copyright 2010, 2011 Lennart Koopmann <lennart@socketfeed.com>
  *
  * This file is part of Graylog2.
  *
@@ -20,11 +20,16 @@
 
 package org.graylog2.messagehandlers.gelf;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.bson.types.ObjectId;
+import org.graylog2.Log;
+import org.graylog2.blacklists.Blacklist;
+import org.graylog2.blacklists.BlacklistRule;
 import org.graylog2.streams.Router;
+import org.graylog2.streams.StreamRule;
+import org.graylog2.streams.matchers.StreamRuleMatcherIF;
 
 /**
  * GELFMessage.java: Jul 20, 2010 6:57:28 PM
@@ -45,7 +50,8 @@ public class GELFMessage {
     private int timestamp = 0;
     private String facility = null;
     private Map<String, String> additionalData = new HashMap<String, String>();
-    private List<Integer> streams = null;
+    private List<ObjectId> streams = null;
+    private boolean convertedFromSyslog = false;
 
     private boolean filterOut = false;
 
@@ -252,16 +258,47 @@ public class GELFMessage {
     }
 
 
-    public void setStreams(List<Integer> streams) {
+    public void setStreams(List<ObjectId> streams) {
         this.streams = streams;
     }
 
-    public List<Integer> getStreams() {
+    public List<ObjectId> getStreams() {
         if (this.streams != null) {
             return this.streams;
         }
 
         return Router.route(this);
+    }
+
+    public boolean matchStreamRule(StreamRuleMatcherIF matcher, StreamRule rule) {
+        try {
+            return matcher.match(this, rule);
+        } catch (Exception e) {
+            Log.warn("Could not match stream rule <" + rule.getRuleType() + "/" + rule.getValue() + ">: " + e.toString());
+            return false;
+        }
+    }
+
+    public boolean blacklisted(List<Blacklist> blacklists) {
+        for (Blacklist blacklist : blacklists) {
+            for (BlacklistRule rule : blacklist.getRules()) {
+                if (this.getShortMessage().matches(rule.getTerm())) {
+                    Log.info("Message <" + this.toString() + "> is blacklisted. First match on " + rule.getTerm());
+                    return true;
+                }
+            }
+        }
+
+        // No rule hit.
+        return false;
+    }
+
+    public void setConvertedFromSyslog(boolean x) {
+        this.convertedFromSyslog = x;
+    }
+
+    public boolean convertedFromSyslog() {
+        return this.convertedFromSyslog;
     }
 
     /**

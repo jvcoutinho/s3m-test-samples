@@ -64,7 +64,7 @@ public class SSTableReader extends SSTable
     private static final Logger logger = LoggerFactory.getLogger(SSTableReader.class);
 
     // guesstimated size of INDEX_INTERVAL index entries
-    private static final int INDEX_FILE_BUFFER_BYTES = 16 * DatabaseDescriptor.getIndexInterval();
+    private static final int INDEX_FILE_BUFFER_BYTES = 16 * CFMetaData.DEFAULT_INDEX_INTERVAL;
 
     /**
      * maxDataAge is a timestamp in local server time (e.g. System.currentTimeMilli) which represents an uppper bound
@@ -97,17 +97,17 @@ public class SSTableReader extends SSTable
     private final AtomicBoolean isCompacted = new AtomicBoolean(false);
     private final AtomicBoolean isSuspect = new AtomicBoolean(false);
     private final SSTableDeletingTask deletingTask;
+    // not final since we need to be able to change level on a file.
+    private volatile SSTableMetadata sstableMetadata;
 
-    private final SSTableMetadata sstableMetadata;
-
-    public static long getApproximateKeyCount(Iterable<SSTableReader> sstables)
+    public static long getApproximateKeyCount(Iterable<SSTableReader> sstables, CFMetaData metadata)
     {
         long count = 0;
 
         for (SSTableReader sstable : sstables)
         {
             int indexKeyCount = sstable.getKeySamples().size();
-            count = count + (indexKeyCount + 1) * DatabaseDescriptor.getIndexInterval();
+            count = count + (indexKeyCount + 1) * metadata.getIndexInterval();
             if (logger.isDebugEnabled())
                 logger.debug("index size for bloom filter calc for file  : " + sstable.getFilename() + "   : " + count);
         }
@@ -188,24 +188,15 @@ public class SSTableReader extends SSTable
                                                   null,
                                                   System.currentTimeMillis(),
                                                   sstableMetadata);
-        // versions before 'c' encoded keys as utf-16 before hashing to the filter
-        if (descriptor.version.hasStringsInBloomFilter)
-        {
-            sstable.load(true);
-        }
-        else
-        {
-            sstable.load(false);
-            sstable.loadBloomFilter();
-        }
+
+        sstable.load();
 
         if (validate)
             sstable.validate();
 
-        if (logger.isDebugEnabled())
-            logger.debug("INDEX LOAD TIME for " + descriptor + ": " + (System.currentTimeMillis() - start) + " ms.");
+        logger.debug("INDEX LOAD TIME for " + descriptor + ": " + (System.currentTimeMillis() - start) + " ms.");
 
-        if (logger.isDebugEnabled() && sstable.getKeyCache() != null)
+        if (sstable.getKeyCache() != null)
             logger.debug(String.format("key cache contains %s/%s keys", sstable.getKeyCache().size(), sstable.getKeyCache().getCapacity()));
 
         return sstable;
@@ -319,14 +310,39 @@ public class SSTableReader extends SSTable
         keyCache = CacheService.instance.keyCache;
     }
 
+    private void load() throws IOException
+    {
+        if (metadata.getBloomFilterFpChance() == 1.0)
+        {
+            // bf is disabled.
+            load(false);
+            bf = new AlwaysPresentFilter();
+        }
+        else if (!components.contains(Component.FILTER))
+        {
+            // bf is enabled, but filter component is missing.
+            load(true);
+        }
+        else if (descriptor.version.hasStringsInBloomFilter)
+        {
+            // versions before 'c' encoded keys as utf-16 before hashing to the filter.
+            load(true);
+        }
+        else if (descriptor.version.hasBloomFilterFPChance && sstableMetadata.bloomFilterFPChance != metadata.getBloomFilterFpChance())
+        {
+            // bf fp chance in sstable metadata and it has changed since compaction.
+            load(true);
+        }
+        else
+        {
+            // bf is enabled, but fp chance isn't present in metadata (pre-ja) OR matches the currently configured value.
+            load(false);
+            loadBloomFilter();
+        }
+    }
+
     void loadBloomFilter() throws IOException
     {
-        if (!components.contains(Component.FILTER))
-        {
-            bf = new AlwaysPresentFilter();
-            return;
-        }
-
         DataInputStream stream = null;
         try
         {
@@ -342,7 +358,7 @@ public class SSTableReader extends SSTable
     /**
      * Loads ifile, dfile and indexSummary, and optionally recreates the bloom filter.
      */
-    private void load(boolean recreatebloom) throws IOException
+    private void load(boolean recreateBloomFilter) throws IOException
     {
         SegmentedFile.Builder ibuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode());
         SegmentedFile.Builder dbuilder = compression
@@ -354,8 +370,8 @@ public class SSTableReader extends SSTable
 
         // try to load summaries from the disk and check if we need
         // to read primary index because we should re-create a BloomFilter or pre-load KeyCache
-        final boolean summaryLoaded = loadSummary(this, ibuilder, dbuilder);
-        final boolean readIndex = recreatebloom || !summaryLoaded;
+        final boolean summaryLoaded = loadSummary(this, ibuilder, dbuilder, metadata);
+        final boolean readIndex = recreateBloomFilter || !summaryLoaded;
         try
         {
             long indexSize = primaryIndex.length();
@@ -363,11 +379,12 @@ public class SSTableReader extends SSTable
             long estimatedKeys = histogramCount > 0 && !sstableMetadata.estimatedRowSize.isOverflowed()
                                ? histogramCount
                                : estimateRowsFromIndex(primaryIndex); // statistics is supposed to be optional
-            if (recreatebloom)
-                bf = LegacyBloomFilter.getFilter(estimatedKeys, 15);
+
+            if (recreateBloomFilter)
+                bf = FilterFactory.getFilter(estimatedKeys, metadata.getBloomFilterFpChance(), true);
 
             if (!summaryLoaded)
-                indexSummary = new IndexSummary(estimatedKeys);
+                indexSummary = new IndexSummary(estimatedKeys, metadata.getIndexInterval());
 
             long indexPosition;
             while (readIndex && (indexPosition = primaryIndex.getFilePointer()) != indexSize)
@@ -379,7 +396,7 @@ public class SSTableReader extends SSTable
                     first = decoratedKey;
                 last = decoratedKey;
 
-                if (recreatebloom)
+                if (recreateBloomFilter)
                     bf.add(decoratedKey.key);
 
                 // if summary was already read from disk we don't want to re-populate it using primary index
@@ -406,7 +423,7 @@ public class SSTableReader extends SSTable
             saveSummary(this, ibuilder, dbuilder);
     }
 
-    public static boolean loadSummary(SSTableReader reader, SegmentedFile.Builder ibuilder, SegmentedFile.Builder dbuilder)
+    public static boolean loadSummary(SSTableReader reader, SegmentedFile.Builder ibuilder, SegmentedFile.Builder dbuilder, CFMetaData metadata)
     {
         File summariesFile = new File(reader.descriptor.filenameFor(Component.SUMMARY));
         if (!summariesFile.exists())
@@ -417,6 +434,14 @@ public class SSTableReader extends SSTable
         {
             iStream = new DataInputStream(new FileInputStream(summariesFile));
             reader.indexSummary = IndexSummary.serializer.deserialize(iStream, reader.partitioner);
+            if (reader.indexSummary.getIndexInterval() != metadata.getIndexInterval())
+            {
+                iStream.close();
+                logger.debug("Cannot read the saved summary for {} because Index Interval changed from {} to {}.",
+                             reader.toString(), reader.indexSummary.getIndexInterval(), metadata.getIndexInterval());
+                FileUtils.deleteWithConfirm(summariesFile);
+                return false;
+            }
             reader.first = decodeKey(reader.partitioner, reader.descriptor, ByteBufferUtil.readWithLength(iStream));
             reader.last = decodeKey(reader.partitioner, reader.descriptor, ByteBufferUtil.readWithLength(iStream));
             ibuilder.deserializeBounds(iStream);
@@ -425,10 +450,8 @@ public class SSTableReader extends SSTable
         catch (IOException e)
         {
             logger.debug("Cannot deserialize SSTable Summary: ", e);
-            // corrupted hence delete it and let it load it now.
-            if (summariesFile.exists())
-                summariesFile.delete();
-
+            // corrupted; delete it and fall back to creating a new summary
+            FileUtils.deleteWithConfirm(summariesFile);
             return false;
         }
         finally
@@ -530,7 +553,7 @@ public class SSTableReader extends SSTable
      */
     public long estimatedKeys()
     {
-        return indexSummary.getKeys().size() * DatabaseDescriptor.getIndexInterval();
+        return indexSummary.getKeys().size() * metadata.getIndexInterval();
     }
 
     /**
@@ -543,7 +566,7 @@ public class SSTableReader extends SSTable
         List<Pair<Integer, Integer>> sampleIndexes = getSampleIndexesForRanges(indexSummary.getKeys(), ranges);
         for (Pair<Integer, Integer> sampleIndexRange : sampleIndexes)
             sampleKeyCount += (sampleIndexRange.right - sampleIndexRange.left + 1);
-        return Math.max(1, sampleKeyCount * DatabaseDescriptor.getIndexInterval());
+        return Math.max(1, sampleKeyCount * metadata.getIndexInterval());
     }
 
     /**
@@ -801,12 +824,12 @@ public class SSTableReader extends SSTable
         // of the next interval).
         int i = 0;
         Iterator<FileDataInput> segments = ifile.iterator(sampledPosition, INDEX_FILE_BUFFER_BYTES);
-        while (segments.hasNext() && i <= DatabaseDescriptor.getIndexInterval())
+        while (segments.hasNext() && i <= metadata.getIndexInterval())
         {
             FileDataInput in = segments.next();
             try
             {
-                while (!in.isEOF() && i <= DatabaseDescriptor.getIndexInterval())
+                while (!in.isEOF() && i <= metadata.getIndexInterval())
                 {
                     i++;
 
@@ -997,10 +1020,7 @@ public class SSTableReader extends SSTable
         if (range == null)
             return getScanner();
 
-        Iterator<Pair<Long, Long>> rangeIterator = getPositionsForRanges(Collections.singletonList(range)).iterator();
-        return rangeIterator.hasNext()
-               ? new SSTableBoundedScanner(this, rangeIterator)
-               : new EmptyCompactionScanner(getFilename());
+        return new SSTableBoundedScanner(this, range);
     }
 
     public FileDataInput getFileDataInput(long position)
@@ -1150,6 +1170,30 @@ public class SSTableReader extends SSTable
     public Set<Integer> getAncestors()
     {
         return sstableMetadata.ancestors;
+    }
+
+    public int getSSTableLevel()
+    {
+        return sstableMetadata.sstableLevel;
+    }
+
+    /**
+     * Reloads the sstable metadata from disk.
+     *
+     * Called after level is changed on sstable, for example if the sstable is dropped to L0
+     *
+     * Might be possible to remove in future versions
+     *
+     * @throws IOException
+     */
+    public void reloadSSTableMetadata() throws IOException
+    {
+        this.sstableMetadata = SSTableMetadata.serializer.deserialize(descriptor);
+    }
+
+    public SSTableMetadata getSSTableMetadata()
+    {
+        return sstableMetadata;
     }
 
     public RandomAccessReader openDataReader()

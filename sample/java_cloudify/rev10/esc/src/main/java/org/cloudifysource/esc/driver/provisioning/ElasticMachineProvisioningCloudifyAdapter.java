@@ -1,11 +1,11 @@
 /*******************************************************************************
  * Copyright (c) 2011 GigaSpaces Technologies Ltd. All rights reserved
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
  * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations under the License.
@@ -85,9 +85,9 @@ import org.openspaces.grid.gsm.machines.plugins.exceptions.ElasticMachineProvisi
  * An ESM machine provisioning implementation used by the Cloudify cloud driver. All calls to start/stop a machine are
  * delegated to the CloudifyProvisioning implementation. If the started machine does not have an agent running, this
  * class will install gigaspaces and start the agent using the Agent-less Installer process.
- * 
+ *
  * @author barakme
- * 
+ *
  */
 public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachineProvisioning, Bean {
 
@@ -305,10 +305,10 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 		try {
 			// check for timeout
 			checkForProvisioningTimeout(end, machineDetails);
-			
+
 			if (isStorageTemplateUsed()) {
 				String machineLocation = machineDetails.getLocationId();
-				
+
 				VolumeDetails volumeDetails = startNewStorageVolume(machineLocation, end);
 				try {
 					attachStorageVolumeToMachine(machineIp, volumeDetails , end);
@@ -394,7 +394,7 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 			handleExceptionAfterMachineCreated(machineIp, machineDetails, end);
 			//temporary, this will be replaced when a throws is added to the interface on openspaces.
 			throw new ElasticMachineProvisioningException("Storage exception thrown", e);
-		} 
+		}
 	}
 
 	void handleVolumeAttachException(final VolumeDetails volumeDetails) {
@@ -459,7 +459,7 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 					handleVolumeOnStopMachine(machineIp, end, TimeUnit.MILLISECONDS);
 				}
 			} catch (StorageProvisioningException e) {
-				logger.log(Level.SEVERE, "Failed detaching volume from machine with ip: " 
+				logger.log(Level.SEVERE, "Failed detaching volume from machine with ip: "
 								+ machineIp + ". There may still be leaking volumes.", e);
 			}
 			this.cloudifyProvisioning.stopMachine(machineDetails.getPrivateAddress(),
@@ -588,7 +588,7 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 			throws ElasticMachineProvisioningException,
 			ElasticGridServiceAgentProvisioningException,
 			InterruptedException, TimeoutException {
-		
+
 		final long endTime = System.currentTimeMillis() + unit.toMillis(duration);
 		final String machineIp = agent.getMachine().getHostAddress();
 		try {
@@ -596,10 +596,10 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 				handleVolumeOnStopMachine(machineIp, duration, unit);
 			}
 		} catch (StorageProvisioningException e) {
-			logger.log(Level.SEVERE, "Failed detaching volume from machine with ip: " 
+			logger.log(Level.SEVERE, "Failed detaching volume from machine with ip: "
 							+ machineIp + ". There may still be leaking volumes.", e);
 		}
-		
+
 		Exception failedToShutdownAgentException = null;
 		final GridServiceAgentStopRequestedEvent agentStopEvent = new GridServiceAgentStopRequestedEvent();
 		agentStopEvent.setHostAddress(machineIp);
@@ -665,7 +665,7 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 		}
 	}
 
-	void handleVolumeOnStopMachine(final String machineIp, final long duration, 
+	void handleVolumeOnStopMachine(final String machineIp, final long duration,
 			final TimeUnit unit) throws TimeoutException,
 			StorageProvisioningException {
 		logger.info("detaching all volumes attachet to machine with ip: " + machineIp);
@@ -740,7 +740,7 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 			}
 			// add additional templates from cloudConfigDirectory.
 			addTemplatesToCloud(new File(cloudConfigDirectoryPath));
-			final ComputeTemplate computeTemplate = 
+			final ComputeTemplate computeTemplate =
 					this.cloud.getCloudCompute().getTemplates().get(this.cloudTemplateName);
 			if (computeTemplate == null) {
 				throw new BeanConfigurationException("The provided cloud template name: " + this.cloudTemplateName
@@ -783,14 +783,14 @@ public class ElasticMachineProvisioningCloudifyAdapter implements ElasticMachine
 				this.storageTemplateName = config.getStorageTemplateName();
 				if (isStorageTemplateUsed()) {
 					boolean privileged = computeTemplate.isPrivileged();
-					// mounting the volume will not be possible if not running in privileged mode. 
+					// mounting the volume will not be possible if not running in privileged mode.
 					if (!privileged) {
 						logger.warning("Storage template defined but not running in privileged mode.");
 						throw new StorageProvisioningException("Storage mounting requires running in privileged mode."
 								+ " This should be defined in the cloud's compute template.");
 					}
 					logger.info("creating storage provisioning driver.");
-					this.storageProvisioning = 
+					this.storageProvisioning =
 							(StorageProvisioningDriver) Class.forName(this.cloud.getConfiguration()
 									.getStorageClassName()).newInstance();
 					if (this.storageProvisioning instanceof BaseStorageDriver) {

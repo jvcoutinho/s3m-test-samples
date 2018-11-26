@@ -1,17 +1,14 @@
 /*******************************************************************************
  * Copyright (c) 2011 GigaSpaces Technologies Ltd. All rights reserved
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *       http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
  *******************************************************************************/
 package org.cloudifysource.shell.installer;
 
@@ -38,7 +35,6 @@ import org.cloudifysource.shell.ShellUtils;
 import org.cloudifysource.shell.commands.CLIException;
 import org.openspaces.admin.gsa.GridServiceAgent;
 import org.openspaces.admin.pu.ProcessingUnit;
-import org.openspaces.admin.pu.ProcessingUnitAlreadyDeployedException;
 import org.openspaces.admin.pu.ProcessingUnitDeployment;
 import org.openspaces.admin.pu.ProcessingUnitInstance;
 import org.openspaces.admin.pu.dependency.ProcessingUnitDeploymentDependenciesConfigurer;
@@ -53,9 +49,9 @@ import com.j_spaces.kernel.Environment;
 /**
  * @author rafi, barakm
  * @since 2.0.0
- * 
+ *
  *        Handles the installation of a management web service
- * 
+ *
  */
 public class ManagementWebServiceInstaller extends AbstractManagementServiceInstaller {
 
@@ -64,38 +60,45 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 	private String password;
 	private File warFile;
 	private boolean waitForConnection;
-	private List<LocalhostBootstrapperListener> eventsListenersList = new ArrayList<LocalhostBootstrapperListener>();
+	private final List<LocalhostBootstrapperListener> eventsListenersList =
+			new ArrayList<LocalhostBootstrapperListener>();
 	private boolean isLocalcloud;
-	private boolean isSecureConnection; //Indicates whether the connection to this web server is secure (SSL)
+	private boolean isSecureConnection; // Indicates whether the connection to this web server is secure (SSL)
+	private String lrmiCommandLineArgument = "";
 
 	/**
 	 * Sets the service's port.
-	 * 
+	 *
 	 * @param port
 	 *            The port to be used by the service
 	 */
 	public void setPort(final int port) {
 		this.port = port;
 	}
-	
+
 	public void setUsername(final String username) {
 		this.username = username;
 	}
-	
+
 	public void setPassword(final String password) {
 		this.password = password;
 	}
 
 	/**
 	 * Sets the service's war file.
-	 * 
+	 *
 	 * @param warFile
 	 *            The service's war file, required for deployment.
 	 */
 	public void setWarFile(final File warFile) {
 		this.warFile = warFile;
 	}
-	
+
+	/*********
+	 * Installs the web service.
+	 *
+	 * @throws CLIException .
+	 */
 	public void installWebService() throws CLIException {
 		if (isLocalcloud) {
 			installLocalCloud();
@@ -105,11 +108,9 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 	}
 
 	/**
-	 * Installs the management web service with the configured settings (e.g. memory, scale). If a dependency
-	 * on another PU is set, the deployment will wait until at least 1 instance of that PU is available.
-	 * 
-	 * @throws ProcessingUnitAlreadyDeployedException
-	 *             Reporting installation failure because the PU is already installed
+	 * Installs the management web service with the configured settings (e.g. memory, scale). If a dependency on another
+	 * PU is set, the deployment will wait until at least 1 instance of that PU is available.
+	 *
 	 * @throws CLIException
 	 *             Reporting a failure to get the Grid Service Manager (GSM) to install the service
 	 */
@@ -132,7 +133,8 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 								.reservedMemoryCapacityPerMachine(RESERVED_MEMORY_IN_MB, MemoryUnit.MEGABYTES)
 								.create())
 				// Eager scale (1 container per machine per PU)
-				.scale(new EagerScaleConfigurer().atMostOneContainerPerMachine().create());
+				.scale(new EagerScaleConfigurer().atMostOneContainerPerMachine().create())
+				.addCommandLineArgument(this.lrmiCommandLineArgument);
 
 		for (final Entry<Object, Object> prop : getContextProperties().entrySet()) {
 			deployment.addContextProperty(prop.getKey().toString(), prop.getValue().toString());
@@ -142,17 +144,16 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 			deployment.addDependencies(new ProcessingUnitDeploymentDependenciesConfigurer()
 					.dependsOnMinimumNumberOfDeployedInstancesPerPartition(requiredPUName, 1).create());
 		}
+		// The gsc java options define the lrmi port range and memory size if not defined.
 
 		getGridServiceManager().deploy(deployment);
 	}
-	
+
 	/**
-	 * Installs the management web service with the configured settings inside the 
-	 * localcloud dedicated management service container. If a dependency on another PU is set,
-	 * the deployment will wait until at least 1 instance of that PU is available.
-	 * 
-	 * @throws ProcessingUnitAlreadyDeployedException
-	 *             Reporting installation failure because the PU is already installed
+	 * Installs the management web service with the configured settings inside the localcloud dedicated management
+	 * service container. If a dependency on another PU is set, the deployment will wait until at least 1 instance of
+	 * that PU is available.
+	 *
 	 * @throws CLIException
 	 *             Reporting a failure to get the Grid Service Manager (GSM) to install the service
 	 */
@@ -161,10 +162,10 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 		if (agentZone == null) {
 			throw new IllegalStateException("Management services must be installed on management zone");
 		}
-		
+
 		final ProcessingUnitDeployment deployment = new ProcessingUnitDeployment(
 				getGSFile(warFile))
-				.addZone(serviceName) 
+				.addZone(serviceName)
 				.name(serviceName);
 
 		for (final Entry<Object, Object> prop : getContextProperties().entrySet()) {
@@ -194,17 +195,17 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 	}
 
 	/**
-	 * Indicates it is required to wait for a successful connection with the service after the service
-	 * installation completes.
+	 * Indicates it is required to wait for a successful connection with the service after the service installation
+	 * completes.
 	 */
 	public void setWaitForConnection() {
 		waitForConnection = true;
 	}
 
 	/**
-	 * Waits for a PU instance to be available, indicating the service is installed and running. If the
-	 * timeout is reached before a connection could be established, a {@link TimeoutException} is thrown.
-	 * 
+	 * Waits for a PU instance to be available, indicating the service is installed and running. If the timeout is
+	 * reached before a connection could be established, a {@link TimeoutException} is thrown.
+	 *
 	 * @param agent
 	 *            The grid service agent to use
 	 * @param timeout
@@ -223,15 +224,16 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 			throws InterruptedException, TimeoutException, CLIException {
 
 		createConditionLatch(timeout, timeunit).waitFor(new ConditionLatch.Predicate() {
-			boolean messagePublished = false;
+			private boolean messagePublished = false;
+
 			/**
 			 * {@inheritDoc}
 			 */
 			@Override
 			public boolean isDone() throws CLIException, InterruptedException {
 				logger.fine("Waiting for " + serviceName + " service.");
-				if (!messagePublished){
-					String message = ShellUtils.getMessageBundle().getString("starting_management_web_service");
+				if (!messagePublished) {
+					final String message = ShellUtils.getMessageBundle().getString("starting_management_web_service");
 					publishEvent(MessageFormat.format(message, serviceName.toUpperCase()));
 					messagePublished = true;
 				}
@@ -245,7 +247,7 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 						}
 					}
 				}
-				if (!isDone){
+				if (!isDone) {
 					publishEvent(null);
 				}
 				return isDone;
@@ -255,16 +257,16 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 		// TODO [noak]: verify this always the correct port (SSL-wise) ?
 		final URL url = getWebProcessingUnitURL(agent, getProcessingUnit(), isSecureConnection);
 		final String serviceNameCapital = StringUtils.capitalize(serviceName);
-		String returnMessage = ShellUtils.getMessageBundle().getString("web_service_available_at");
+		final String returnMessage = ShellUtils.getMessageBundle().getString("web_service_available_at");
 		logger.fine(returnMessage);
 		publishEvent(MessageFormat.format(returnMessage, serviceNameCapital, url));
 		return url;
 	}
 
 	/**
-	 * Waits for a connection to be established with the service. If the timeout is reached before a
-	 * connection could be established, a {@link TimeoutException} is thrown.
-	 * 
+	 * Waits for a connection to be established with the service. If the timeout is reached before a connection could be
+	 * established, a {@link TimeoutException} is thrown.
+	 *
 	 * @param adminFacade
 	 *            The admin facade used to connect and disconnect from the REST server
 	 * @param username
@@ -286,7 +288,7 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 	 */
 	private void waitForConnection(final AdminFacade adminFacade, final String username, final String password,
 			final URL url, final long timeout, final TimeUnit timeunit)
-					throws InterruptedException, TimeoutException,
+			throws InterruptedException, TimeoutException,
 			CLIException {
 		adminFacade.disconnect();
 		createConditionLatch(timeout, timeunit).waitFor(new ConditionLatch.Predicate() {
@@ -312,7 +314,7 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 
 	/**
 	 * Writes the URL of the service to the log.
-	 * 
+	 *
 	 * @throws CLIException
 	 *             Reporting a failure to get the host address
 	 */
@@ -338,11 +340,11 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 		return props;
 	}
 
-	//TODO:consider delete.
+	// TODO:consider delete.
 	/**
-	 * Waits for the management processes (GSM and ESM) to be available. If the timeout is reached before a
-	 * connection could be established, a {@link TimeoutException} is thrown.
-	 * 
+	 * Waits for the management processes (GSM and ESM) to be available. If the timeout is reached before a connection
+	 * could be established, a {@link TimeoutException} is thrown.
+	 *
 	 * @param timeout
 	 *            number of {@link TimeUnit}s to wait
 	 * @param timeunit
@@ -399,14 +401,16 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 
 	/**
 	 * Constructs and returns the URL of a processing unit instance deployed with the given agent.
-	 * 
+	 *
 	 * @param agent
 	 *            The agent of the desired processing unit instance
 	 * @param pu
 	 *            The processing unit to find an instance of, for construction of the requested URL
+	 *
+	 * @param isSecureConnection .
 	 * @return URL to a specific processing unit instance
 	 */
-	public static URL getWebProcessingUnitURL(final GridServiceAgent agent, final ProcessingUnit pu, 
+	public static URL getWebProcessingUnitURL(final GridServiceAgent agent, final ProcessingUnit pu,
 			final boolean isSecureConnection) {
 		ProcessingUnitInstance pui = null;
 
@@ -439,9 +443,9 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 	}
 
 	/**
-	 * Gets the service's war file. If the war file's path is not an absolute path, it is considered relative
-	 * to the home directory.
-	 * 
+	 * Gets the service's war file. If the war file's path is not an absolute path, it is considered relative to the
+	 * home directory.
+	 *
 	 * @param warFile
 	 *            The service's war file object (possibly with a relative path)
 	 * @return The service's war file object
@@ -454,28 +458,40 @@ public class ManagementWebServiceInstaller extends AbstractManagementServiceInst
 		return absWarFile;
 	}
 
-	public void addListener(LocalhostBootstrapperListener listener) {
+	/*******
+	 * Adds an event listener.
+	 * @param listener the listener.
+	 */
+	public void addListener(final LocalhostBootstrapperListener listener) {
 		this.eventsListenersList.add(listener);
 	}
-	
-	public void addListeners(List<LocalhostBootstrapperListener> listeners) {
-		for (LocalhostBootstrapperListener listener : listeners) {
+
+	/********
+	 * Adds events listeners.
+	 * @param listeners the listeners.
+	 */
+	public void addListeners(final List<LocalhostBootstrapperListener> listeners) {
+		for (final LocalhostBootstrapperListener listener : listeners) {
 			this.eventsListenersList.add(listener);
 		}
 	}
-	
+
 	private void publishEvent(final String event) {
 		for (final LocalhostBootstrapperListener listner : this.eventsListenersList) {
 			listner.onLocalhostBootstrapEvent(event);
 		}
 	}
 
-	public void setIsLocalCloud(boolean isLocalCloud) {
+	public void setIsLocalCloud(final boolean isLocalCloud) {
 		this.isLocalcloud = isLocalCloud;
 	}
-	
-	public void setIsSecureConnection(boolean isSecureConnection) {
+
+	public void setIsSecureConnection(final boolean isSecureConnection) {
 		this.isSecureConnection = isSecureConnection;
+	}
+
+	public void setLrmiCommandLineArgument(final String lrmiCommandLineArgument) {
+		this.lrmiCommandLineArgument = lrmiCommandLineArgument;
 	}
 
 }

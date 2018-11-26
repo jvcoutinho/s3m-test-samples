@@ -43,22 +43,15 @@ public class SimpleSeedProvider implements SeedProvider
 
     public List<InetAddress> getSeeds()
     {
-        InputStream input;
+        Config conf;
         try
         {
-            URL url = DatabaseDescriptor.getStorageConfigURL();
-            input = url.openStream();
+            conf = DatabaseDescriptor.loadConfig();
         }
         catch (Exception e)
         {
             throw new AssertionError(e);
         }
-        org.yaml.snakeyaml.constructor.Constructor constructor = new org.yaml.snakeyaml.constructor.Constructor(Config.class);
-        TypeDescription seedDesc = new TypeDescription(SeedProviderDef.class);
-        seedDesc.putMapPropertyType("parameters", String.class, String.class);
-        constructor.addTypeDescription(seedDesc);
-        Yaml yaml = new Yaml(new Loader(constructor));
-        Config conf = (Config)yaml.load(input);
         String[] hosts = conf.seed_provider.parameters.get("seeds").split(",", -1);
         List<InetAddress> seeds = new ArrayList<InetAddress>(hosts.length);
         for (String host : hosts)

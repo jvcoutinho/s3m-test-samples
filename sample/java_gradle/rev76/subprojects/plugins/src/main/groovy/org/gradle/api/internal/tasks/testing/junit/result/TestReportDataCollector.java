@@ -16,56 +16,36 @@
 
 package org.gradle.api.internal.tasks.testing.junit.result;
 
-import org.gradle.api.Action;
+import org.gradle.api.internal.tasks.testing.TestDescriptorInternal;
 import org.gradle.api.tasks.testing.*;
 
-import java.io.File;
-import java.io.Writer;
-import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Assembles test results. Keeps a copy of the results in memory to provide them later and spools test output to file.
- *
- * by Szczepan Faber, created at: 11/13/12
+ * Collects the test results into memory and spools the test output to file during execution (to avoid holding it all in memory).
  */
-public class TestReportDataCollector implements TestListener, TestOutputListener, TestResultsProvider {
-    private final Map<String, TestClassResult> results = new HashMap<String, TestClassResult>();
-    private final TestResultSerializer resultSerializer;
-    private final File resultsDir;
-    private final TestOutputSerializer outputSerializer;
+public class TestReportDataCollector implements TestListener, TestOutputListener {
 
-    public TestReportDataCollector(File resultsDir) {
-        this(resultsDir, new TestOutputSerializer(resultsDir), new TestResultSerializer());
-    }
+    private final Map<String, TestClassResult> results;
+    private final TestOutputStore.Writer outputWriter;
 
-    TestReportDataCollector(File resultsDir, TestOutputSerializer outputSerializer, TestResultSerializer resultSerializer) {
-        this.resultsDir = resultsDir;
-        this.outputSerializer = outputSerializer;
-        this.resultSerializer = resultSerializer;
+    public TestReportDataCollector(Map<String, TestClassResult> results, TestOutputStore.Writer outputWriter) {
+        this.results = results;
+        this.outputWriter = outputWriter;
     }
 
     public void beforeSuite(TestDescriptor suite) {
     }
 
-    public void afterSuite(TestDescriptor suite, TestResult result) {
-        if (suite.getParent() == null) {
-            outputSerializer.finishOutputs();
-            writeResults();
-        }
-    }
+    public void afterSuite(TestDescriptor suite, TestResult result) {}
 
-    private void writeResults() {
-        resultSerializer.write(results.values(), resultsDir);
-    }
-
-    public void beforeTest(TestDescriptor testDescriptor) {
-    }
+    public void beforeTest(TestDescriptor testDescriptor) {}
 
     public void afterTest(TestDescriptor testDescriptor, TestResult result) {
         if (!testDescriptor.isComposite()) {
+            TestDescriptorInternal testDescriptorInternal = (TestDescriptorInternal) testDescriptor;
             String className = testDescriptor.getClassName();
-            TestMethodResult methodResult = new TestMethodResult(testDescriptor.getName(), result);
+            TestMethodResult methodResult = new TestMethodResult(testDescriptorInternal.getId(), testDescriptor.getName(), result);
             TestClassResult classResult = results.get(className);
             if (classResult == null) {
                 classResult = new TestClassResult(className, result.getStartTime());
@@ -82,29 +62,13 @@ public class TestReportDataCollector implements TestListener, TestOutputListener
             //we don't have a place for such output in any of the reports so skipping.
             return;
         }
+        TestDescriptorInternal testDescriptorInternal = (TestDescriptorInternal) testDescriptor;
         TestClassResult classResult = results.get(className);
         if (classResult == null) {
             classResult = new TestClassResult(className, 0);
             results.put(className, classResult);
         }
-        outputSerializer.onOutput(className, testDescriptor.getName(), outputEvent.getDestination(), outputEvent.getMessage());
+        outputWriter.onOutput(testDescriptorInternal, outputEvent.getDestination(), outputEvent.getMessage());
     }
 
-    public void visitClasses(Action<? super TestClassResult> visitor) {
-        for (TestClassResult classResult : results.values()) {
-            visitor.execute(classResult);
-        }
-    }
-
-    public boolean hasOutput(String className, TestOutputEvent.Destination destination) {
-        return outputSerializer.hasOutput(className, destination);
-    }
-
-    public void writeOutputs(String className, TestOutputEvent.Destination destination, Writer writer) {
-        outputSerializer.writeOutputs(className, destination, writer);
-    }
-
-    public void writeOutputs(String className, String testCaseName, TestOutputEvent.Destination destination, Writer writer) {
-        outputSerializer.writeOutputs(className, testCaseName, destination, writer);
-    }
 }

@@ -68,13 +68,12 @@ public class CompactionManager implements CompactionManagerMBean
 
     /**
      * compactionLock has two purposes:
-     * - Compaction acquires its readLock so that multiple compactions can happen simultaneously,
-     *   but the KS/CF migtations acquire its writeLock, so they can be sure no new SSTables will
-     *   be created for a dropped CF posthumously.  (Thus, compaction checks CFS.isValid while the
-     *   lock is acquired.)
      * - "Special" compactions will acquire writelock instead of readlock to make sure that all
-     *   other compaction activity is quiesced and they can grab ALL the sstables to do something.
-     *   TODO this is too big a hammer -- we should only care about quiescing all for the given CFS.
+     * other compaction activity is quiesced and they can grab ALL the sstables to do something.
+     * - Some schema migrations cannot run concurrently with compaction.  (Currently, this is
+     *   only when changing compaction strategy -- see CFS.maybeReloadCompactionStrategy.)
+     *
+     * TODO this is too big a hammer -- we should only care about quiescing all for the given CFS.
      */
     private final ReentrantReadWriteLock compactionLock = new ReentrantReadWriteLock();
 
@@ -117,9 +116,6 @@ public class CompactionManager implements CompactionManagerMBean
                 compactionLock.readLock().lock();
                 try
                 {
-                    if (!cfs.isValid())
-                        return 0;
-
                     boolean taskExecuted = false;
                     AbstractCompactionStrategy strategy = cfs.getCompactionStrategy();
                     List<AbstractCompactionTask> tasks = strategy.getBackgroundTasks(getDefaultGcBefore(cfs));
@@ -162,8 +158,6 @@ public class CompactionManager implements CompactionManagerMBean
                 compactionLock.writeLock().lock();
                 try 
                 {
-                    if (!cfStore.isValid())
-                        return this;
                     Collection<SSTableReader> tocleanup = cfStore.getDataTracker().markCompacting(cfStore.getSSTables(), 1, Integer.MAX_VALUE);
                     if (tocleanup == null || tocleanup.isEmpty())
                         return this;
@@ -208,9 +202,6 @@ public class CompactionManager implements CompactionManagerMBean
                 compactionLock.writeLock().lock();
                 try
                 {
-                    if (!cfStore.isValid())
-                        return this;
-
                     Collection<SSTableReader> toscrub = cfStore.getDataTracker().markCompacting(cfStore.getSSTables(), 1, Integer.MAX_VALUE);
                     if (toscrub == null || toscrub.isEmpty())
                         return this;
@@ -260,8 +251,6 @@ public class CompactionManager implements CompactionManagerMBean
                 compactionLock.writeLock().lock();
                 try
                 {
-                    if (!cfStore.isValid())
-                        return this;
                     AbstractCompactionStrategy strategy = cfStore.getCompactionStrategy();
                     for (AbstractCompactionTask task : strategy.getMaximalTasks(gcBefore))
                     {
@@ -341,9 +330,6 @@ public class CompactionManager implements CompactionManagerMBean
                 compactionLock.readLock().lock();
                 try
                 {
-                    if (!cfs.isValid())
-                        return this;
-
                     // look up the sstables now that we're on the compaction executor, so we don't try to re-compact
                     // something that was already being compacted earlier.
                     Collection<SSTableReader> sstables = new ArrayList<SSTableReader>();
@@ -435,8 +421,7 @@ public class CompactionManager implements CompactionManagerMBean
                 compactionLock.readLock().lock();
                 try
                 {
-                    if (cfStore.isValid())
-                        doValidationCompaction(cfStore, validator);
+                    doValidationCompaction(cfStore, validator);
                     return this;
                 }
                 finally
@@ -803,6 +788,14 @@ public class CompactionManager implements CompactionManagerMBean
      */
     private void doValidationCompaction(ColumnFamilyStore cfs, AntiEntropyService.Validator validator) throws IOException
     {
+        // this isn't meant to be race-proof, because it's not -- it won't cause bugs for a CFS to be dropped
+        // mid-validation, or to attempt to validate a droped CFS.  this is just a best effort to avoid useless work,
+        // particularly in the scenario where a validation is submitted before the drop, and there are compactions
+        // started prior to the drop keeping some sstables alive.  Since validationCompaction can run
+        // concurrently with other compactions, it would otherwise go ahead and scan those again.
+        if (!cfs.isValid())
+            return;
+
         // flush first so everyone is validating data that is as similar as possible
         try
         {

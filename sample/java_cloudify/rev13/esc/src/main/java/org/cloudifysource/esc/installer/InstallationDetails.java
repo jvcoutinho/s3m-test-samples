@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.cloudifysource.dsl.cloud.CloudTemplateInstallerConfiguration;
 import org.cloudifysource.dsl.cloud.FileTransferModes;
 import org.cloudifysource.dsl.cloud.RemoteExecutionModes;
 import org.cloudifysource.dsl.cloud.ScriptLanguages;
@@ -115,6 +116,7 @@ public class InstallationDetails implements Cloneable {
 
 	private String authGroups;
 
+	private CloudTemplateInstallerConfiguration installerConfiguration = null;
 	// Relevant only for management machines
 	/* *********************************************** */
 
@@ -124,7 +126,7 @@ public class InstallationDetails implements Cloneable {
 	private String lusCommandlineArgs;
 	private String gsmCommandlineArgs;
 	private String gsaCommandlineArgs;
-	private String gscCommandlineArgs;
+	private String gscLrmiPortRange;
 
 	// management web service properties
 	private String restMaxMemory;
@@ -133,6 +135,10 @@ public class InstallationDetails implements Cloneable {
 	private Integer webuiPort;
 
 	private boolean deleteRemoteDirectoryContents = false;
+
+	// persistent management
+	private boolean persistent = false;
+	private String persistentStoragePath = null;
 
 	public String getTemplateName() {
 		return templateName;
@@ -263,8 +269,8 @@ public class InstallationDetails implements Cloneable {
 
 		// copy list into array - make sure to use '/' as separator char for string comparisons later on.
 		this.managementOnlyFiles = new String[managementOnlyFiles.size()];
-		int i = 0;
-		for (String string : managementOnlyFiles) {
+		final int i = 0;
+		for (final String string : managementOnlyFiles) {
 			this.managementOnlyFiles[i] = string.replace("\\", "/");
 		}
 
@@ -441,12 +447,12 @@ public class InstallationDetails implements Cloneable {
 		this.gsaCommandlineArgs = gsaCommandlineArgs;
 	}
 
-	public String getGscCommandlineArgs() {
-		return gscCommandlineArgs;
+	public String getGscLrmiPortRange() {
+		return gscLrmiPortRange;
 	}
 
-	public void setGscCommandlineArgs(final String gscCommandlineArgs) {
-		this.gscCommandlineArgs = gscCommandlineArgs;
+	public void setGscLrmiPortRange(final String gscLrmiPortRange) {
+		this.gscLrmiPortRange = gscLrmiPortRange;
 	}
 
 	public Integer getRestPort() {
@@ -495,5 +501,29 @@ public class InstallationDetails implements Cloneable {
 
 	public void setDeleteRemoteDirectoryContents(final boolean deleteRemoteDirectoryContents) {
 		this.deleteRemoteDirectoryContents = deleteRemoteDirectoryContents;
+	}
+
+	public CloudTemplateInstallerConfiguration getInstallerConfiguration() {
+		return installerConfiguration;
+	}
+
+	public void setInstallerConfiguration(final CloudTemplateInstallerConfiguration installerConfiguration) {
+		this.installerConfiguration = installerConfiguration;
+	}
+
+	public boolean isPersistent() {
+		return persistent;
+	}
+
+	public void setPersistent(final boolean persistent) {
+		this.persistent = persistent;
+	}
+
+	public String getPersistentStoragePath() {
+		return persistentStoragePath;
+	}
+
+	public void setPersistentStoragePath(final String persistentStoragePath) {
+		this.persistentStoragePath = persistentStoragePath;
 	}
 }

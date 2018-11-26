@@ -1,5 +1,5 @@
 /*
- * 
+ *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -7,16 +7,16 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
- * 
+ *
  */
 package org.apache.cassandra.cql;
 
@@ -45,7 +45,7 @@ public class DeleteStatement extends AbstractModification
 {
     private List<Term> columns;
     private List<Term> keys;
-    
+
     public DeleteStatement(List<Term> columns, String keyspace, String columnFamily, String keyName, List<Term> keys, Attributes attrs)
     {
         super(keyspace, columnFamily, keyName, attrs);
@@ -59,20 +59,17 @@ public class DeleteStatement extends AbstractModification
         return columns;
     }
 
-    /** {@inheritDoc} */
     public List<Term> getKeys()
     {
         return keys;
     }
 
-    /** {@inheritDoc} */
-    public List<IMutation> prepareRowMutations(String keyspace, ClientState clientState) throws InvalidRequestException
+    public List<IMutation> prepareRowMutations(String keyspace, ClientState clientState, List<ByteBuffer> variables) throws InvalidRequestException
     {
-        return prepareRowMutations(keyspace, clientState, null);
+        return prepareRowMutations(keyspace, clientState, null, variables);
     }
 
-    /** {@inheritDoc} */
-    public List<IMutation> prepareRowMutations(String keyspace, ClientState clientState, Long timestamp) throws InvalidRequestException
+    public List<IMutation> prepareRowMutations(String keyspace, ClientState clientState, Long timestamp, List<ByteBuffer> variables) throws InvalidRequestException
     {
         clientState.hasColumnFamilyAccess(columnFamily, Permission.WRITE);
         AbstractType<?> keyType = Schema.instance.getCFMetaData(keyspace, columnFamily).getKeyValidator();
@@ -81,21 +78,21 @@ public class DeleteStatement extends AbstractModification
 
         for (Term key : keys)
         {
-            rowMutations.add(mutationForKey(key.getByteBuffer(keyType), keyspace, timestamp, clientState));
+            rowMutations.add(mutationForKey(key.getByteBuffer(keyType, variables), keyspace, timestamp, clientState,variables));
         }
 
         return rowMutations;
     }
 
-    /** {@inheritDoc} */
-    public RowMutation mutationForKey(ByteBuffer key, String keyspace, Long timestamp, ClientState clientState) throws InvalidRequestException
+    public RowMutation mutationForKey(ByteBuffer key, String keyspace, Long timestamp, ClientState clientState, List<ByteBuffer> variables)
+    throws InvalidRequestException
     {
         RowMutation rm = new RowMutation(keyspace, key);
 
         CFMetaData metadata = validateColumnFamily(keyspace, columnFamily);
         QueryProcessor.validateKeyAlias(metadata, keyName);
 
-        AbstractType comparator = metadata.getComparatorFor(null);
+        AbstractType<?> comparator = metadata.getComparatorFor(null);
 
         if (columns.size() < 1)
         {
@@ -107,7 +104,7 @@ public class DeleteStatement extends AbstractModification
             // Delete specific columns
             for (Term column : columns)
             {
-                ByteBuffer columnName = column.getByteBuffer(comparator);
+                ByteBuffer columnName = column.getByteBuffer(comparator, variables);
                 validateColumnName(columnName);
                 rm.delete(new QueryPath(columnFamily, null, columnName), (timestamp == null) ? getTimestamp(clientState) : timestamp);
             }

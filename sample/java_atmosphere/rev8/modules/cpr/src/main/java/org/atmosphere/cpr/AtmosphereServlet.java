@@ -41,20 +41,22 @@ package org.atmosphere.cpr;
 
 import org.apache.catalina.CometEvent;
 import org.apache.catalina.CometProcessor;
+import org.atmosphere.cache.BroadcasterCacheBase;
 import org.atmosphere.container.BlockingIOCometSupport;
 import org.atmosphere.container.JBossWebCometSupport;
+import org.atmosphere.container.JettyWebSocketHandler;
 import org.atmosphere.container.Tomcat7CometSupport;
 import org.atmosphere.container.TomcatCometSupport;
 import org.atmosphere.container.WebLogicCometSupport;
 import org.atmosphere.di.InjectorProvider;
 import org.atmosphere.di.ServletContextHolder;
 import org.atmosphere.di.ServletContextProvider;
+import org.atmosphere.handler.AbstractReflectorAtmosphereHandler;
 import org.atmosphere.handler.ReflectorServletProcessor;
 import org.atmosphere.util.AtmosphereConfigReader;
 import org.atmosphere.util.AtmosphereConfigReader.Property;
 import org.atmosphere.util.IntrospectionUtils;
 import org.atmosphere.util.Version;
-import org.atmosphere.websocket.JettyWebSocketHandler;
 import org.atmosphere.websocket.WebSocket;
 import org.atmosphere.websocket.protocol.SimpleHttpProtocol;
 import org.jboss.servlet.http.HttpEvent;
@@ -89,7 +91,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.atmosphere.cpr.ApplicationConfig.ATMOSPHERE_HANDLER;
+import static org.atmosphere.cpr.ApplicationConfig.ATMOSPHERE_HANDLER_MAPPING;
 import static org.atmosphere.cpr.ApplicationConfig.BROADCASTER_CACHE;
+import static org.atmosphere.cpr.ApplicationConfig.BROADCASTER_CACHE_STRATEGY;
 import static org.atmosphere.cpr.ApplicationConfig.BROADCASTER_CLASS;
 import static org.atmosphere.cpr.ApplicationConfig.BROADCASTER_FACTORY;
 import static org.atmosphere.cpr.ApplicationConfig.BROADCASTER_LIFECYCLE_POLICY;
@@ -107,7 +112,6 @@ import static org.atmosphere.cpr.ApplicationConfig.SUPPORT_TRACKABLE;
 import static org.atmosphere.cpr.ApplicationConfig.WEBSOCKET_PROTOCOL;
 import static org.atmosphere.cpr.ApplicationConfig.WEBSOCKET_SUPPORT;
 import static org.atmosphere.cpr.ApplicationConfig.ALLOW_QUERYSTRING_AS_REQUEST;
-import static org.atmosphere.cpr.FrameworkConfig.ATMOSPHERE_HANDLER;
 import static org.atmosphere.cpr.FrameworkConfig.JERSEY_BROADCASTER;
 import static org.atmosphere.cpr.FrameworkConfig.JERSEY_CONTAINER;
 import static org.atmosphere.cpr.FrameworkConfig.JGROUPS_BROADCASTER;
@@ -235,11 +239,16 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
 
         public final AtmosphereHandler atmosphereHandler;
         public Broadcaster broadcaster;
+        public String mapping;
 
         public AtmosphereHandlerWrapper(AtmosphereHandler atmosphereHandler, String mapping) {
             this.atmosphereHandler = atmosphereHandler;
             try {
-                broadcaster = BroadcasterFactory.getDefault().get(mapping);
+                if (BroadcasterFactory.getDefault() != null) {
+                    this.broadcaster = BroadcasterFactory.getDefault().get(mapping);
+                } else {
+                    this.mapping = mapping;
+                }
             } catch (Exception t) {
                 throw new RuntimeException(t);
             }
@@ -411,11 +420,11 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
 
     private void addMapping(String path, AtmosphereHandlerWrapper w) {
         // We are using JAXRS mapping algorithm.
+
         if (path.contains("*")) {
             path = path.replace("*", "[/a-zA-Z0-9-&=;\\?]+");
         }
         atmosphereHandlers.put(path, w);
-
     }
 
     /**
@@ -569,7 +578,12 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
         if (s != null) {
             ClassLoader cl = Thread.currentThread().getContextClassLoader();
             try {
-                addAtmosphereHandler("/*", (AtmosphereHandler<?, ?>) cl.loadClass(s).newInstance());
+
+                String mapping = sc.getInitParameter(ATMOSPHERE_HANDLER_MAPPING);
+                if (mapping == null) {
+                    mapping = "/*";
+                }
+                addAtmosphereHandler(mapping, (AtmosphereHandler<?, ?>) cl.loadClass(s).newInstance());
             } catch (Exception ex) {
                 logger.warn("Unable to load WebSocketHandle instance", ex);
             }
@@ -588,13 +602,15 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
                     (Class<? extends Broadcaster>) Thread.currentThread().getContextClassLoader()
                             .loadClass(broadcasterClassName);
 
-            logger.info("Using BroadcasterFactory class: {}", broadcasterFactoryClassName);
+            logger.info("Using BroadcasterFactory class: {}", DefaultBroadcasterFactory.class.getName());
 
             broadcasterFactory = new DefaultBroadcasterFactory(bc, broadcasterLifeCyclePolicy, config);
         }
 
         // http://java.net/jira/browse/ATMOSPHERE-157
-        sc.setAttribute(BroadcasterFactory.class.getName(), broadcasterFactory);
+        if (sc != null) {
+            sc.setAttribute(BroadcasterFactory.class.getName(), broadcasterFactory);
+        }
 
         config.broadcasterFactory = broadcasterFactory;
         BroadcasterFactory.setBroadcasterFactory(broadcasterFactory, config);
@@ -609,7 +625,7 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
             BroadcasterConfig broadcasterConfig = new BroadcasterConfig(broadcasterFilters, config);
 
             if (w.broadcaster == null) {
-                w.broadcaster = broadcasterFactory.get();
+                w.broadcaster = broadcasterFactory.get(w.mapping);
             } else {
                 w.broadcaster.setBroadcasterConfig(broadcasterConfig);
                 if (broadcasterCacheClassName != null) {
@@ -740,6 +756,7 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
             }
             useStreamForFlushingComments = true;
         } catch (Throwable t) {
+            logger.trace("", t);
             return false;
         }
 
@@ -760,6 +777,10 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
         }
         Class<? extends Broadcaster> bc = (Class<? extends Broadcaster>) cl.loadClass(broadcasterClassName);
 
+        broadcasterFactory.destroy();
+        logger.info("Using BroadcasterFactory class: {}", DefaultBroadcasterFactory.class.getName());
+
+        broadcasterFactory = new DefaultBroadcasterFactory(bc, broadcasterLifeCyclePolicy, config);
         Broadcaster b = BroadcasterFactory.getDefault().get(bc, mapping);
 
         addAtmosphereHandler(mapping, rsp, b);
@@ -791,11 +812,26 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
      */
     void initAtmosphereHandler(ServletConfig sc) throws ServletException {
         AtmosphereHandler a;
+        AtmosphereHandlerWrapper w;
         for (Entry<String, AtmosphereHandlerWrapper> h : atmosphereHandlers.entrySet()) {
-            a = h.getValue().atmosphereHandler;
+            w = h.getValue();
+            a = w.atmosphereHandler;
             if (a instanceof AtmosphereServletProcessor) {
                 ((AtmosphereServletProcessor) a).init(sc);
             }
+        }
+
+        if (atmosphereHandlers.size() == 0 && !webSocketProtocolClassName.equalsIgnoreCase(SimpleHttpProtocol.class.getName())) {
+            logger.debug("Adding a void AtmosphereHandler mapped to /* to allow WebSocket application only");
+            addAtmosphereHandler("/*", new AbstractReflectorAtmosphereHandler() {
+                @Override
+                public void onRequest(AtmosphereResource<HttpServletRequest, HttpServletResponse> httpServletRequestHttpServletResponseAtmosphereResource) throws IOException {
+                }
+
+                @Override
+                public void destroy() {
+                }
+            });
         }
     }
 
@@ -852,8 +888,6 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
 
                 logger.info("Installed AtmosphereHandler {} mapped to context-path: {}", handler, handlerPath);
 
-                AtmosphereHandlerWrapper wrapper = new AtmosphereHandlerWrapper(handler, handlerPath);
-                addMapping(handlerPath, wrapper);
                 boolean isJersey = false;
                 for (Property p : reader.getProperty(handlerPath)) {
                     if (p.value != null && p.value.indexOf("jersey") != -1) {
@@ -876,6 +910,7 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
                 }
 
                 String broadcasterClass = reader.getBroadcasterClass(handlerPath);
+                Broadcaster b;
                 /**
                  * If there is more than one AtmosphereHandler defined, their Broadcaster
                  * may clash each other with the BroadcasterFactory. In that case we will use the
@@ -885,8 +920,14 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
                     broadcasterClassName = broadcasterClass;
                     ClassLoader cl = Thread.currentThread().getContextClassLoader();
                     Class<? extends Broadcaster> bc = (Class<? extends Broadcaster>) cl.loadClass(broadcasterClassName);
-                    wrapper.broadcaster = BroadcasterFactory.getDefault().get(bc, handlerPath);
+                    broadcasterFactory = new DefaultBroadcasterFactory(bc, broadcasterLifeCyclePolicy, config);
+                    BroadcasterFactory.setBroadcasterFactory(broadcasterFactory, config);
                 }
+
+                b = BroadcasterFactory.getDefault().get(handlerPath);
+
+                AtmosphereHandlerWrapper wrapper = new AtmosphereHandlerWrapper(handler, b);
+                addMapping(handlerPath, wrapper);
 
                 String bc = reader.getBroadcasterCache(handlerPath);
                 if (bc != null) {
@@ -1140,14 +1181,14 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
 
         try {
             if (config.getInitParameter(ALLOW_QUERYSTRING_AS_REQUEST) != null
-                    && isIECandidate(req)
+                    && (isIECandidate(req) || req.getParameter(HeaderConfig.JSONP_CALLBACK_NAME) != null)
                     && req.getAttribute(WebSocket.WEBSOCKET_SUSPEND) == null) {
 
                 Map<String, String> headers = configureQueryStringAsRequest(req);
                 String body = headers.remove(ATMOSPHERE_POST_BODY);
                 return cometSupport.service(new AtmosphereRequest.Builder()
                         .headers(headers)
-                        .method(body != null ? "POST" : "GET")
+                        .method(body != null && req.getMethod().equalsIgnoreCase("GET") ? "POST" : req.getMethod())
                         .body(body)
                         .request(req).build(), res);
             } else {
@@ -1425,7 +1466,7 @@ public class AtmosphereServlet extends AbstractAsyncServlet implements CometProc
      * @return a {@link org.eclipse.jetty.websocket.WebSocket}}
      */
     public org.eclipse.jetty.websocket.WebSocket doWebSocketConnect(final HttpServletRequest request, final String protocol) {
-        logger.info("WebSocket upgrade requested");
+        logger.debug("WebSocket upgrade requested");
         request.setAttribute(WebSocket.WEBSOCKET_INITIATED, true);
         return new JettyWebSocketHandler(request, this, webSocketProtocolClassName);
     }

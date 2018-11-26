@@ -26,15 +26,20 @@ import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousCloseException;
 import java.nio.channels.ServerSocketChannel;
 import java.util.*;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Lists;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,7 +72,8 @@ public final class MessagingService implements MessagingServiceMBean
     public static final int VERSION_07 = 1;
     public static final int VERSION_080 = 2;
     public static final int VERSION_10 = 3;
-    public static final int version_ = VERSION_10;
+    public static final int VERSION_11 = 4;
+    public static final int version_ = VERSION_11;
 
     static SerializerType serializerType_ = SerializerType.BINARY;
 
@@ -80,8 +86,20 @@ public final class MessagingService implements MessagingServiceMBean
     /* Lookup table for registering message handlers based on the verb. */
     private final Map<StorageService.Verb, IVerbHandler> verbHandlers_;
 
-    /* Thread pool to handle messaging write activities */
-    private final DebuggableThreadPoolExecutor streamExecutor_;
+    /** One executor per destination InetAddress for streaming.
+     *
+     * See CASSANDRA-3494 for the background. We have streaming in place so we do not want to limit ourselves to
+     * one stream at a time for throttling reasons. But, we also do not want to just arbitrarily stream an unlimited
+     * amount of files at once because a single destination might have hundreds of files pending and it would cause a
+     * seek storm. So, transfer exactly one file per destination host. That puts a very natural rate limit on it, in
+     * addition to mapping well to the expected behavior in many cases.
+     *
+     * We will create our stream executors with a core size of 0 so that they time out and do not consume threads. This
+     * means the overhead in the degenerate case of having streamed to everyone in the ring over time as a ring changes,
+     * is not going to be a thread per node - but rather an instance per node. That's totally fine.
+     */
+    private final ConcurrentMap<InetAddress, DebuggableThreadPoolExecutor> streamExecutors = new NonBlockingHashMap<InetAddress, DebuggableThreadPoolExecutor>();
+    private final AtomicInteger activeStreamsOutbound = new AtomicInteger(0);
 
     private final NonBlockingHashMap<InetAddress, OutboundTcpConnectionPool> connectionManagers_ = new NonBlockingHashMap<InetAddress, OutboundTcpConnectionPool>();
 
@@ -136,7 +154,6 @@ public final class MessagingService implements MessagingServiceMBean
 
         listenGate = new SimpleCondition();
         verbHandlers_ = new EnumMap<StorageService.Verb, IVerbHandler>(StorageService.Verb.class);
-        streamExecutor_ = new DebuggableThreadPoolExecutor("Streaming", Thread.MIN_PRIORITY);
         Runnable logDropped = new Runnable()
         {
             public void run()
@@ -321,8 +338,14 @@ public final class MessagingService implements MessagingServiceMBean
         return verbHandlers_.get(type);
     }
 
-    private void addCallback(IMessageCallback cb, String messageId, Message message, InetAddress to, long timeout)
+    public String addCallback(IMessageCallback cb, Message message, InetAddress to)
     {
+        return addCallback(cb, message, to, DEFAULT_CALLBACK_TIMEOUT);
+    }
+    
+    public String addCallback(IMessageCallback cb, Message message, InetAddress to, long timeout)
+    {
+        String messageId = nextId();
         CallbackInfo previous;
 
         // If HH is enabled and this is a mutation message => store the message to track for potential hints.
@@ -332,6 +355,7 @@ public final class MessagingService implements MessagingServiceMBean
             previous = callbacks.put(messageId, new CallbackInfo(to, cb), timeout);
 
         assert previous == null;
+        return messageId;
     }
 
     private static AtomicInteger idGen = new AtomicInteger(0);
@@ -364,8 +388,7 @@ public final class MessagingService implements MessagingServiceMBean
      */
     public String sendRR(Message message, InetAddress to, IMessageCallback cb, long timeout)
     {
-        String id = nextId();
-        addCallback(cb, id, message, to, timeout);
+        String id = addCallback(cb, message, to, timeout);
         sendOneWay(message, id, to);
         return id;
     }
@@ -406,7 +429,7 @@ public final class MessagingService implements MessagingServiceMBean
      * @param message messages to be sent.
      * @param to endpoint to which the message needs to be sent
      */
-    private void sendOneWay(Message message, String id, InetAddress to)
+    public void sendOneWay(Message message, String id, InetAddress to)
     {
         if (logger_.isTraceEnabled())
             logger_.trace(FBUtilities.getBroadcastAddress() + " sending " + message.getVerb() + " to " + id + "@" + to);
@@ -448,14 +471,41 @@ public final class MessagingService implements MessagingServiceMBean
 
     public void stream(StreamHeader header, InetAddress to)
     {
-        /* Streaming asynchronously on streamExector_ threads. */
-        streamExecutor_.execute(new FileStreamTask(header, to));
+        DebuggableThreadPoolExecutor executor = streamExecutors.get(to);
+        if (executor == null)
+        {
+            // Using a core pool size of 0 is important. See documentation of streamExecutors.
+            executor = new DebuggableThreadPoolExecutor(0,
+                                                        1,
+                                                        1,
+                                                        TimeUnit.SECONDS,
+                                                        new LinkedBlockingQueue<Runnable>(),
+                                                        new NamedThreadFactory("Streaming to " + to));
+            DebuggableThreadPoolExecutor old = streamExecutors.putIfAbsent(to, executor);
+            if (old != null)
+            {
+                executor.shutdown();
+                executor = old;
+            }
+        }
+
+        executor.execute(new FileStreamTask(header, to));
+    }
+
+    public void incrementActiveStreamsOutbound()
+    {
+        activeStreamsOutbound.incrementAndGet();
+    }
+
+    public void decrementActiveStreamsOutbound()
+    {
+        activeStreamsOutbound.decrementAndGet();
     }
 
     /** The count of active outbound stream tasks. */
     public int getActiveStreamsOutbound()
     {
-        return streamExecutor_.getActiveCount();
+        return activeStreamsOutbound.get();
     }
 
     public void register(ILatencySubscriber subcriber)
@@ -463,15 +513,23 @@ public final class MessagingService implements MessagingServiceMBean
         subscribers.add(subcriber);
     }
 
-    public void waitForStreaming() throws InterruptedException
-    {
-        streamExecutor_.shutdown();
-        streamExecutor_.awaitTermination(24, TimeUnit.HOURS);
-    }
-
     public void clearCallbacksUnsafe()
     {
         callbacks.clear();
+    }
+
+    public void waitForStreaming() throws InterruptedException
+    {
+        // this does not prevent new streams from beginning after a drain begins, but since streams are only
+        // started in response to explicit operator action (bootstrap/move/repair/etc) that feels like a feature.
+        for (DebuggableThreadPoolExecutor e : streamExecutors.values())
+            e.shutdown();
+
+        for (DebuggableThreadPoolExecutor e : streamExecutors.values())
+        {
+            if (e.awaitTermination(24, TimeUnit.HOURS))
+                logger_.error("Stream took more than 24H to complete; skipping");
+        }
     }
 
     /**
@@ -652,6 +710,14 @@ public final class MessagingService implements MessagingServiceMBean
         for (Map.Entry<InetAddress, OutboundTcpConnectionPool> entry : connectionManagers_.entrySet())
             completedTasks.put(entry.getKey().getHostAddress(), entry.getValue().cmdCon.getCompletedMesssages());
         return completedTasks;
+    }
+
+    public Map<String, Long> getCommandDroppedTasks()
+    {
+        Map<String, Long> droppedTasks = new HashMap<String, Long>();
+        for (Map.Entry<InetAddress, OutboundTcpConnectionPool> entry : connectionManagers_.entrySet())
+            droppedTasks.put(entry.getKey().getHostAddress(), entry.getValue().cmdCon.getDroppedMessages());
+        return droppedTasks;
     }
 
     public Map<String, Integer> getResponsePendingTasks()

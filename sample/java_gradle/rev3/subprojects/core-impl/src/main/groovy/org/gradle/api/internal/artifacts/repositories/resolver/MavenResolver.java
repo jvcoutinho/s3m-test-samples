@@ -249,7 +249,6 @@ public class MavenResolver extends ExternalResourceResolver implements PatternBa
     }
 
     public Set<ModuleVersionArtifactMetaData> getTypedArtifacts(ModuleVersionMetaData module, Class<? extends SoftwareArtifact> artifactType) {
-
         if (artifactType == ComponentMetaDataArtifact.class) {
             Artifact pomArtifact = DefaultArtifact.newPomArtifact(IvyUtil.createModuleRevisionId(module.getId()), new Date());
             return ImmutableSet.of(module.artifact(pomArtifact));

@@ -59,7 +59,6 @@ public abstract class MessageInput {
     private Map<String, String> staticFields = Maps.newConcurrentMap();
 
     public void initialize(Configuration configuration) {
-        this.configuration = configuration;
     }
 
     public abstract void checkConfiguration(Configuration configuration) throws ConfigurationException;
@@ -125,6 +124,10 @@ public abstract class MessageInput {
         return configuration;
     }
 
+    public void setConfiguration(Configuration configuration) {
+        this.configuration = configuration;
+    }
+
     public Boolean getGlobal() {
         return global;
     }
@@ -174,7 +177,7 @@ public abstract class MessageInput {
         inputMap.put("name", this.getName());
         inputMap.put("title", this.getTitle());
         inputMap.put("creator_user_id", this.getCreatorUserId());
-        inputMap.put("started_at", Tools.getISO8601String(this.getCreatedAt()));
+        inputMap.put("created_at", Tools.getISO8601String(this.getCreatedAt()));
         inputMap.put("attributes", this.getAttributesWithMaskedPasswords());
         inputMap.put("static_fields", this.getStaticFields());
         inputMap.put("global", this.getGlobal());

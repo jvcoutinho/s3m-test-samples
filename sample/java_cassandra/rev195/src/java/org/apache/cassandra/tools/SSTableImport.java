@@ -37,15 +37,16 @@ import org.apache.commons.cli.PosixParser;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.composites.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BytesType;
-import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.dht.IPartitioner;
 import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonParser;
@@ -107,12 +108,12 @@ public class SSTableImport
         {
             if (json instanceof List)
             {
-                AbstractType<?> comparator = oldSCFormat ? SuperColumns.getComparatorFor(meta, isSubColumn) : meta.comparator;
+                CellNameType comparator = oldSCFormat ? new SimpleDenseCellNameType(SuperColumns.getComparatorFor(meta, isSubColumn)) : meta.comparator;
                 List fields = (List<?>) json;
 
-                assert fields.size() >= 3 : "Column definition should have at least 3";
+                assert fields.size() >= 3 : "Cell definition should have at least 3";
 
-                name  = stringAsType((String) fields.get(0), comparator);
+                name  = stringAsType((String) fields.get(0), comparator.asAbstractType());
                 timestamp = (Long) fields.get(2);
                 kind = "";
 
@@ -157,11 +158,11 @@ public class SSTableImport
                 }
                 else if (isRangeTombstone())
                 {
-                    value = comparator.fromString((String)fields.get(1));
+                    value = stringAsType((String) fields.get(1), comparator.asAbstractType());
                 }
                 else
                 {
-                    value = stringAsType((String) fields.get(1), meta.getValueValidator(meta.getColumnDefinitionFromColumnName(name)));
+                    value = stringAsType((String) fields.get(1), meta.getValueValidatorForFullCellName(name));
                 }
             }
         }
@@ -239,15 +240,29 @@ public class SSTableImport
         for (Object c : row)
         {
             JsonColumn col = new JsonColumn<List>((List) c, cfm, oldSCFormat, (superName != null));
-            ByteBuffer cname = superName == null ? col.getName() : CompositeType.build(superName, col.getName());
+            if (col.isRangeTombstone())
+            {
+                Composite start = superName == null
+                                ? cfm.comparator.fromByteBuffer(col.getName())
+                                : cfm.comparator.make(superName, col.getName());
+                Composite end = superName == null
+                              ? cfm.comparator.fromByteBuffer(col.getValue())
+                              : cfm.comparator.make(superName, col.getValue());
+                cfamily.addAtom(new RangeTombstone(start, end, col.timestamp, col.localExpirationTime));
+                continue;
+            }
+
+            CellName cname = superName == null
+                           ? cfm.comparator.cellFromByteBuffer(col.getName())
+                           : cfm.comparator.makeCellName(superName, col.getName());
 
             if (col.isExpiring())
             {
-                cfamily.addColumn(new ExpiringColumn(cname, col.getValue(), col.timestamp, col.ttl, col.localExpirationTime));
+                cfamily.addColumn(new ExpiringCell(cname, col.getValue(), col.timestamp, col.ttl, col.localExpirationTime));
             }
             else if (col.isCounter())
             {
-                cfamily.addColumn(new CounterColumn(cname, col.getValue(), col.timestamp, col.timestampOfLastDelete));
+                cfamily.addColumn(new CounterCell(cname, col.getValue(), col.timestamp, col.timestampOfLastDelete));
             }
             else if (col.isDeleted())
             {
@@ -255,13 +270,15 @@ public class SSTableImport
             }
             else if (col.isRangeTombstone())
             {
-                ByteBuffer end = superName == null ? col.getValue() : CompositeType.build(superName, col.getValue());
+                CellName end = superName == null
+                             ? cfm.comparator.cellFromByteBuffer(col.getValue())
+                             : cfm.comparator.makeCellName(superName, col.getValue());
                 cfamily.addAtom(new RangeTombstone(cname, end, col.timestamp, col.localExpirationTime));
             }
             // cql3 row marker, see CASSANDRA-5852
-            else if (!cname.hasRemaining())
+            else if (cname.isEmpty())
             {
-                cfamily.addColumn(ByteBuffer.wrap(new byte[3]), col.getValue(), col.timestamp);
+                cfamily.addColumn(cfm.comparator.rowMarker(Composites.EMPTY), col.getValue(), col.timestamp);
             }
             else
             {
@@ -298,14 +315,14 @@ public class SSTableImport
         CFMetaData metaData = cfamily.metadata();
         assert metaData != null;
 
-        AbstractType<?> comparator = metaData.comparator;
+        CellNameType comparator = metaData.comparator;
 
         // Super columns
         for (Map.Entry<?, ?> entry : row.entrySet())
         {
             Map<?, ?> data = (Map<?, ?>) entry.getValue();
 
-            ByteBuffer superName = stringAsType((String) entry.getKey(), ((CompositeType)comparator).types.get(0));
+            ByteBuffer superName = stringAsType((String) entry.getKey(), comparator.subtype(0));
 
             addColumnsToCF((List<?>) data.get("subColumns"), superName, cfamily);
 
@@ -328,7 +345,7 @@ public class SSTableImport
      */
     public int importJson(String jsonFile, String keyspace, String cf, String ssTablePath) throws IOException
     {
-        ColumnFamily columnFamily = TreeMapBackedSortedColumns.factory.create(keyspace, cf);
+        ColumnFamily columnFamily = ArrayBackedSortedColumns.factory.create(keyspace, cf);
         IPartitioner<?> partitioner = DatabaseDescriptor.getPartitioner();
 
         int importedKeys = (isSorted) ? importSorted(jsonFile, columnFamily, ssTablePath, partitioner)
@@ -350,7 +367,7 @@ public class SSTableImport
         Object[] data = parser.readValueAs(new TypeReference<Object[]>(){});
 
         keyCountToImport = (keyCountToImport == null) ? data.length : keyCountToImport;
-        SSTableWriter writer = new SSTableWriter(ssTablePath, keyCountToImport);
+        SSTableWriter writer = new SSTableWriter(ssTablePath, keyCountToImport, ActiveRepairService.UNREPAIRED_SSTABLE);
 
         System.out.printf("Importing %s keys...%n", keyCountToImport);
 
@@ -426,7 +443,7 @@ public class SSTableImport
         System.out.printf("Importing %s keys...%n", keyCountToImport);
 
         parser = getParser(jsonFile); // renewing parser
-        SSTableWriter writer = new SSTableWriter(ssTablePath, keyCountToImport);
+        SSTableWriter writer = new SSTableWriter(ssTablePath, keyCountToImport, ActiveRepairService.UNREPAIRED_SSTABLE);
 
         int lineNumber = 1;
         DecoratedKey prevStoredKey = null;

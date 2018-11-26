@@ -24,6 +24,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.SortedSet;
 
+import com.google.common.collect.AbstractIterator;
+
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
@@ -35,7 +37,7 @@ import org.apache.cassandra.io.util.FileMark;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-public class SSTableNamesIterator extends SimpleAbstractColumnIterator implements ISSTableColumnIterator
+public class SSTableNamesIterator extends AbstractIterator<OnDiskAtom> implements OnDiskAtomIterator
 {
     private ColumnFamily cf;
     private final SSTableReader sstable;
@@ -95,11 +97,6 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
         return fileToClose;
     }
 
-    public SSTableReader getSStable()
-    {
-        return sstable;
-    }
-
     private void read(SSTableReader sstable, FileDataInput file, RowIndexEntry indexEntry)
     throws IOException
     {
@@ -113,30 +110,20 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
             else
                 file.seek(indexEntry.position);
 
-            DecoratedKey keyInDisk = SSTableReader.decodeKey(sstable.partitioner,
-                                                             sstable.descriptor,
-                                                             ByteBufferUtil.readWithShortLength(file));
+            DecoratedKey keyInDisk = sstable.partitioner.decorateKey(ByteBufferUtil.readWithShortLength(file));
             assert keyInDisk.equals(key) : String.format("%s != %s in %s", keyInDisk, key, file.getPath());
-            SSTableReader.readRowSize(file, sstable.descriptor);
+            if (sstable.descriptor.version.hasRowSizeAndColumnCount)
+                file.readLong();
         }
 
-        if (sstable.descriptor.version.hasPromotedIndexes)
-        {
-            indexList = indexEntry.columnsIndex();
-        }
-        else
-        {
-            assert file != null;
-            IndexHelper.skipBloomFilter(file);
-            indexList = IndexHelper.deserializeIndex(file);
-        }
+        indexList = indexEntry.columnsIndex();
 
         if (!indexEntry.isIndexed())
         {
             ColumnFamilySerializer serializer = ColumnFamily.serializer;
             try
             {
-                cf = ColumnFamily.create(sstable.metadata);
+                cf = ArrayBackedSortedColumns.factory.create(sstable.metadata);
                 cf.delete(DeletionTime.serializer.deserialize(file));
             }
             catch (Exception e)
@@ -146,66 +133,45 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
         }
         else
         {
-            cf = ColumnFamily.create(sstable.metadata);
+            cf = ArrayBackedSortedColumns.factory.create(sstable.metadata);
             cf.delete(indexEntry.deletionTime());
         }
 
         List<OnDiskAtom> result = new ArrayList<OnDiskAtom>();
         if (indexList.isEmpty())
         {
-            readSimpleColumns(sstable.metadata, file, columns, result);
+            int columnCount = sstable.descriptor.version.hasRowSizeAndColumnCount ? file.readInt() : Integer.MAX_VALUE;
+            readSimpleColumns(file, columns, result, columnCount);
         }
         else
         {
-            long basePosition;
-            if (sstable.descriptor.version.hasPromotedIndexes)
-            {
-                basePosition = indexEntry.position;
-            }
-            else
-            {
-                assert file != null;
-                file.readInt(); // column count
-                basePosition = file.getFilePointer();
-            }
-            readIndexedColumns(sstable.metadata, file, columns, indexList, basePosition, result);
+            readIndexedColumns(sstable.metadata, file, columns, indexList, indexEntry.position, result);
         }
 
         // create an iterator view of the columns we read
         iter = result.iterator();
     }
 
-    private void readSimpleColumns(CFMetaData metadata,
-                                   FileDataInput file,
-                                   SortedSet<ByteBuffer> columnNames,
-                                   List<OnDiskAtom> result)
-    throws IOException
+    private void readSimpleColumns(FileDataInput file, SortedSet<ByteBuffer> columnNames, List<OnDiskAtom> result, int columnCount)
     {
-        AbstractType<?> comparator = metadata.comparator;
-        OnDiskAtom.Serializer atomSerializer = cf.getOnDiskSerializer();
-        ByteBuffer maximalColumnName = columnNames.last();
-        int count = file.readInt();
-
-        for (int i = 0; i < count; i++)
+        Iterator<OnDiskAtom> atomIterator = cf.metadata().getOnDiskIterator(file, columnCount, sstable.descriptor.version);
+        int n = 0;
+        while (atomIterator.hasNext())
         {
-            OnDiskAtom column = atomSerializer.deserializeFromSSTable(file, sstable.descriptor.version);
-            ByteBuffer columnName = column.name();
-
-            if (column instanceof IColumn)
+            OnDiskAtom column = atomIterator.next();
+            if (column instanceof Column)
             {
-                if (columnNames.contains(columnName))
+                if (columnNames.contains(column.name()))
                 {
                     result.add(column);
+                    if (++n >= columns.size())
+                        break;
                 }
             }
             else
             {
                 result.add(column);
             }
-
-            // Already consumed all of this block that's going to have columns that apply to this query.
-            if (comparator.compare(columnName, maximalColumnName) >= 0)
-                break;
         }
     }
 
@@ -241,33 +207,21 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
         {
             long positionToSeek = basePosition + indexInfo.offset;
 
-            // SortedSet.subSet() is end-exclusive, so we special-case that
-            // if it's one of the columns we're looking for
-            ByteBuffer maximalColumnName = columnNames.contains(indexInfo.lastName)
-                                         ? indexInfo.lastName
-                                         : columnNames.subSet(indexInfo.firstName, indexInfo.lastName).last();
-
             // With new promoted indexes, our first seek in the data file will happen at that point.
             if (file == null)
                 file = createFileDataInput(positionToSeek);
 
-            OnDiskAtom.Serializer atomSerializer = cf.getOnDiskSerializer();
+            // We'll read as much atom as there is in the index block, so provide a bogus atom count
+            Iterator<OnDiskAtom> atomIterator = cf.metadata().getOnDiskIterator(file, Integer.MAX_VALUE, sstable.descriptor.version);
             file.seek(positionToSeek);
             FileMark mark = file.mark();
-
             // TODO only completely deserialize columns we are interested in
             while (file.bytesPastMark(mark) < indexInfo.width)
             {
-                OnDiskAtom column = atomSerializer.deserializeFromSSTable(file, sstable.descriptor.version);
-                ByteBuffer columnName = column.name();
-
+                OnDiskAtom column = atomIterator.next();
                 // we check vs the original Set, not the filtered List, for efficiency
-                if (!(column instanceof IColumn) || columnNames.contains(columnName))
+                if (!(column instanceof Column) || columnNames.contains(column.name()))
                     result.add(column);
-
-                // Already consumed all of this block that's going to have columns that apply to this query.
-                if (comparator.compare(columnName, maximalColumnName) >= 0)
-                    break;
             }
         }
     }
@@ -288,4 +242,6 @@ public class SSTableNamesIterator extends SimpleAbstractColumnIterator implement
             return endOfData();
         return iter.next();
     }
+
+    public void close() throws IOException { }
 }

@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -18,10 +18,13 @@
  */
 package org.apache.cassandra.utils;
 
-import java.io.DataInput;
-import java.io.DataOutput;
-import java.io.IOException;
-import java.io.InputStream;
+/*
+ * BE ADVISED: New imports added here might introduce new dependencies for
+ * the clientutil jar.  If in doubt, run the `ant test-clientutil-jar' target
+ * afterward, and ensure the tests still pass.
+ */
+
+import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
@@ -32,41 +35,39 @@ import static com.google.common.base.Charsets.UTF_8;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileUtils;
 
-import org.apache.commons.lang.ArrayUtils;
-
 /**
  * Utility methods to make ByteBuffers less painful
- * The following should illustrate the different ways byte buffers can be used 
- * 
+ * The following should illustrate the different ways byte buffers can be used
+ *
  *        public void testArrayOffet()
  *        {
- *                
+ *
  *            byte[] b = "test_slice_array".getBytes();
  *            ByteBuffer bb = ByteBuffer.allocate(1024);
- *    
+ *
  *            assert bb.position() == 0;
  *            assert bb.limit()    == 1024;
  *            assert bb.capacity() == 1024;
- *    
+ *
  *            bb.put(b);
- *            
+ *
  *            assert bb.position()  == b.length;
  *            assert bb.remaining() == bb.limit() - bb.position();
- *            
+ *
  *            ByteBuffer bb2 = bb.slice();
- *            
+ *
  *            assert bb2.position()    == 0;
- *            
+ *
  *            //slice should begin at other buffers current position
  *            assert bb2.arrayOffset() == bb.position();
- *            
- *            //to match the position in the underlying array one needs to 
+ *
+ *            //to match the position in the underlying array one needs to
  *            //track arrayOffset
  *            assert bb2.limit()+bb2.arrayOffset() == bb.limit();
- *            
- *           
+ *
+ *
  *            assert bb2.remaining() == bb.remaining();
- *                             
+ *
  *        }
  *
  * }
@@ -74,31 +75,33 @@ import org.apache.commons.lang.ArrayUtils;
  */
 public class ByteBufferUtil
 {
-    public static final ByteBuffer EMPTY_BYTE_BUFFER = ByteBuffer.wrap(ArrayUtils.EMPTY_BYTE_ARRAY);
+    public static final ByteBuffer EMPTY_BYTE_BUFFER = ByteBuffer.wrap(new byte[0]);
 
     public static int compareUnsigned(ByteBuffer o1, ByteBuffer o2)
     {
         assert o1 != null;
         assert o2 != null;
+        if (o1 == o2)
+            return 0;
 
         if (o1.hasArray() && o2.hasArray())
-        {         
+        {
             return FBUtilities.compareUnsigned(o1.array(), o2.array(), o1.position() + o1.arrayOffset(),
                     o2.position() + o2.arrayOffset(), o1.remaining(), o2.remaining());
         }
-        
-        int minLength = Math.min(o1.remaining(), o2.remaining());
-        for (int x = 0, i = o1.position(), j = o2.position(); x < minLength; x++, i++, j++)
-        {
-            if (o1.get(i) == o2.get(j))
-                continue;
-            // compare non-equal bytes as unsigned
-            return (o1.get(i) & 0xFF) < (o2.get(j) & 0xFF) ? -1 : 1;
-        }
 
-        return (o1.remaining() == o2.remaining()) ? 0 : ((o1.remaining() < o2.remaining()) ? -1 : 1);
+        int end1 = o1.position() + o1.remaining();
+        int end2 = o2.position() + o2.remaining();
+        for (int i = o1.position(), j = o2.position(); i < end1 && j < end2; i++, j++)
+        {
+            int a = (o1.get(i) & 0xff);
+            int b = (o2.get(j) & 0xff);
+            if (a != b)
+                return a - b;
+        }
+        return o1.remaining() - o2.remaining();
     }
-    
+
     public static int compare(byte[] o1, ByteBuffer o2)
     {
         return compareUnsigned(ByteBuffer.wrap(o1), o2);
@@ -248,10 +251,10 @@ public class ByteBufferUtil
     public static ByteBuffer clone(ByteBuffer buffer)
     {
         assert buffer != null;
-        
+
         if (buffer.remaining() == 0)
             return EMPTY_BYTE_BUFFER;
-          
+
         ByteBuffer clone = ByteBuffer.allocate(buffer.remaining());
 
         if (buffer.hasArray())
@@ -310,6 +313,12 @@ public class ByteBufferUtil
     {
         out.writeInt(bytes.remaining());
         write(bytes, out); // writing data bytes to output source
+    }
+
+    public static void writeWithLength(byte[] bytes, DataOutput out) throws IOException
+    {
+        out.writeInt(bytes.length);
+        out.write(bytes);
     }
 
     public static void write(ByteBuffer buffer, DataOutput out) throws IOException
@@ -404,7 +413,7 @@ public class ByteBufferUtil
     {
         return bytes.getInt(bytes.position());
     }
-    
+
     public static long toLong(ByteBuffer bytes)
     {
         return bytes.getLong(bytes.position());

@@ -131,7 +131,7 @@ public class LeveledManifest
         assert !Iterables.isEmpty(removed); // use add() instead of promote when adding new sstables
         logDistribution();
         if (logger.isDebugEnabled())
-            logger.debug("Replacing [" + toString(removed) + "]");
+            logger.debug("Replacing [{}]", toString(removed));
 
         // the level for the added sstables is the max of the removed ones,
         // plus one if the removed were all on the same level
@@ -460,7 +460,7 @@ public class LeveledManifest
             }
             // check overlap with L0 compacting sstables to make sure we are not generating overlap in L1.
             Iterable<SSTableReader> compactingL0 = Iterables.filter(generations[0], Predicates.in(compacting));
-            if (candidates.size() < 2 || !Sets.intersection(candidates, compacting).isEmpty() || !overlapping(candidates, compactingL0).isEmpty())
+            if (candidates.size() < 2 || !overlapping(candidates, compactingL0).isEmpty())
                 return Collections.emptyList();
             else
                 return candidates;

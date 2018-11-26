@@ -18,7 +18,6 @@
 package org.apache.cassandra.db.index;
 
 import java.nio.ByteBuffer;
-import java.util.concurrent.ExecutionException;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
@@ -34,18 +33,23 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public abstract class AbstractSimplePerColumnSecondaryIndex extends PerColumnSecondaryIndex
 {
-    private ColumnFamilyStore indexCfs;
+    protected ColumnFamilyStore indexCfs;
+
+    // SecondaryIndex "forces" a set of ColumnDefinition. However this class (and thus it's subclass)
+    // only support one def per index. So inline it in a field for 1) convenience and 2) avoid creating
+    // an iterator each time we need to access it.
+    // TODO: we should fix SecondaryIndex API
+    protected ColumnDefinition columnDef;
 
     public void init()
     {
         assert baseCfs != null && columnDefs != null && columnDefs.size() == 1;
 
-        ColumnDefinition columnDef = columnDefs.iterator().next();
-        init(columnDef);
+        columnDef = columnDefs.iterator().next();
 
         AbstractType indexComparator = SecondaryIndex.getIndexComparator(baseCfs.metadata, columnDef);
         CFMetaData indexedCfMetadata = CFMetaData.newIndexMetadata(baseCfs.metadata, columnDef, indexComparator);
-        indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.table,
+        indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.keyspace,
                                                              indexedCfMetadata.cfName,
                                                              new LocalPartitioner(columnDef.getValidator()),
                                                              indexedCfMetadata);
@@ -56,54 +60,53 @@ public abstract class AbstractSimplePerColumnSecondaryIndex extends PerColumnSec
         {
             /*
              * # of index CF's key = cardinality of indexed column.
-             * if # of keys stored in index CF is more than average column counts (means tall table),
+             * if # of keys stored in index CF is more than average column counts (means tall keyspaceName),
              * then consider it as high cardinality.
              */
             double estimatedKeys = indexCfs.estimateKeys();
             double averageColumnCount = indexCfs.getMeanColumns();
             if (averageColumnCount > 0 && estimatedKeys / averageColumnCount > 1)
             {
-                logger.debug("turning row cache on for " + indexCfs.getColumnFamilyName());
+                logger.debug("turning row cache on for " + indexCfs.name);
                 indexCfs.metadata.caching(baseCaching);
                 indexCfs.initRowCache();
             }
         }
     }
 
-    protected abstract void init(ColumnDefinition columnDef);
+    protected abstract ByteBuffer makeIndexColumnName(ByteBuffer rowKey, Column column);
 
-    protected abstract ByteBuffer makeIndexColumnName(ByteBuffer rowKey, IColumn column);
+    protected abstract ByteBuffer getIndexedValue(ByteBuffer rowKey, Column column);
 
     protected abstract AbstractType getExpressionComparator();
 
     public String expressionString(IndexExpression expr)
     {
         return String.format("'%s.%s %s %s'",
-                             baseCfs.columnFamily,
+                             baseCfs.name,
                              getExpressionComparator().getString(expr.column_name),
                              expr.op,
-                             baseCfs.metadata.getColumn_metadata().get(expr.column_name).getValidator().getString(expr.value));
+                             baseCfs.metadata.getColumnDefinition(expr.column_name).getValidator().getString(expr.value));
     }
 
-
-    public void delete(ByteBuffer rowKey, IColumn column)
+    public void delete(ByteBuffer rowKey, Column column)
     {
-        if (column.isMarkedForDelete())
+        if (column.isMarkedForDelete(System.currentTimeMillis()))
             return;
 
-        DecoratedKey valueKey = getIndexKeyFor(column.value());
+        DecoratedKey valueKey = getIndexKeyFor(getIndexedValue(rowKey, column));
         int localDeletionTime = (int) (System.currentTimeMillis() / 1000);
-        ColumnFamily cfi = ColumnFamily.create(indexCfs.metadata);
+        ColumnFamily cfi = ArrayBackedSortedColumns.factory.create(indexCfs.metadata);
         cfi.addTombstone(makeIndexColumnName(rowKey, column), localDeletionTime, column.timestamp());
         indexCfs.apply(valueKey, cfi, SecondaryIndexManager.nullUpdater);
         if (logger.isDebugEnabled())
             logger.debug("removed index entry for cleaned-up value {}:{}", valueKey, cfi);
     }
 
-    public void insert(ByteBuffer rowKey, IColumn column)
+    public void insert(ByteBuffer rowKey, Column column)
     {
-        DecoratedKey valueKey = getIndexKeyFor(column.value());
-        ColumnFamily cfi = ColumnFamily.create(indexCfs.metadata);
+        DecoratedKey valueKey = getIndexKeyFor(getIndexedValue(rowKey, column));
+        ColumnFamily cfi = ArrayBackedSortedColumns.factory.create(indexCfs.metadata);
         ByteBuffer name = makeIndexColumnName(rowKey, column);
         if (column instanceof ExpiringColumn)
         {
@@ -120,7 +123,7 @@ public abstract class AbstractSimplePerColumnSecondaryIndex extends PerColumnSec
         indexCfs.apply(valueKey, cfi, SecondaryIndexManager.nullUpdater);
     }
 
-    public void update(ByteBuffer rowKey, IColumn col)
+    public void update(ByteBuffer rowKey, Column col)
     {
         insert(rowKey, col);
     }
@@ -132,18 +135,7 @@ public abstract class AbstractSimplePerColumnSecondaryIndex extends PerColumnSec
 
     public void forceBlockingFlush()
     {
-        try
-        {
-            indexCfs.forceBlockingFlush();
-        }
-        catch (ExecutionException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (InterruptedException e)
-        {
-            throw new AssertionError(e);
-        }
+        indexCfs.forceBlockingFlush();
     }
 
     public void invalidate()
@@ -151,7 +143,7 @@ public abstract class AbstractSimplePerColumnSecondaryIndex extends PerColumnSec
         indexCfs.invalidate();
     }
 
-    public void truncate(long truncatedAt)
+    public void truncateBlocking(long truncatedAt)
     {
         indexCfs.discardSSTables(truncatedAt);
     }
@@ -163,7 +155,7 @@ public abstract class AbstractSimplePerColumnSecondaryIndex extends PerColumnSec
 
     public String getIndexName()
     {
-        return indexCfs.columnFamily;
+        return indexCfs.name;
     }
 
     public long getLiveSize()

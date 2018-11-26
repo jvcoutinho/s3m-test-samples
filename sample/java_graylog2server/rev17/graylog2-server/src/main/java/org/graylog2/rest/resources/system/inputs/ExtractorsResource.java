@@ -1,5 +1,5 @@
-/**
- * Copyright 2013 Lennart Koopmann <lennart@torch.sh>
+/*
+ * Copyright 2012-2014 TORCH GmbH
  *
  * This file is part of Graylog2.
  *
@@ -15,17 +15,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with Graylog2.  If not, see <http://www.gnu.org/licenses/>.
- *
  */
+
 package org.graylog2.rest.resources.system.inputs;
 
 import com.beust.jcommander.internal.Lists;
+import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.annotation.Timed;
 import com.google.common.collect.Maps;
 import org.apache.shiro.authz.annotation.RequiresAuthentication;
 import org.graylog2.ConfigurationException;
 import org.graylog2.database.ValidationException;
 import org.graylog2.inputs.Input;
+import org.graylog2.inputs.InputService;
 import org.graylog2.inputs.converters.ConverterFactory;
 import org.graylog2.inputs.extractors.ExtractorFactory;
 import org.graylog2.plugin.inputs.Converter;
@@ -35,10 +37,13 @@ import org.graylog2.rest.documentation.annotations.*;
 import org.graylog2.rest.resources.RestResource;
 import org.graylog2.rest.resources.system.inputs.requests.CreateExtractorRequest;
 import org.graylog2.security.RestPermissions;
+import org.graylog2.shared.inputs.InputRegistry;
 import org.graylog2.system.activities.Activity;
+import org.graylog2.system.activities.ActivityWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.inject.Inject;
 import javax.ws.rs.*;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -55,6 +60,25 @@ import java.util.Map;
 public class ExtractorsResource extends RestResource {
 
     private static final Logger LOG = LoggerFactory.getLogger(ExtractorsResource.class);
+
+    private final InputService inputService;
+    private final ActivityWriter activityWriter;
+    private final InputRegistry inputs;
+    private final MetricRegistry metricRegistry;
+    private final ExtractorFactory extractorFactory;
+
+    @Inject
+    public ExtractorsResource(InputService inputService,
+                              ActivityWriter activityWriter,
+                              InputRegistry inputs,
+                              MetricRegistry metricRegistry,
+                              ExtractorFactory extractorFactory) {
+        this.inputService = inputService;
+        this.activityWriter = activityWriter;
+        this.inputs = inputs;
+        this.metricRegistry = metricRegistry;
+        this.extractorFactory = extractorFactory;
+    }
 
     @POST @Timed
     @Consumes(MediaType.APPLICATION_JSON)
@@ -74,7 +98,7 @@ public class ExtractorsResource extends RestResource {
         }
         checkPermission(RestPermissions.INPUTS_EDIT, inputId);
 
-        MessageInput input = core.inputs().getRunningInput(inputId);
+        MessageInput input = inputs.getRunningInput(inputId);
 
         if (input == null) {
             LOG.error("Input <{}> not found.", inputId);
@@ -98,7 +122,7 @@ public class ExtractorsResource extends RestResource {
         String id = new com.eaio.uuid.UUID().toString();
         Extractor extractor;
         try {
-            extractor = ExtractorFactory.factory(
+            extractor = extractorFactory.factory(
                     id,
                     cer.title,
                     cer.order,
@@ -125,9 +149,9 @@ public class ExtractorsResource extends RestResource {
 
         input.addExtractor(id, extractor);
 
-        Input mongoInput = Input.find(core, input.getPersistId());
+        Input mongoInput = inputService.find(input.getPersistId());
         try {
-            mongoInput.addExtractor(extractor);
+            inputService.addExtractor(mongoInput, extractor);
         } catch (ValidationException e) {
             LOG.error("Extractor persist validation failed.", e);
             throw new WebApplicationException(e, Response.Status.BAD_REQUEST);
@@ -135,7 +159,7 @@ public class ExtractorsResource extends RestResource {
 
         String msg = "Added extractor <" + id + "> of type [" + cer.extractorType + "] to input <" + inputId + ">.";
         LOG.info(msg);
-        core.getActivityWriter().write(new Activity(msg, ExtractorsResource.class));
+        activityWriter.write(new Activity(msg, ExtractorsResource.class));
 
         Map<String, Object> result = Maps.newHashMap();
         result.put("extractor_id", id);
@@ -156,7 +180,7 @@ public class ExtractorsResource extends RestResource {
         }
         checkPermission(RestPermissions.INPUTS_READ, inputId);
 
-        MessageInput input = core.inputs().getRunningInput(inputId);
+        MessageInput input = inputs.getRunningInput(inputId);
 
         if (input == null) {
             LOG.error("Input <{}> not found.", inputId);
@@ -198,7 +222,7 @@ public class ExtractorsResource extends RestResource {
         }
         checkPermission(RestPermissions.INPUTS_EDIT, inputId);
 
-        MessageInput input = core.inputs().getRunningInput(inputId);
+        MessageInput input = inputs.getRunningInput(inputId);
 
         if (input == null) {
             LOG.error("Input <{}> not found.", inputId);
@@ -211,8 +235,8 @@ public class ExtractorsResource extends RestResource {
         }
 
         // Remove from Mongo.
-        Input mongoInput = Input.find(core, input.getPersistId());
-        mongoInput.removeExtractor(extractorId);
+        Input mongoInput = inputService.find(input.getPersistId());
+        inputService.removeExtractor(mongoInput, extractorId);
 
         Extractor extractor = input.getExtractors().get(extractorId);
         input.getExtractors().remove(extractorId);
@@ -220,7 +244,7 @@ public class ExtractorsResource extends RestResource {
         String msg = "Deleted extractor <" + extractorId + "> of type [" + extractor.getType() + "] " +
                 "from input <" + inputId + ">. Reason: REST request.";
         LOG.info(msg);
-        core.getActivityWriter().write(new Activity(msg, InputsResource.class));
+        activityWriter.write(new Activity(msg, InputsResource.class));
 
         return Response.status(Response.Status.NO_CONTENT).build();
     }
@@ -244,8 +268,8 @@ public class ExtractorsResource extends RestResource {
         map.put("converter_exceptions", extractor.getConverterExceptionCount());
 
         Map<String, Object> metrics = Maps.newHashMap();
-        metrics.put("total",  buildTimerMap(core.metrics().getTimers().get(extractor.getTotalTimerName())));
-        metrics.put("converters", buildTimerMap(core.metrics().getTimers().get(extractor.getConverterTimerName())));
+        metrics.put("total",  buildTimerMap(metricRegistry.getTimers().get(extractor.getTotalTimerName())));
+        metrics.put("converters", buildTimerMap(metricRegistry.getTimers().get(extractor.getConverterTimerName())));
         map.put("metrics", metrics);
 
         return map;

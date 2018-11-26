@@ -403,14 +403,24 @@ public class Transaction extends BinaryTransaction {
         return client.getStatusCodeReply();
     }
 
-    public String setbit(String key, long offset, String value) {
+    public String setbit(String key, long offset, boolean value) {
         client.setbit(key, offset, value);
         return client.getStatusCodeReply();
     }
 
-    public String getbit(String key, long offset) {
+    public boolean getbit(String key, long offset) {
         client.getbit(key, offset);
-        return client.getStatusCodeReply();
+        return client.getStatusCodeReply() == "1";
+    }
+
+    public long setrange(String key, long offset, String value) {
+        client.setrange(key, offset, value);
+        return client.getIntegerReply();
+    }
+
+    public String getrange(String key, long startOffset, long endOffset) {
+        client.getrange(key, startOffset, endOffset);
+        return client.getBulkReply();
     }
 
     public String linsert(final String key, final LIST_POSITION where,

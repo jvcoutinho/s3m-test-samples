@@ -118,7 +118,7 @@ public interface StorageServiceMBean
      *
      * @return mapping of ranges to end points
      */
-    public Map<Range, List<String>> getRangeToEndpointMap(String keyspace);
+    public Map<Range<Token>, List<String>> getRangeToEndpointMap(String keyspace);
 
     /**
      * Retrieve a map of range to rpc addresses that describe the ring topology
@@ -126,7 +126,7 @@ public interface StorageServiceMBean
      *
      * @return mapping of ranges to rpc addresses
      */
-    public Map<Range, List<String>> getRangeToRpcaddressMap(String keyspace);
+    public Map<Range<Token>, List<String>> getRangeToRpcaddressMap(String keyspace);
 
     /**
      * The same as {@code describeRing(String)} but converts TokenRange to the String for JMX compatibility
@@ -144,7 +144,7 @@ public interface StorageServiceMBean
      * @param keyspace the keyspace to get the pending range map for.
      * @return a map of pending ranges to endpoints
      */
-    public Map<Range, List<String>> getPendingRangeToEndpointMap(String keyspace);
+    public Map<Range<Token>, List<String>> getPendingRangeToEndpointMap(String keyspace);
 
     /**
      * Retrieve a map of tokens to endpoints, including the bootstrapping
@@ -303,9 +303,6 @@ public interface StorageServiceMBean
     /** force hint delivery to an endpoint **/
     public void deliverHints(String host) throws UnknownHostException;
 
-    /** save row and key caches */
-    public void saveCaches() throws ExecutionException, InterruptedException;
-
     /**
      * given a list of tokens (representing the nodes in the cluster), returns
      *   a mapping from "token -> %age of cluster owned by that token"
@@ -343,9 +340,6 @@ public interface StorageServiceMBean
     // to determine if thrift is running
     public boolean isRPCServerRunning();
 
-    public void invalidateKeyCaches(String ks, String... cfs) throws IOException;
-    public void invalidateRowCaches(String ks, String... cfs) throws IOException;
-
     // allows a node that have been started without joining the ring to join it
     public void joinRing() throws IOException, org.apache.cassandra.config.ConfigurationException;
     public boolean isJoined();
@@ -357,6 +351,9 @@ public interface StorageServiceMBean
 
     public int getCompactionThroughputMbPerSec();
     public void setCompactionThroughputMbPerSec(int value);
+
+    public boolean isIncrementalBackupsEnabled();
+    public void setIncrementalBackupsEnabled(boolean value);
 
     public void bulkLoad(String directory);
 

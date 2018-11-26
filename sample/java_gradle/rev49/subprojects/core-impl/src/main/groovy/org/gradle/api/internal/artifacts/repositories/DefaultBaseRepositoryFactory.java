@@ -23,6 +23,7 @@ import org.gradle.api.InvalidUserDataException;
 import org.gradle.api.artifacts.dsl.RepositoryHandler;
 import org.gradle.api.artifacts.repositories.*;
 import org.gradle.api.internal.artifacts.BaseRepositoryFactory;
+import org.gradle.api.internal.artifacts.ivyservice.ivyresolve.parser.MetaDataParser;
 import org.gradle.api.internal.artifacts.mvnsettings.LocalMavenRepositoryLocator;
 import org.gradle.api.internal.artifacts.repositories.transport.RepositoryTransportFactory;
 import org.gradle.api.internal.externalresource.local.LocallyAvailableResourceFinder;
@@ -34,9 +35,6 @@ import org.gradle.util.ConfigureUtil;
 import java.io.File;
 import java.util.Map;
 
-/**
- * @author Hans Dockter
- */
 public class DefaultBaseRepositoryFactory implements BaseRepositoryFactory {
     private final LocalMavenRepositoryLocator localMavenRepositoryLocator;
     private final FileResolver fileResolver;
@@ -46,6 +44,7 @@ public class DefaultBaseRepositoryFactory implements BaseRepositoryFactory {
     private final ProgressLoggerFactory progressLoggerFactory;
     private final RepositoryCacheManager localCacheManager;
     private final RepositoryCacheManager downloadingCacheManager;
+    private final MetaDataParser metaDataParser;
 
     public DefaultBaseRepositoryFactory(LocalMavenRepositoryLocator localMavenRepositoryLocator,
                                         FileResolver fileResolver,
@@ -54,7 +53,8 @@ public class DefaultBaseRepositoryFactory implements BaseRepositoryFactory {
                                         LocallyAvailableResourceFinder<ArtifactRevisionId> locallyAvailableResourceFinder,
                                         ProgressLoggerFactory progressLoggerFactory,
                                         RepositoryCacheManager localCacheManager,
-                                        RepositoryCacheManager downloadingCacheManager) {
+                                        RepositoryCacheManager downloadingCacheManager,
+                                        MetaDataParser metaDataParser) {
         this.localMavenRepositoryLocator = localMavenRepositoryLocator;
         this.fileResolver = fileResolver;
         this.instantiator = instantiator;
@@ -63,6 +63,7 @@ public class DefaultBaseRepositoryFactory implements BaseRepositoryFactory {
         this.progressLoggerFactory = progressLoggerFactory;
         this.localCacheManager = localCacheManager;
         this.downloadingCacheManager = downloadingCacheManager;
+        this.metaDataParser = metaDataParser;
     }
 
     public ArtifactRepository createRepository(Object userDescription) {
@@ -91,7 +92,7 @@ public class DefaultBaseRepositoryFactory implements BaseRepositoryFactory {
     }
 
     public FlatDirectoryArtifactRepository createFlatDirRepository() {
-        return instantiator.newInstance(DefaultFlatDirArtifactRepository.class, fileResolver, localCacheManager);
+        return instantiator.newInstance(DefaultFlatDirArtifactRepository.class, fileResolver, transportFactory, locallyAvailableResourceFinder, metaDataParser);
     }
 
     public MavenArtifactRepository createMavenLocalRepository() {
@@ -115,13 +116,13 @@ public class DefaultBaseRepositoryFactory implements BaseRepositoryFactory {
 
     public IvyArtifactRepository createIvyRepository() {
         return instantiator.newInstance(DefaultIvyArtifactRepository.class, fileResolver, createPasswordCredentials(), transportFactory,
-                locallyAvailableResourceFinder, instantiator
+                locallyAvailableResourceFinder, instantiator, metaDataParser
         );
     }
 
     public MavenArtifactRepository createMavenRepository() {
         return instantiator.newInstance(DefaultMavenArtifactRepository.class, fileResolver, createPasswordCredentials(), transportFactory,
-                locallyAvailableResourceFinder
+                locallyAvailableResourceFinder, metaDataParser
         );
     }
 

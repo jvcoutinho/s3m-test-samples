@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.db;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -45,7 +46,7 @@ import org.apache.commons.lang.StringUtils;
 
 public class RowMutation
 {
-    private static ICompactSerializer<RowMutation> serializer_;
+    private static RowMutationSerializer serializer_;
     public static final String HINT = "HINT";
 
     static
@@ -62,6 +63,8 @@ public class RowMutation
     private ByteBuffer key_;
     // map of column family id to mutations for that column family.
     protected Map<Integer, ColumnFamily> modifications_ = new HashMap<Integer, ColumnFamily>();
+    
+    private byte[] preserializedBuffer = null;
 
     public RowMutation(String table, ByteBuffer key)
     {
@@ -193,7 +196,7 @@ public class RowMutation
     */
     public void apply() throws IOException
     {
-        Table.open(table_).apply(this, getSerializedBuffer(), true);
+        Table.open(table_).apply(this, true);
     }
 
     /*
@@ -212,10 +215,7 @@ public class RowMutation
 
     public Message makeRowMutationMessage(StorageService.Verb verb) throws IOException
     {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        DataOutputStream dos = new DataOutputStream(bos);
-        serializer().serialize(this, dos);
-        return new Message(FBUtilities.getLocalAddress(), verb, bos.toByteArray());
+        return new Message(FBUtilities.getLocalAddress(), verb, getSerializedBuffer());
     }
 
     public static RowMutation getRowMutationFromMutations(String keyspace, ByteBuffer key, Map<String, List<Mutation>> cfmap)
@@ -239,37 +239,17 @@ public class RowMutation
         return rm;
     }
     
-    public static RowMutation getRowMutation(String table, ByteBuffer key, Map<String, List<ColumnOrSuperColumn>> cfmap)
+    public synchronized byte[] getSerializedBuffer() throws IOException
     {
-        RowMutation rm = new RowMutation(table, key);
-        for (Map.Entry<String, List<ColumnOrSuperColumn>> entry : cfmap.entrySet())
+        if (preserializedBuffer == null)
         {
-            String cfName = entry.getKey();
-            for (ColumnOrSuperColumn cosc : entry.getValue())
-            {
-                if (cosc.column == null)
-                {
-                    assert cosc.super_column != null;
-                    for (org.apache.cassandra.thrift.Column column : cosc.super_column.columns)
-                    {
-                        rm.add(new QueryPath(cfName, cosc.super_column.name, column.name), column.value, column.timestamp, column.ttl);
-                    }
-                }
-                else
-                {
-                    assert cosc.super_column == null;
-                    rm.add(new QueryPath(cfName, null, cosc.column.name), cosc.column.value, cosc.column.timestamp, cosc.column.ttl);
-                }
-            }
+            ByteArrayOutputStream bout = new ByteArrayOutputStream();
+            DataOutputStream dout = new DataOutputStream(bout);
+            RowMutation.serializer().serialize(this, dout);
+            dout.close();
+            preserializedBuffer = bout.toByteArray();
         }
-        return rm;
-    }
-    
-    public DataOutputBuffer getSerializedBuffer() throws IOException
-    {
-        DataOutputBuffer buffer = new DataOutputBuffer();
-        RowMutation.serializer().serialize(this, buffer);
-        return buffer;
+        return preserializedBuffer;
     }
 
     public String toString()
@@ -329,6 +309,13 @@ public class RowMutation
         {
             rm.delete(new QueryPath(cfName, del.super_column), del.timestamp);
         }
+    }
+    
+    static RowMutation fromBytes(byte[] raw) throws IOException
+    {
+        RowMutation rm = serializer_.deserialize(new DataInputStream(new ByteArrayInputStream(raw)));
+        rm.preserializedBuffer = raw;
+        return rm;
     }
 }
 

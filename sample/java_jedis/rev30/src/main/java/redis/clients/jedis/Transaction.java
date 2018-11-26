@@ -31,8 +31,10 @@ public class Transaction extends MultiKeyPipelineBase {
     }
 
     public List<Object> exec() {
+    	// Discard QUEUED or ERROR
+    	client.getMany(getPipelinedResponseLength());
+    	
         client.exec();
-        client.getAll(1); // Discard all but the last reply
 
         List<Object> unformatted = client.getObjectMultiBulkReply();
         if (unformatted == null) {
@@ -50,8 +52,10 @@ public class Transaction extends MultiKeyPipelineBase {
     }
 
     public List<Response<?>> execGetResponse() {
+    	// Discard QUEUED or ERROR
+    	client.getMany(getPipelinedResponseLength());
+    	
         client.exec();
-        client.getAll(1); // Discard all but the last reply
 
         List<Object> unformatted = client.getObjectMultiBulkReply();
         if (unformatted == null) {
@@ -65,11 +69,15 @@ public class Transaction extends MultiKeyPipelineBase {
     }
 
     public String discard() {
+    	client.getMany(getPipelinedResponseLength());
         client.discard();
-        client.getAll(1); // Discard all but the last reply
         inTransaction = false;
         clean();
         return client.getStatusCodeReply();
     }
+
+	public void setClient(Client client) {
+		this.client = client;
+	}
 
 }

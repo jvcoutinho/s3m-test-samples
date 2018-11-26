@@ -18,6 +18,7 @@
 
 package org.apache.cassandra.service;
 
+import java.io.File;
 import java.io.IOError;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
@@ -29,19 +30,19 @@ import java.util.concurrent.*;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Multimap;
-
-import org.apache.cassandra.db.commitlog.CommitLog;
-import org.apache.cassandra.locator.*;
-import org.apache.log4j.Level;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.*;
+import org.apache.cassandra.concurrent.RetryingScheduledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.migration.AddKeyspace;
 import org.apache.cassandra.db.migration.Migration;
 import org.apache.cassandra.dht.BootStrapper;
@@ -50,7 +51,12 @@ import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.gms.*;
 import org.apache.cassandra.io.DeletionService;
+import org.apache.cassandra.io.sstable.SSTableLoader;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.locator.AbstractReplicationStrategy;
+import org.apache.cassandra.locator.DynamicEndpointSnitch;
+import org.apache.cassandra.locator.IEndpointSnitch;
+import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.net.IAsyncResult;
 import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.MessagingService;
@@ -59,10 +65,8 @@ import org.apache.cassandra.service.AntiEntropyService.TreeRequestVerbHandler;
 import org.apache.cassandra.streaming.*;
 import org.apache.cassandra.thrift.Constants;
 import org.apache.cassandra.thrift.UnavailableException;
-import org.apache.cassandra.utils.ByteBufferUtil;
-import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.SkipNullRepresenter;
-import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.cassandra.utils.*;
+import org.apache.log4j.Level;
 import org.yaml.snakeyaml.Dumper;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -100,13 +104,14 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         GOSSIP_DIGEST_SYN,
         GOSSIP_DIGEST_ACK,
         GOSSIP_DIGEST_ACK2,
-        DEFINITIONS_ANNOUNCE,
-        DEFINITIONS_UPDATE_RESPONSE,
+        DEFINITIONS_ANNOUNCE, // Deprecated
+        DEFINITIONS_UPDATE,
         TRUNCATE,
         SCHEMA_CHECK,
         INDEX_SCAN,
         REPLICATION_FINISHED,
         INTERNAL_RESPONSE, // responses to internal calls
+        COUNTER_MUTATION,
         // use as padding for backwards compatability where a previous version needs to validate a verb from the future.
         UNUSED_1,
         UNUSED_2,
@@ -132,13 +137,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         put(Verb.GOSSIP_DIGEST_ACK, Stage.GOSSIP);
         put(Verb.GOSSIP_DIGEST_ACK2, Stage.GOSSIP);
         put(Verb.GOSSIP_DIGEST_SYN, Stage.GOSSIP);
-        put(Verb.DEFINITIONS_ANNOUNCE, Stage.READ);
-        put(Verb.DEFINITIONS_UPDATE_RESPONSE, Stage.READ);
+        put(Verb.DEFINITIONS_UPDATE, Stage.READ);
         put(Verb.TRUNCATE, Stage.MUTATION);
         put(Verb.SCHEMA_CHECK, Stage.MIGRATION);
         put(Verb.INDEX_SCAN, Stage.READ);
         put(Verb.REPLICATION_FINISHED, Stage.MISC);
         put(Verb.INTERNAL_RESPONSE, Stage.INTERNAL_RESPONSE);
+        put(Verb.COUNTER_MUTATION, Stage.MUTATION);
         put(Verb.UNUSED_1, Stage.INTERNAL_RESPONSE);
         put(Verb.UNUSED_2, Stage.INTERNAL_RESPONSE);
         put(Verb.UNUSED_3, Stage.INTERNAL_RESPONSE);
@@ -236,6 +241,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance().registerVerbHandlers(Verb.READ, new ReadVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.RANGE_SLICE, new RangeSliceVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.INDEX_SCAN, new IndexScanVerbHandler());
+        MessagingService.instance().registerVerbHandlers(Verb.COUNTER_MUTATION, new CounterMutationVerbHandler());
         // see BootStrapper for a summary of how the bootstrap verbs interact
         MessagingService.instance().registerVerbHandlers(Verb.BOOTSTRAP_TOKEN, new BootStrapper.BootstrapTokenVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.STREAM_REQUEST, new StreamRequestVerbHandler());
@@ -250,8 +256,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         MessagingService.instance().registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK, new GossipDigestAckVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.GOSSIP_DIGEST_ACK2, new GossipDigestAck2VerbHandler());
         
-        MessagingService.instance().registerVerbHandlers(Verb.DEFINITIONS_ANNOUNCE, new DefinitionsAnnounceVerbHandler());
-        MessagingService.instance().registerVerbHandlers(Verb.DEFINITIONS_UPDATE_RESPONSE, new DefinitionsUpdateResponseVerbHandler());
+        MessagingService.instance().registerVerbHandlers(Verb.DEFINITIONS_UPDATE, new DefinitionsUpdateVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.TRUNCATE, new TruncateVerbHandler());
         MessagingService.instance().registerVerbHandlers(Verb.SCHEMA_CHECK, new SchemaCheckVerbHandler());
 
@@ -311,7 +316,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         if (daemon == null)
         {
-            throw new IllegalStateException("No configured RPC daemon");
+            return false;
         }
         return daemon.isRPCServerRunning();
     }
@@ -322,6 +327,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         Gossiper.instance.unregister(this);
         Gossiper.instance.stop();
         MessagingService.instance().shutdown();
+        // give it a second so that task accepted before the MessagingService shutdown gets submitted to the stage (to avoid RejectedExecutionException)
+        try { Thread.sleep(1000L); } catch (InterruptedException e) {}
         StageManager.shutdownNow();
     }
     
@@ -349,13 +356,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         // sleep a while to allow gossip to warm up (the other nodes need to know about this one before they can reply).
         try
         {
-            Thread.sleep(5000L);
+            Thread.sleep(RING_DELAY);
         }
         catch (Exception ex)
         {
             throw new IOError(ex);
         }
-        MigrationManager.announce(DatabaseDescriptor.getDefsVersion(), DatabaseDescriptor.getSeeds());
+        MigrationManager.passiveAnnounce(DatabaseDescriptor.getDefsVersion());
     }
 
     public synchronized void initServer() throws IOException, org.apache.cassandra.config.ConfigurationException
@@ -380,6 +387,12 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 tokenMetadata_.updateNormalToken(entry.getKey(), entry.getValue());
                 Gossiper.instance.addSavedEndpoint(entry.getValue());
             }
+        }
+
+        if (Boolean.parseBoolean(System.getProperty("cassandra.renew_counter_id", "false")))
+        {
+            logger_.info("Renewing local node id (as requested)");
+            NodeId.renewLocalId();
         }
 
         // daemon threads, like our executors', continue to run while shutdown hooks are invoked
@@ -422,7 +435,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         MessagingService.instance().listen(FBUtilities.getLocalAddress());
         StorageLoadBalancer.instance.startBroadcasting();
-        MigrationManager.announce(DatabaseDescriptor.getDefsVersion(), DatabaseDescriptor.getSeeds());
+        MigrationManager.passiveAnnounce(DatabaseDescriptor.getDefsVersion());
         Gossiper.instance.addLocalApplicationState(ApplicationState.RELEASE_VERSION, valueFactory.releaseVersion());
 
         HintedHandOffManager.instance.registerMBean();
@@ -436,10 +449,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (DatabaseDescriptor.isAutoBootstrap()
             && !(DatabaseDescriptor.getSeeds().contains(FBUtilities.getLocalAddress()) || SystemTable.isBootstrapped()))
         {
-            setMode("Joining: getting load information", true);
+            setMode("Joining: getting load and schema information", true);
             StorageLoadBalancer.instance.waitForLoadInfo();
             if (logger_.isDebugEnabled())
-                logger_.debug("... got load info");
+                logger_.debug("... got load + schema info");
             if (tokenMetadata_.isMember(FBUtilities.getLocalAddress()))
             {
                 String s = "This node is already a member of the token ring; bootstrap aborted. (If replacing a dead node, remove the old one from the ring first.)";
@@ -481,10 +494,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             {
                 logger_.info("Using saved token " + token);
             }
-            SystemTable.setBootstrapped(true); // first startup is only chance to bootstrap
-            setToken(token);
         }
 
+        SystemTable.setBootstrapped(true); // first startup is only chance to bootstrap
+        setToken(token);
         assert tokenMetadata_.sortedTokens().size() > 0;
     }
 
@@ -500,6 +513,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     public boolean isJoined()
     {
         return joined;
+    }
+
+    public void setCompactionThroughputMbPerSec(int value) {
+        DatabaseDescriptor.setCompactionThroughputMbPerSec(value);
     }
 
     private void setMode(String m, boolean log)
@@ -629,6 +646,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      *   get ready to leave the cluster as part of a decommission or move
      * STATE_LEFT,token 
      *   set after decommission or move is completed.
+     * STATE_MOVE,token
+     *   set if node if currently moving to a new token in the ring
      * 
      * Note: Any time a node state changes from STATE_NORMAL, it will not be visible to new nodes. So it follows that
      * you should never bootstrap a new node during a removetoken, decommission or move.
@@ -655,6 +674,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                     handleStateLeaving(endpoint, pieces);
                 else if (moveName.equals(VersionedValue.STATUS_LEFT))
                     handleStateLeft(endpoint, pieces);
+                else if (moveName.equals(VersionedValue.STATUS_MOVING))
+                    handleStateMoving(endpoint, pieces);
         }
     }
 
@@ -763,6 +784,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             handleStateRemoving(endpoint, getPartitioner().getTokenFactory().fromString(pieces[3]), pieces[2]);
         }
 
+        if (tokenMetadata_.isMoving(endpoint)) // if endpoint was moving to a new token
+            tokenMetadata_.removeFromMoving(endpoint);
+
         calculatePendingRanges();
     }
 
@@ -802,10 +826,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /**
-     * Handle node leaving the ring. This can be either because of decommission or loadbalance
+     * Handle node leaving the ring. This will happen when a node is decommissioned
      *
-     * @param endpoint If reason for leaving is decommission or loadbalance
-     * endpoint is the leaving node.
+     * @param endpoint If reason for leaving is decommission, endpoint is the leaving node.
      * @param pieces STATE_LEFT,token
      */
     private void handleStateLeft(InetAddress endpoint, String[] pieces)
@@ -817,6 +840,25 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             logger_.debug("Node " + endpoint + " state left, token " + token);
 
         excise(token, endpoint);
+    }
+
+    /**
+     * Handle node moving inside the ring.
+     *
+     * @param endpoint moving endpoint address
+     * @param pieces STATE_MOVING, token
+     */
+    private void handleStateMoving(InetAddress endpoint, String[] pieces)
+    {
+        assert pieces.length == 2;
+        Token token = getPartitioner().getTokenFactory().fromString(pieces[1]);
+
+        if (logger_.isDebugEnabled())
+            logger_.debug("Node " + endpoint + " state moving, new token " + token);
+
+        tokenMetadata_.addMovingEndpoint(token, endpoint);
+
+        calculatePendingRanges();
     }
 
     /**
@@ -907,10 +949,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         Map<Token, InetAddress> bootstrapTokens = tm.getBootstrapTokens();
         Set<InetAddress> leavingEndpoints = tm.getLeavingEndpoints();
 
-        if (bootstrapTokens.isEmpty() && leavingEndpoints.isEmpty())
+        if (bootstrapTokens.isEmpty() && leavingEndpoints.isEmpty() && tm.getMovingEndpoints().isEmpty())
         {
             if (logger_.isDebugEnabled())
-                logger_.debug("No bootstrapping or leaving nodes -> empty pending ranges for {}", table);
+                logger_.debug("No bootstrapping, leaving or moving nodes -> empty pending ranges for {}", table);
             tm.setPendingRanges(table, pendingRanges);
             return;
         }
@@ -936,7 +978,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
 
         // At this stage pendingRanges has been updated according to leave operations. We can
-        // now finish the calculation by checking bootstrapping nodes.
+        // now continue the calculation by checking bootstrapping nodes.
 
         // For each of the bootstrapping nodes, simply add and remove them one by one to
         // allLeftMetadata and check in between what their ranges would be.
@@ -947,6 +989,26 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             allLeftMetadata.updateNormalToken(entry.getKey(), endpoint);
             for (Range range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
                 pendingRanges.put(range, endpoint);
+            allLeftMetadata.removeEndpoint(endpoint);
+        }
+
+        // At this stage pendingRanges has been updated according to leaving and bootstrapping nodes.
+        // We can now finish the calculation by checking moving nodes.
+
+        // For each of the moving nodes, we do the same thing we did for bootstrapping:
+        // simply add and remove them one by one to allLeftMetadata and check in between what their ranges would be.
+        for (Pair<Token, InetAddress> moving : tm.getMovingEndpoints())
+        {
+            InetAddress endpoint = moving.right; // address of the moving node
+
+            //  moving.left is a new token of the endpoint
+            allLeftMetadata.updateNormalToken(moving.left, endpoint);
+
+            for (Range range : strategy.getAddressRanges(allLeftMetadata).get(endpoint))
+            {
+                pendingRanges.put(range, endpoint);
+            }
+
             allLeftMetadata.removeEndpoint(endpoint);
         }
 
@@ -1000,7 +1062,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     private void sendReplicationNotification(InetAddress local, InetAddress remote)
     {
         // notify the remote token
-        Message msg = new Message(local, StorageService.Verb.REPLICATION_FINISHED, new byte[0]);
+        Message msg = new Message(local, StorageService.Verb.REPLICATION_FINISHED, new byte[0], Gossiper.instance.getVersion(remote));
         IFailureDetector failureDetector = FailureDetector.instance;
         while (failureDetector.isAlive(remote))
         {
@@ -1071,7 +1133,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                 };
                 if (logger_.isDebugEnabled())
                     logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(ranges, ", "));
-                StreamIn.requestRanges(source, table, ranges, callback);
+                StreamIn.requestRanges(source, table, ranges, callback, OperationType.RESTORE_REPLICA_COUNT);
             }
         }
     }
@@ -1102,8 +1164,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
         // Go through the ranges and for each range check who will be
         // storing replicas for these ranges when the leaving endpoint
-        // is gone. Whoever is present in newReplicaEndpoins list, but
-        // not in the currentReplicaEndpoins list, will be needing the
+        // is gone. Whoever is present in newReplicaEndpoints list, but
+        // not in the currentReplicaEndpoints list, will be needing the
         // range.
         for (Range range : ranges)
         {
@@ -1213,6 +1275,18 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         return stringify(tokenMetadata_.getLeavingEndpoints());
     }
 
+    public List<String> getMovingNodes()
+    {
+        List<String> endpoints = new ArrayList<String>();
+
+        for (Pair<Token, InetAddress> node : tokenMetadata_.getMovingEndpoints())
+        {
+            endpoints.add(node.right.getHostAddress());
+        }
+
+        return endpoints;
+    }
+
     public List<String> getJoiningNodes()
     {
         return stringify(tokenMetadata_.getBootstrapTokens().values());
@@ -1248,9 +1322,10 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (tableName.equals("system"))
             throw new RuntimeException("Cleanup of the system table is neither necessary nor wise");
 
+        NodeId.OneShotRenewer nodeIdRenewer = new NodeId.OneShotRenewer();
         for (ColumnFamilyStore cfStore : getValidColumnFamilies(tableName, columnFamilies))
         {
-            cfStore.forceCleanup();
+            cfStore.forceCleanup(nodeIdRenewer);
         }
     }
 
@@ -1285,15 +1360,37 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /**
-     * Takes the snapshot for a given table.
+     * Takes the snapshot for the given tables. A snapshot name must be specified.
      *
-     * @param tableName the name of the table.
-     * @param tag   the tag given to the snapshot (null is permissible)
+     * @param tag the tag given to the snapshot; may not be null or empty
+     * @param tableNames the name of the tables to snapshot; empty means "all."
      */
-    public void takeSnapshot(String tableName, String tag) throws IOException
+    public void takeSnapshot(String tag, String... tableNames) throws IOException
     {
-        Table tableInstance = getValidTable(tableName);
-        tableInstance.snapshot(tag);
+        if (tag == null || tag.equals(""))
+            throw new IOException("You must supply a snapshot name.");
+
+        Iterable<Table> tables;
+        if (tableNames.length == 0)
+        {
+            tables = Table.all();
+        }
+        else
+        {
+            ArrayList<Table> t = new ArrayList<Table>();
+            for (String table : tableNames)
+                t.add(getValidTable(table));
+            tables = t;
+        }
+
+        // Do a check to see if this snapshot exists before we actually snapshot
+        for (Table table : tables)
+            if (table.snapshotExists(tag))
+                throw new IOException("Snapshot " + tag + " already exists.");
+
+
+        for (Table table : tables)
+            table.snapshot(tag);
     }
 
     private Table getValidTable(String tableName) throws IOException
@@ -1306,26 +1403,32 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /**
-     * Takes a snapshot for every table.
-     *
-     * @param tag the tag given to the snapshot (null is permissible)
+     * Remove the snapshot with the given name from the given tables.
+     * If no tag is specified we will remove all snapshots.
      */
-    public void takeAllSnapshot(String tag) throws IOException
+    public void clearSnapshot(String tag, String... tableNames) throws IOException
     {
-        for (Table table : Table.all())
-            table.snapshot(tag);
-    }
+        if(tag == null)
+            tag = "";
 
-    /**
-     * Remove all the existing snapshots.
-     */
-    public void clearSnapshot() throws IOException
-    {
-        for (Table table : Table.all())
-            table.clearSnapshot();
+        Iterable<Table> tables;
+        if (tableNames.length == 0)
+        {
+            tables = Table.all();
+        }
+        else
+        {
+            ArrayList<Table> tempTables = new ArrayList<Table>();
+            for(String table : tableNames)
+                tempTables.add(getValidTable(table));
+            tables = tempTables;
+        }
+
+        for (Table table : tables)
+            table.clearSnapshot(tag);
 
         if (logger_.isDebugEnabled())
-            logger_.debug("Cleared out all snapshot directories");
+            logger_.debug("Cleared out snapshot directories");
     }
 
     public Iterable<ColumnFamilyStore> getValidColumnFamilies(String tableName, String... cfNames) throws IOException
@@ -1378,6 +1481,34 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      */
     public void forceTableRepair(final String tableName, final String... columnFamilies) throws IOException
     {
+        List<AntiEntropyService.RepairSession> sessions = new ArrayList<AntiEntropyService.RepairSession>();
+        for (Range range : getLocalRanges(tableName))
+        {
+            sessions.add(forceTableRepair(range, tableName, columnFamilies));
+        }
+
+        boolean failedSession = false;
+
+        // block until all repair sessions have completed
+        for (AntiEntropyService.RepairSession sess : sessions)
+        {
+            try
+            {
+                sess.join();
+            }
+            catch (InterruptedException e)
+            {
+                logger_.error("Repair session " + sess + " failed.", e);
+                failedSession = true;
+            }
+        }
+
+        if (failedSession)
+            throw new IOException("Some Repair session(s) failed.");
+    }
+
+    public AntiEntropyService.RepairSession forceTableRepair(final Range range, final String tableName, final String... columnFamilies) throws IOException
+    {
         String[] families;
         if (columnFamilies.length == 0)
         {
@@ -1391,18 +1522,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             families = columnFamilies;
         }
-        AntiEntropyService.RepairSession sess = AntiEntropyService.instance.getRepairSession(tableName, families);
-        
-        try
-        {
-            sess.start();
-            // block until the repair has completed
-            sess.join();
-        }
-        catch (InterruptedException e)
-        {
-            throw new IOException("Repair session " + sess + " failed.", e);
-        }
+        AntiEntropyService.RepairSession sess = AntiEntropyService.instance.getRepairSession(range, tableName, families);
+        sess.start();
+        return sess;
     }
 
     /* End of MBean interface methods */
@@ -1438,7 +1560,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     }
 
     /**
-     * Get all ranges an endpoint is responsible for.
+     * Get all ranges an endpoint is responsible for (by table)
      * @param ep endpoint we are interested in.
      * @return ranges for the specified endpoint.
      */
@@ -1477,17 +1599,20 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
      * This method returns the N endpoints that are responsible for storing the
      * specified key i.e for replication.
      *
+     * @param table keyspace name also known as table
+     * @param cf Column family name
      * @param key - key for which we need to find the endpoint return value -
      * the endpoint responsible for this key
      */
+    public List<InetAddress> getNaturalEndpoints(String table, String cf, String key)
+    {
+        CFMetaData cfMetaData = DatabaseDescriptor.getTableDefinition(table).cfMetaData().get(cf);
+        return getNaturalEndpoints(table, partitioner.getToken(cfMetaData.getKeyValidator().fromString(key)));
+    }
+
     public List<InetAddress> getNaturalEndpoints(String table, ByteBuffer key)
     {
         return getNaturalEndpoints(table, partitioner.getToken(key));
-    }
-
-    public List<InetAddress> getNaturalEndpoints(String table, byte[] key)
-    {
-        return getNaturalEndpoints(table, ByteBuffer.wrap(key));
     }
 
     /**
@@ -1651,46 +1776,21 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     private void unbootstrap(final Runnable onFinish)
     {
-        final CountDownLatch latch = new CountDownLatch(DatabaseDescriptor.getNonSystemTables().size());
+        Map<String, Multimap<Range, InetAddress>> rangesToStream = new HashMap<String, Multimap<Range, InetAddress>>();
+
         for (final String table : DatabaseDescriptor.getNonSystemTables())
         {
             Multimap<Range, InetAddress> rangesMM = getChangedRangesForLeaving(table, FBUtilities.getLocalAddress());
+
             if (logger_.isDebugEnabled())
                 logger_.debug("Ranges needing transfer are [" + StringUtils.join(rangesMM.keySet(), ",") + "]");
-            if (rangesMM.isEmpty())
-            {
-                latch.countDown();
-                continue;
-            }
 
-            setMode("Leaving: streaming data to other nodes", true);
-            final Set<Map.Entry<Range, InetAddress>> pending = new HashSet<Map.Entry<Range, InetAddress>>(rangesMM.entries());
-            for (final Map.Entry<Range, InetAddress> entry : rangesMM.entries())
-            {
-                final Range range = entry.getKey();
-                final InetAddress newEndpoint = entry.getValue();
-                final Runnable callback = new Runnable()
-                {
-                    public void run()
-                    {
-                        synchronized(pending)
-                        {
-                            pending.remove(entry);
-                            if (pending.isEmpty())
-                                latch.countDown();
-                        }
-                    }
-                };
-                StageManager.getStage(Stage.STREAM).execute(new Runnable()
-                {
-                    public void run()
-                    {
-                        // TODO each call to transferRanges re-flushes, this is potentially a lot of waste
-                        StreamOut.transferRanges(newEndpoint, table, Arrays.asList(range), callback);
-                    }
-                });
-            }
+            rangesToStream.put(table, rangesMM);
         }
+
+        setMode("Leaving: streaming data to other nodes", true);
+
+        CountDownLatch latch = streamRanges(rangesToStream);
 
         // wait for the transfer runnables to signal the latch.
         logger_.debug("waiting for stream aks.");
@@ -1712,47 +1812,141 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         move(partitioner.getTokenFactory().fromString(newToken));
     }
 
-    public void loadBalance() throws IOException, InterruptedException
-    {
-        move((Token)null);
-    }
-
     /**
      * move the node to new token or find a new token to boot to according to load
      *
-     * @param token new token to boot to, or if null, find balanced token to boot to
+     * @param newToken new token to boot to, or if null, find balanced token to boot to
+     *
+     * @throws IOException on any I/O operation error
      */
-    private void move(final Token token) throws IOException, InterruptedException
+    private void move(Token newToken) throws IOException
     {
-        for (String table : DatabaseDescriptor.getTables())
+        if (newToken == null)
+            throw new IOException("Can't move to the undefined (null) token.");
+
+        if (tokenMetadata_.sortedTokens().contains(newToken))
+            throw new IOException("target token " + newToken + " is already owned by another node.");
+
+        // address of the current node
+        InetAddress localAddress = FBUtilities.getLocalAddress();
+        List<String> tablesToProcess = DatabaseDescriptor.getNonSystemTables();
+
+        // checking if data is moving to this node
+        for (String table : tablesToProcess)
         {
-            if (tokenMetadata_.getPendingRanges(table, FBUtilities.getLocalAddress()).size() > 0)
+            if (tokenMetadata_.getPendingRanges(table, localAddress).size() > 0)
                 throw new UnsupportedOperationException("data is currently moving to this node; unable to leave the ring");
         }
-        if (token != null && tokenMetadata_.sortedTokens().contains(token))
-            throw new IOException("target token " + token + " is already owned by another node");
+
+        // setting 'moving' application state
+        Gossiper.instance.addLocalApplicationState(ApplicationState.STATUS, valueFactory.moving(newToken));
+
+        logger_.info(String.format("Moving %s from %s to %s.", localAddress, getLocalToken(), newToken));
+
+        IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
+
+        Map<String, Multimap<InetAddress, Range>> rangesToFetch = new HashMap<String, Multimap<InetAddress, Range>>();
+        Map<String, Multimap<Range, InetAddress>> rangesToStreamByTable = new HashMap<String, Multimap<Range, InetAddress>>();
+
+        TokenMetadata tokenMetaClone = tokenMetadata_.cloneAfterAllSettled();
+
+        // for each of the non system tables calculating new ranges
+        // which current node will handle after move to the new token
+        for (String table : tablesToProcess)
+        {
+            // replication strategy of the current keyspace (aka table)
+            AbstractReplicationStrategy strategy = Table.open(table).getReplicationStrategy();
+
+            // getting collection of the currently used ranges by this keyspace
+            Collection<Range> currentRanges = getRangesForEndpoint(table, localAddress);
+            // collection of ranges which this node will serve after move to the new token
+            Collection<Range> updatedRanges = strategy.getPendingAddressRanges(tokenMetadata_, newToken, localAddress);
+
+            // ring ranges and endpoints associated with them
+            // this used to determine what nodes should we ping about range data
+            Multimap<Range, InetAddress> rangeAddresses = strategy.getRangeAddresses(tokenMetaClone);
+
+            // calculated parts of the ranges to request/stream from/to nodes in the ring
+            Pair<Set<Range>, Set<Range>> rangesPerTable = calculateStreamAndFetchRanges(currentRanges, updatedRanges);
+
+            /**
+             * In this loop we are going through all ranges "to fetch" and determining
+             * nodes in the ring responsible for data we are interested in
+             */
+            Multimap<Range, InetAddress> rangesToFetchWithPreferredEndpoints = ArrayListMultimap.create();
+            for (Range toFetch : rangesPerTable.right)
+            {
+                for (Range range : rangeAddresses.keySet())
+                {
+                    if (range.contains(toFetch))
+                    {
+                        List<InetAddress> endpoints = snitch.getSortedListByProximity(localAddress, rangeAddresses.get(range));
+                        // storing range and preferred endpoint set
+                        rangesToFetchWithPreferredEndpoints.putAll(toFetch, endpoints);
+                    }
+                }
+            }
+
+            // calculating endpoints to stream current ranges to if needed
+            // in some situations node will handle current ranges as part of the new ranges
+            Multimap<Range, InetAddress> rangeWithEndpoints = HashMultimap.create();
+
+            for (Range toStream : rangesPerTable.left)
+            {
+                List<InetAddress> endpoints = strategy.calculateNaturalEndpoints(toStream.right, tokenMetaClone);
+                rangeWithEndpoints.putAll(toStream, endpoints);
+            }
+
+            // associating table with range-to-endpoints map
+            rangesToStreamByTable.put(table, rangeWithEndpoints);
+
+            Multimap<InetAddress, Range> workMap = BootStrapper.getWorkMap(rangesToFetchWithPreferredEndpoints);
+            rangesToFetch.put(table, workMap);
+
+            if (logger_.isDebugEnabled())
+                logger_.debug("Table {}: work map {}.", table, workMap);
+        }
+
+        if (!rangesToStreamByTable.isEmpty() || !rangesToFetch.isEmpty())
+        {
+            logger_.info("Sleeping {} ms before start streaming/fetching ranges.", RING_DELAY);
+
+            try
+            {
+                Thread.sleep(RING_DELAY);
+            }
+            catch (InterruptedException e)
+            {
+                throw new RuntimeException("Sleep interrupted " + e.getMessage());
+            }
+
+            setMode("Moving: fetching new ranges and streaming old ranges", true);
+
+            if (logger_.isDebugEnabled())
+                logger_.debug("[Move->STREAMING] Work Map: " + rangesToStreamByTable);
+
+            CountDownLatch streamLatch = streamRanges(rangesToStreamByTable);
+
+            if (logger_.isDebugEnabled())
+                logger_.debug("[Move->FETCHING] Work Map: " + rangesToFetch);
+
+            CountDownLatch fetchLatch = requestRanges(rangesToFetch);
+
+            try
+            {
+                streamLatch.await();
+                fetchLatch.await();
+            }
+            catch (InterruptedException e)
+            {
+                throw new RuntimeException("Interrupted latch while waiting for stream/fetch ranges to finish: " + e.getMessage());
+            }
+        }
+
+        setToken(newToken); // setting new token as we have everything settled
 
         if (logger_.isDebugEnabled())
-            logger_.debug("Leaving: old token was " + getLocalToken());
-        startLeaving();
-        setMode("Leaving: sleeping " + RING_DELAY + " ms for pending range setup", true);
-        Thread.sleep(RING_DELAY);
-
-        Runnable finishMoving = new WrappedRunnable()
-        {
-            public void runMayThrow() throws IOException
-            {
-                Token bootstrapToken = token;
-                if (bootstrapToken == null)
-                {
-                    StorageLoadBalancer.instance.waitForLoadInfo();
-                    bootstrapToken = BootStrapper.getBalancedToken(tokenMetadata_, StorageLoadBalancer.instance.getLoadInfo());
-                }
-                logger_.info("re-bootstrapping to new token {}", bootstrapToken);
-                bootstrap(bootstrapToken);
-            }
-        };
-        unbootstrap(finishMoving);
+            logger_.debug("Successfully moved to new token {}", getLocalToken());
     }
 
     /**
@@ -1964,155 +2158,6 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         setMode("Node is drained", true);
     }
 
-    /**
-     * load schema from yaml. This can only be done on a fresh system.
-     * @throws ConfigurationException
-     * @throws IOException
-     */
-    public void loadSchemaFromYAML() throws ConfigurationException, IOException
-    { 
-        // validate
-        final Collection<KSMetaData> tables = DatabaseDescriptor.readTablesFromYaml();
-        if (tables.isEmpty())
-            return;
-
-        for (KSMetaData table : tables)
-        {
-            if (!table.name.matches(Migration.NAME_VALIDATOR_REGEX))
-                throw new ConfigurationException("Invalid table name: " + table.name);
-            for (CFMetaData cfm : table.cfMetaData().values())
-                if (!Migration.isLegalName(cfm.cfName))
-                    throw new ConfigurationException("Invalid column family name: " + cfm.cfName);
-        }
-        
-        Callable<Migration> call = new Callable<Migration>()
-        {
-            public Migration call() throws Exception
-            {
-                // blow up if there is a schema saved.
-                if (DatabaseDescriptor.getDefsVersion().timestamp() > 0 || Migration.getLastMigrationId() != null)
-                    throw new ConfigurationException("Cannot import schema when one already exists");
-             
-                Migration migration = null;
-                for (KSMetaData table : tables)
-                {
-                    migration = new AddKeyspace(table); 
-                    migration.apply();
-                }
-                return migration;
-            }
-        };
-        Migration migration;
-        try
-        {
-            migration = StageManager.getStage(Stage.MIGRATION).submit(call).get();
-        }
-        catch (InterruptedException e)
-        {
-            throw new RuntimeException(e);
-        }
-        catch (ExecutionException e)
-        {
-            if (e.getCause() instanceof ConfigurationException)
-                throw (ConfigurationException)e.getCause();
-            else if (e.getCause() instanceof IOException)
-                throw (IOException)e.getCause();
-            else if (e.getCause() instanceof Exception)
-                throw new ConfigurationException(e.getCause().getMessage(), (Exception)e.getCause());
-            else
-                throw new RuntimeException(e);
-        }
-        
-        assert DatabaseDescriptor.getDefsVersion().timestamp() > 0;
-        DefsTable.dumpToStorage(DatabaseDescriptor.getDefsVersion());
-        // flush system and definition tables.
-        Collection<Future> flushers = new ArrayList<Future>();
-        flushers.addAll(Table.open(Table.SYSTEM_TABLE).flush());
-        for (Future f : flushers)
-        {
-            try
-            {
-                f.get();
-            }
-            catch (Exception e)
-            {
-                ConfigurationException ce = new ConfigurationException(e.getMessage());
-                ce.initCause(e);
-                throw ce;
-            }
-        }
-        
-        // we don't want to announce after every Migration.apply(). keep track of the last one and then announce the
-        // current version.
-        if (migration != null)
-            migration.announce();
-        
-    }
-
-    public String exportSchema() throws IOException
-    {
-        List<RawKeyspace> keyspaces = new ArrayList<RawKeyspace>();
-        for (String ksname : DatabaseDescriptor.getNonSystemTables())
-        {
-            KSMetaData ksm = DatabaseDescriptor.getTableDefinition(ksname);
-            RawKeyspace rks = new RawKeyspace();
-            rks.name = ksm.name;
-            rks.replica_placement_strategy = ksm.strategyClass.getName();
-            rks.replication_factor = ksm.replicationFactor;
-            rks.column_families = new RawColumnFamily[ksm.cfMetaData().size()];
-            int i = 0;
-            for (CFMetaData cfm : ksm.cfMetaData().values())
-            {
-                RawColumnFamily rcf = new RawColumnFamily();
-                rcf.name = cfm.cfName;
-                rcf.compare_with = cfm.comparator.getClass().getName();
-                rcf.default_validation_class = cfm.getDefaultValidator().getClass().getName();
-                rcf.compare_subcolumns_with = cfm.subcolumnComparator == null ? null : cfm.subcolumnComparator.getClass().getName();
-                rcf.column_type = cfm.cfType;
-                rcf.comment = cfm.getComment();
-                rcf.keys_cached = cfm.getKeyCacheSize();
-                rcf.read_repair_chance = cfm.getReadRepairChance();
-                rcf.gc_grace_seconds = cfm.getGcGraceSeconds();
-                rcf.rows_cached = cfm.getRowCacheSize();
-                rcf.column_metadata = new RawColumnDefinition[cfm.getColumn_metadata().size()];
-                int j = 0;
-                for (ColumnDefinition cd : cfm.getColumn_metadata().values())
-                {
-                    RawColumnDefinition rcd = new RawColumnDefinition();
-                    rcd.index_name = cd.getIndexName();
-                    rcd.index_type = cd.getIndexType();
-                    rcd.name = ByteBufferUtil.string(cd.name);
-                    rcd.validator_class = cd.getValidator().getClass().getName();
-                    rcf.column_metadata[j++] = rcd;
-                }
-                if (j == 0)
-                    rcf.column_metadata = null;
-                rks.column_families[i++] = rcf;
-            }
-            // whew.
-            keyspaces.add(rks);
-        }
-        
-        DumperOptions options = new DumperOptions();
-        /* Use a block YAML arrangement */
-        options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
-        SkipNullRepresenter representer = new SkipNullRepresenter();
-        /* Use Tag.MAP to avoid the class name being included as global tag */
-        representer.addClassTag(RawColumnFamily.class, Tag.MAP);
-        representer.addClassTag(Keyspaces.class, Tag.MAP);
-        representer.addClassTag(ColumnDefinition.class, Tag.MAP);
-        Dumper dumper = new Dumper(representer, options);
-        Yaml yaml = new Yaml(dumper);
-        Keyspaces ks = new Keyspaces();
-        ks.keyspaces = keyspaces;
-        return yaml.dump(ks);
-    }
-    
-    public class Keyspaces
-    {
-        public List<RawKeyspace> keyspaces;
-    }
-    
     // Never ever do this at home. Used by tests.
     IPartitioner setPartitionerUnsafe(IPartitioner newPartitioner)
     {
@@ -2140,8 +2185,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         logger_.debug("submitting cache saves");
         for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
         {
-            futures.add(cfs.submitKeyCacheWrite());
-            futures.add(cfs.submitRowCacheWrite());
+            futures.add(cfs.keyCache.submitWrite());
+            futures.add(cfs.rowCache.submitWrite());
         }
         FBUtilities.waitOnFutures(futures);
         logger_.debug("cache saves completed");
@@ -2204,7 +2249,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             for (ColumnFamilyStore subordinate : cfs.concatWithIndexes())
             {
                 ops += subordinate.getMemtableColumnsCount();
-                throughput = subordinate.getMemtableThroughputInMB();
+                throughput += subordinate.getMemtableDataSize();
             }
 
             if (ops > 0 && (largestByOps == null || ops > largestByOps.getMemtableColumnsCount()))
@@ -2237,5 +2282,199 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
     {
         for (ColumnFamilyStore cfs : ColumnFamilyStore.all())
             cfs.reduceCacheSizes();
+    }
+
+    /**
+     * Seed data to the endpoints that will be responsible for it at the future
+     *
+     * @param rangesToStreamByTable tables and data ranges with endpoints included for each
+     * @return latch to count down
+     */
+    private CountDownLatch streamRanges(final Map<String, Multimap<Range, InetAddress>> rangesToStreamByTable)
+    {
+        final CountDownLatch latch = new CountDownLatch(rangesToStreamByTable.keySet().size());
+        for (final String table : rangesToStreamByTable.keySet())
+        {
+            Multimap<Range, InetAddress> rangesWithEndpoints = rangesToStreamByTable.get(table);
+
+            if (rangesWithEndpoints.isEmpty())
+            {
+                latch.countDown();
+                continue;
+            }
+
+            final Set<Map.Entry<Range, InetAddress>> pending = new HashSet<Map.Entry<Range, InetAddress>>(rangesWithEndpoints.entries());
+
+            for (final Map.Entry<Range, InetAddress> entry : rangesWithEndpoints.entries())
+            {
+                final Range range = entry.getKey();
+                final InetAddress newEndpoint = entry.getValue();
+
+                final Runnable callback = new Runnable()
+                {
+                    public void run()
+                    {
+                        synchronized (pending)
+                        {
+                            pending.remove(entry);
+
+                            if (pending.isEmpty())
+                                latch.countDown();
+                        }
+                    }
+                };
+
+                StageManager.getStage(Stage.STREAM).execute(new Runnable()
+                {
+                    public void run()
+                    {
+                        // TODO each call to transferRanges re-flushes, this is potentially a lot of waste
+                        StreamOut.transferRanges(newEndpoint, table, Arrays.asList(range), callback, OperationType.UNBOOTSTRAP);
+                    }
+                });
+            }
+        }
+        return latch;
+    }
+
+    /**
+     * Used to request ranges from endpoints in the ring (will block until all data is fetched and ready)
+     * @param ranges ranges to fetch as map of the preferred address and range collection
+     * @return latch to count down
+     */
+    private CountDownLatch requestRanges(final Map<String, Multimap<InetAddress, Range>> ranges)
+    {
+        final CountDownLatch latch = new CountDownLatch(ranges.keySet().size());
+        for (final String table : ranges.keySet())
+        {
+            Multimap<InetAddress, Range> endpointWithRanges = ranges.get(table);
+
+            if (endpointWithRanges.isEmpty())
+            {
+                latch.countDown();
+                continue;
+            }
+
+            final Set<InetAddress> pending = new HashSet<InetAddress>(endpointWithRanges.keySet());
+
+            // Send messages to respective folks to stream data over to me
+            for (final InetAddress source: endpointWithRanges.keySet())
+            {
+                Collection<Range> toFetch = endpointWithRanges.get(source);
+
+                final Runnable callback = new Runnable()
+                {
+                    public void run()
+                    {
+                        pending.remove(source);
+
+                        if (pending.isEmpty())
+                            latch.countDown();
+                    }
+                };
+
+                if (logger_.isDebugEnabled())
+                    logger_.debug("Requesting from " + source + " ranges " + StringUtils.join(toFetch, ", "));
+
+                // sending actual request
+                StreamIn.requestRanges(source, table, toFetch, callback, OperationType.BOOTSTRAP);
+            }
+        }
+        return latch;
+    }
+
+    // see calculateStreamAndFetchRanges(Iterator, Iterator) for description
+    private Pair<Set<Range>, Set<Range>> calculateStreamAndFetchRanges(Collection<Range> current, Collection<Range> updated)
+    {
+        return calculateStreamAndFetchRanges(current.iterator(), updated.iterator());
+    }
+
+    /**
+     * Calculate pair of ranges to stream/fetch for given two range collections
+     * (current ranges for table and ranges after move to new token)
+     *
+     * @param current collection of the ranges by current token
+     * @param updated collection of the ranges after token is changed
+     * @return pair of ranges to stream/fetch for given current and updated range collections
+     */
+    private Pair<Set<Range>, Set<Range>> calculateStreamAndFetchRanges(Iterator<Range> current, Iterator<Range> updated)
+    {
+        Set<Range> toStream = new HashSet<Range>();
+        Set<Range> toFetch  = new HashSet<Range>();
+
+        while (current.hasNext() && updated.hasNext())
+        {
+            Range r1 = current.next();
+            Range r2 = updated.next();
+
+            // if ranges intersect we need to fetch only missing part
+            if (r1.intersects(r2))
+            {
+                // adding difference ranges to fetch from a ring
+                toFetch.addAll(r1.differenceToFetch(r2));
+
+                // if current range is a sub-range of a new range we don't need to seed
+                // otherwise we need to seed parts of the current range
+                if (!r2.contains(r1))
+                {
+                    // (A, B] & (C, D]
+                    if (Range.compare(r1.left, r2.left) < 0) // if A < C
+                    {
+                        toStream.add(new Range(r1.left, r2.left)); // seed (A, C]
+                    }
+
+                    if (Range.compare(r1.right, r2.right) > 0) // if B > D
+                    {
+                        toStream.add(new Range(r2.right, r1.right)); // seed (D, B]
+                    }
+                }
+            }
+            else // otherwise we need to fetch whole new range
+            {
+                toStream.add(r1); // should seed whole old range
+                toFetch.add(r2);
+            }
+        }
+
+        return new Pair<Set<Range>, Set<Range>>(toStream, toFetch);
+    }
+
+    public void bulkLoad(String directory)
+    {
+        File dir = new File(directory);
+
+        if (!dir.exists() || !dir.isDirectory())
+            throw new IllegalArgumentException("Invalid directory " + directory);
+
+        SSTableLoader.Client client = new SSTableLoader.Client()
+        {
+            public void init() {}
+
+            public boolean validateColumnFamily(String keyspace, String cfName)
+            {
+                return DatabaseDescriptor.getCFMetaData(keyspace, cfName) != null;
+            }
+        };
+
+        SSTableLoader.OutputHandler oh = new SSTableLoader.OutputHandler()
+        {
+            public void output(String msg) { logger_.info(msg); }
+            public void debug(String msg) { logger_.debug(msg); }
+        };
+
+        SSTableLoader loader = new SSTableLoader(dir, client, oh);
+        try
+        {
+            loader.stream().get();
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public int getExceptionCount()
+    {
+        return AbstractCassandraDaemon.exceptions.get();
     }
 }

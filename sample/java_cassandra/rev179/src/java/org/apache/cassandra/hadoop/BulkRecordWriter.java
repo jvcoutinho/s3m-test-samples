@@ -1,7 +1,4 @@
-package org.apache.cassandra.hadoop;
-
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -10,16 +7,16 @@ package org.apache.cassandra.hadoop;
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+package org.apache.cassandra.hadoop;
+
 
 import java.io.File;
 import java.io.IOException;
@@ -56,7 +53,7 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
     private final Configuration conf;
     private SSTableSimpleUnsortedWriter writer;
     private SSTableLoader loader;
-    private File outputdir;
+    private final File outputdir;
 
     private enum CFType
     {
@@ -162,12 +159,12 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
                 if (colType == ColType.COUNTER)
                     writer.addCounterColumn(mut.getColumn_or_supercolumn().counter_column.name, mut.getColumn_or_supercolumn().counter_column.value);
                 else
-	            {
+                {
                     if(mut.getColumn_or_supercolumn().column.ttl == 0)
-	                     writer.addColumn(mut.getColumn_or_supercolumn().column.name, mut.getColumn_or_supercolumn().column.value, mut.getColumn_or_supercolumn().column.timestamp);
+                        writer.addColumn(mut.getColumn_or_supercolumn().column.name, mut.getColumn_or_supercolumn().column.value, mut.getColumn_or_supercolumn().column.timestamp);
                     else
                         writer.addExpiringColumn(mut.getColumn_or_supercolumn().column.name, mut.getColumn_or_supercolumn().column.value, mut.getColumn_or_supercolumn().column.timestamp, mut.getColumn_or_supercolumn().column.ttl, System.currentTimeMillis() + ((long)(mut.getColumn_or_supercolumn().column.ttl) * 1000));
-	            }
+                }
             }
         }
     }
@@ -203,8 +200,8 @@ implements org.apache.hadoop.mapred.RecordWriter<ByteBuffer,List<Mutation>>
     static class ExternalClient extends SSTableLoader.Client
     {
         private final Map<String, Set<String>> knownCfs = new HashMap<String, Set<String>>();
-        private String hostlist;
-        private int rpcPort;
+        private final String hostlist;
+        private final int rpcPort;
 
         public ExternalClient(String hostlist, int port)
         {

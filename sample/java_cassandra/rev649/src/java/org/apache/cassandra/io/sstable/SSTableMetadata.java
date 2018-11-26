@@ -1,27 +1,26 @@
 /*
-* Licensed to the Apache Software Foundation (ASF) under one
-* or more contributor license agreements.  See the NOTICE file
-* distributed with this work for additional information
-* regarding copyright ownership.  The ASF licenses this file
-* to you under the Apache License, Version 2.0 (the
-* "License"); you may not use this file except in compliance
-* with the License.  You may obtain a copy of the License at
-*
-*    http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing,
-* software distributed under the License is distributed on an
-* "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-* KIND, either express or implied.  See the License for the
-* specific language governing permissions and limitations
-* under the License.
-*/
-
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.cassandra.io.sstable;
 
 import java.io.*;
 import java.util.*;
 
+import org.apache.cassandra.utils.StreamingHistogram;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,14 +38,13 @@ import org.apache.cassandra.utils.EstimatedHistogram;
  *  - compression ratio
  *  - partitioner
  *  - generations of sstables from which this sstable was compacted, if any
+ *  - tombstone drop time histogram
  *
  * An SSTableMetadata should be instantiated via the Collector, openFromDescriptor()
  * or createDefaultInstance()
  */
 public class SSTableMetadata
 {
-    private static Logger logger = LoggerFactory.getLogger(SSTableMetadata.class);
-
     public static final SSTableMetadataSerializer serializer = new SSTableMetadataSerializer();
 
     public final EstimatedHistogram estimatedRowSize;
@@ -56,6 +54,7 @@ public class SSTableMetadata
     public final double compressionRatio;
     public final String partitioner;
     public final Set<Integer> ancestors;
+    public final StreamingHistogram estimatedTombstoneDropTime;
 
     private SSTableMetadata()
     {
@@ -65,10 +64,12 @@ public class SSTableMetadata
              Long.MIN_VALUE,
              Double.MIN_VALUE,
              null,
-             Collections.<Integer>emptySet());
+             Collections.<Integer>emptySet(),
+             defaultTombstoneDropTimeHistogram());
     }
 
-    private SSTableMetadata(EstimatedHistogram rowSizes, EstimatedHistogram columnCounts, ReplayPosition replayPosition, long maxTimestamp, double cr, String partitioner, Set<Integer> ancestors)
+    private SSTableMetadata(EstimatedHistogram rowSizes, EstimatedHistogram columnCounts, ReplayPosition replayPosition, long maxTimestamp,
+                            double cr, String partitioner, Set<Integer> ancestors, StreamingHistogram estimatedTombstoneDropTime)
     {
         this.estimatedRowSize = rowSizes;
         this.estimatedColumnCount = columnCounts;
@@ -77,6 +78,7 @@ public class SSTableMetadata
         this.compressionRatio = cr;
         this.partitioner = partitioner;
         this.ancestors = ancestors;
+        this.estimatedTombstoneDropTime = estimatedTombstoneDropTime;
     }
 
     public static SSTableMetadata createDefaultInstance()
@@ -101,6 +103,26 @@ public class SSTableMetadata
         return new EstimatedHistogram(150);
     }
 
+    static StreamingHistogram defaultTombstoneDropTimeHistogram()
+    {
+        return new StreamingHistogram(SSTable.TOMBSTONE_HISTOGRAM_BIN_SIZE);
+    }
+
+    /**
+     * @param gcBefore
+     * @return estimated droppable tombstone ratio at given gcBefore time.
+     */
+    public double getEstimatedDroppableTombstoneRatio(int gcBefore)
+    {
+        long estimatedColumnCount = this.estimatedColumnCount.mean() * this.estimatedColumnCount.count();
+        if (estimatedColumnCount > 0)
+        {
+            double droppable = estimatedTombstoneDropTime.sum(gcBefore);
+            return droppable / estimatedColumnCount;
+        }
+        return 0.0f;
+    }
+
     public static class Collector
     {
         protected EstimatedHistogram estimatedRowSize = defaultRowSizeHistogram();
@@ -109,6 +131,7 @@ public class SSTableMetadata
         protected long maxTimestamp = Long.MIN_VALUE;
         protected double compressionRatio = Double.MIN_VALUE;
         protected Set<Integer> ancestors = new HashSet<Integer>();
+        protected StreamingHistogram estimatedTombstoneDropTime = defaultTombstoneDropTimeHistogram();
 
         public void addRowSize(long rowSize)
         {
@@ -118,6 +141,11 @@ public class SSTableMetadata
         public void addColumnCount(long columnCount)
         {
             estimatedColumnCount.add(columnCount);
+        }
+
+        public void mergeTombstoneHistogram(StreamingHistogram histogram)
+        {
+            estimatedTombstoneDropTime.merge(histogram);
         }
 
         /**
@@ -142,7 +170,8 @@ public class SSTableMetadata
                                        maxTimestamp,
                                        compressionRatio,
                                        partitioner,
-                                       ancestors);
+                                       ancestors,
+                                       estimatedTombstoneDropTime);
         }
 
         public Collector estimatedRowSize(EstimatedHistogram estimatedRowSize)
@@ -168,6 +197,21 @@ public class SSTableMetadata
             this.ancestors.add(generation);
             return this;
         }
+
+        void update(long size, ColumnStats stats)
+        {
+            /*
+             * The max timestamp is not always collected here (more precisely, row.maxTimestamp() may return Long.MIN_VALUE),
+             * to avoid deserializing an EchoedRow.
+             * This is the reason why it is collected first when calling ColumnFamilyStore.createCompactionWriter
+             * However, for old sstables without timestamp, we still want to update the timestamp (and we know
+             * that in this case we will not use EchoedRow, since CompactionControler.needsDeserialize() will be true).
+            */
+            updateMaxTimestamp(stats.maxTimestamp);
+            addRowSize(size);
+            addColumnCount(stats.columnCount);
+            mergeTombstoneHistogram(stats.tombstoneHistogram);
+        }
     }
 
     public static class SSTableMetadataSerializer
@@ -187,6 +231,7 @@ public class SSTableMetadata
             dos.writeInt(sstableStats.ancestors.size());
             for (Integer g : sstableStats.ancestors)
                 dos.writeInt(g);
+            StreamingHistogram.serializer.serialize(sstableStats.estimatedTombstoneDropTime, dos);
         }
 
         public SSTableMetadata deserialize(Descriptor descriptor) throws IOException
@@ -214,21 +259,24 @@ public class SSTableMetadata
         {
             EstimatedHistogram rowSizes = EstimatedHistogram.serializer.deserialize(dis);
             EstimatedHistogram columnCounts = EstimatedHistogram.serializer.deserialize(dis);
-            ReplayPosition replayPosition = desc.metadataIncludesReplayPosition
+            ReplayPosition replayPosition = desc.version.metadataIncludesReplayPosition
                                           ? ReplayPosition.serializer.deserialize(dis)
                                           : ReplayPosition.NONE;
-            long maxTimestamp = desc.containsTimestamp() ? dis.readLong() : Long.MIN_VALUE;
-            if (!desc.tracksMaxTimestamp) // see javadoc to Descriptor.containsTimestamp
+            long maxTimestamp = desc.version.containsTimestamp() ? dis.readLong() : Long.MIN_VALUE;
+            if (!desc.version.tracksMaxTimestamp) // see javadoc to Descriptor.containsTimestamp
                 maxTimestamp = Long.MIN_VALUE;
-            double compressionRatio = desc.hasCompressionRatio
+            double compressionRatio = desc.version.hasCompressionRatio
                                     ? dis.readDouble()
                                     : Double.MIN_VALUE;
-            String partitioner = desc.hasPartitioner ? dis.readUTF() : null;
-            int nbAncestors = desc.hasAncestors ? dis.readInt() : 0;
+            String partitioner = desc.version.hasPartitioner ? dis.readUTF() : null;
+            int nbAncestors = desc.version.hasAncestors ? dis.readInt() : 0;
             Set<Integer> ancestors = new HashSet<Integer>(nbAncestors);
             for (int i = 0; i < nbAncestors; i++)
                 ancestors.add(dis.readInt());
-            return new SSTableMetadata(rowSizes, columnCounts, replayPosition, maxTimestamp, compressionRatio, partitioner, ancestors);
+            StreamingHistogram tombstoneHistogram = desc.version.tracksTombstones
+                                                   ? StreamingHistogram.serializer.deserialize(dis)
+                                                   : defaultTombstoneDropTimeHistogram();
+            return new SSTableMetadata(rowSizes, columnCounts, replayPosition, maxTimestamp, compressionRatio, partitioner, ancestors, tombstoneHistogram);
         }
     }
 }

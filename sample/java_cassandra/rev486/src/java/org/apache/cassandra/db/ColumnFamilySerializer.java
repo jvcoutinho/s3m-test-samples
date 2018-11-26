@@ -32,6 +32,10 @@ import org.apache.cassandra.io.ICompactSerializer2;
 import org.apache.cassandra.io.util.PageCacheInformer;
 import org.apache.cassandra.utils.PageCacheMetrics;
 
+import org.apache.cassandra.io.util.PageCacheInformer;
+import org.apache.cassandra.utils.PageCacheMetrics;
+
+
 public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
 {
     private static final Logger logger = LoggerFactory.getLogger(ColumnFamilySerializer.class);
@@ -121,6 +125,11 @@ public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
 
     public ColumnFamily deserialize(DataInput dis) throws IOException
     {
+        return deserialize(dis, false);
+    }
+
+    public ColumnFamily deserialize(DataInput dis, boolean intern) throws IOException
+    {
         if (!dis.readBoolean())
             return null;
 
@@ -130,27 +139,29 @@ public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
             throw new UnserializableColumnFamilyException("Couldn't find cfId=" + cfId, cfId);
         ColumnFamily cf = ColumnFamily.create(cfId);
         deserializeFromSSTableNoColumns(cf, dis);
-        deserializeColumns(dis, cf, null);
+        deserializeColumns(dis, cf, intern, null);
+
         return cf;
     }
 
-    public boolean deserializeColumns(DataInput dis, ColumnFamily cf, PageCacheMetrics pageCacheMetrics) throws IOException
+
+    public boolean deserializeColumns(DataInput dis, ColumnFamily cf, boolean intern, PageCacheMetrics pageCacheMetrics) throws IOException
     {
 
         int size = dis.readInt();
 
+        ColumnFamilyStore interner = intern ? Table.open(CFMetaData.getCF(cf.id()).left).getColumnFamilyStore(cf.id()) : null;
         boolean hasColumnsInPageCache = false;
 
-
         if (pageCacheMetrics != null && dis instanceof RandomAccessFile)
-        {
+	{
             RandomAccessFile raf = (RandomAccessFile) dis;
 
             for (int i = 0; i < size; ++i)
             {
                 long startAt = raf.getFilePointer();
 
-                IColumn column = cf.getColumnSerializer().deserialize(dis);
+                IColumn column = cf.getColumnSerializer().deserialize(dis, interner);
 
                 long endAt = raf.getFilePointer();
 
@@ -163,14 +174,13 @@ public class ColumnFamilySerializer implements ICompactSerializer2<ColumnFamily>
             }
         }
         else
-        {
+	{
             for (int i = 0; i < size; ++i)
             {
-                IColumn column = cf.getColumnSerializer().deserialize(dis);
-
+	        IColumn column = cf.getColumnSerializer().deserialize(dis, interner);
                 cf.addColumn(column);
             }
-        }
+	}
 
         return hasColumnsInPageCache;
     }
