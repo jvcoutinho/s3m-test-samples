@@ -215,6 +215,16 @@ abstract class PipelineBase extends Queable implements
         return getResponse(BuilderFactory.LONG);
     }
 
+    public Response<Double> hincrByFloat(String key, String field, double value) {
+        getClient(key).hincrByFloat(key, field, value);
+        return getResponse(BuilderFactory.DOUBLE);
+    }
+
+    public Response<Double> hincrByFloat(byte[] key, byte[] field, double value) {
+        getClient(key).hincrByFloat(key, field, value);
+        return getResponse(BuilderFactory.DOUBLE);
+    }
+
     public Response<Set<String>> hkeys(String key) {
         getClient(key).hkeys(key);
         return getResponse(BuilderFactory.STRING_SET);
@@ -303,6 +313,16 @@ abstract class PipelineBase extends Queable implements
     public Response<Long> incrBy(byte[] key, long integer) {
         getClient(key).incrBy(key, integer);
         return getResponse(BuilderFactory.LONG);
+    }
+
+    public Response<Double> incrByFloat(String key, double value) {
+        getClient(key).incrByFloat(key, value);
+        return getResponse(BuilderFactory.DOUBLE);
+    }
+
+    public Response<Double> incrByFloat(byte[] key, double value) {
+        getClient(key).incrByFloat(key, value);
+        return getResponse(BuilderFactory.DOUBLE);
     }
 
     public Response<String> lindex(String key, int index) {

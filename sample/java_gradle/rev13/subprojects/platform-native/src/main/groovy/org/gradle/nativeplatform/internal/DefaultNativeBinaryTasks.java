@@ -16,48 +16,27 @@
 
 package org.gradle.nativeplatform.internal;
 
-import org.gradle.api.DomainObjectSet;
-import org.gradle.api.Task;
-import org.gradle.api.UnknownDomainObjectException;
-import org.gradle.api.internal.DefaultDomainObjectSet;
 import org.gradle.nativeplatform.NativeBinaryTasks;
 import org.gradle.nativeplatform.tasks.AbstractLinkTask;
-import org.gradle.nativeplatform.tasks.ObjectFilesToBinary;
 import org.gradle.nativeplatform.tasks.CreateStaticLibrary;
+import org.gradle.nativeplatform.tasks.ObjectFilesToBinary;
+import org.gradle.platform.base.internal.DefaultBinaryTasksCollection;
 
-public class DefaultNativeBinaryTasks extends DefaultDomainObjectSet<Task> implements NativeBinaryTasks {
-    private final NativeBinarySpecInternal binary;
-
+public class DefaultNativeBinaryTasks extends DefaultBinaryTasksCollection implements NativeBinaryTasks {
     public DefaultNativeBinaryTasks(NativeBinarySpecInternal binary) {
-        super(Task.class);
-        this.binary = binary;
-    }
-
-    public Task getBuild() {
-        return binary.getBuildTask();
+        super(binary);
     }
 
     public AbstractLinkTask getLink() {
-        return findOnlyWithType(AbstractLinkTask.class);
+        return findSingleTaskWithType(AbstractLinkTask.class);
     }
 
     public CreateStaticLibrary getCreateStaticLib() {
-        return findOnlyWithType(CreateStaticLibrary.class);
+        return findSingleTaskWithType(CreateStaticLibrary.class);
     }
 
     public ObjectFilesToBinary getCreateOrLink() {
         ObjectFilesToBinary link = getLink();
         return link == null ? getCreateStaticLib() : link;
-    }
-
-    private <T extends Task> T findOnlyWithType(Class<T> type) {
-        DomainObjectSet<T> tasks = withType(type);
-        if (tasks.size() == 0) {
-            return null;
-        }
-        if (tasks.size() > 1) {
-            throw new UnknownDomainObjectException(String.format("Multiple task with type '%s' found", type.getSimpleName()));
-        }
-        return tasks.iterator().next();
     }
 }

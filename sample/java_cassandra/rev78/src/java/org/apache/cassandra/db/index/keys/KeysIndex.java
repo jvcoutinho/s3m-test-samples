@@ -56,22 +56,21 @@ public class KeysIndex extends PerColumnSecondaryIndex
         assert baseCfs != null && columnDefs != null;
 
         ColumnDefinition columnDef = columnDefs.iterator().next();
-        CFMetaData indexedCfMetadata = CFMetaData.newIndexMetadata(baseCfs.metadata, columnDef,indexComparator());
+        CFMetaData indexedCfMetadata = CFMetaData.newIndexMetadata(baseCfs.metadata, columnDef, indexComparator());
         indexCfs = ColumnFamilyStore.createColumnFamilyStore(baseCfs.table,
-                                                               indexedCfMetadata.cfName,
-                                                               new LocalPartitioner(columnDef.getValidator()),
-                                                               indexedCfMetadata);
+                                                             indexedCfMetadata.cfName,
+                                                             new LocalPartitioner(columnDef.getValidator()),
+                                                             indexedCfMetadata);
     }
 
     public static AbstractType indexComparator()
     {
         IPartitioner rowPartitioner = StorageService.getPartitioner();
         return (rowPartitioner instanceof OrderPreservingPartitioner || rowPartitioner instanceof ByteOrderedPartitioner)
-                                        ? BytesType.instance
-                                        : new LocalByPartionerType(StorageService.getPartitioner());
+               ? BytesType.instance
+               : new LocalByPartionerType(StorageService.getPartitioner());
     }
 
-    @Override
     public void deleteColumn(DecoratedKey<?> valueKey, ByteBuffer rowKey, IColumn column)
     {
         if (column.isMarkedForDelete())
@@ -85,7 +84,6 @@ public class KeysIndex extends PerColumnSecondaryIndex
             logger.debug("removed index entry for cleaned-up value {}:{}", valueKey, cfi);
     }
 
-    @Override
     public void insertColumn(DecoratedKey<?> valueKey, ByteBuffer rowKey, IColumn column)
     {
         ColumnFamily cfi = ColumnFamily.create(indexCfs.metadata);
@@ -99,25 +97,22 @@ public class KeysIndex extends PerColumnSecondaryIndex
             cfi.addColumn(new Column(rowKey, ByteBufferUtil.EMPTY_BYTE_BUFFER, column.timestamp()));
         }
         if (logger.isDebugEnabled())
-            logger.debug("applying index row {}:{}", valueKey, cfi);
+            logger.debug("applying index row {} in {}", indexCfs.metadata.getKeyValidator().getString(valueKey.key), cfi);
         
         indexCfs.apply(valueKey, cfi);
     }
     
-    @Override
     public void updateColumn(DecoratedKey<?> valueKey, ByteBuffer rowKey, IColumn col)
     {        
         insertColumn(valueKey, rowKey, col);        
     }
 
-    @Override
     public void removeIndex(ByteBuffer columnName) throws IOException
     {        
         indexCfs.removeAllSSTables();
         indexCfs.unregisterMBean();
     }
 
-    @Override
     public void forceBlockingFlush() throws IOException
     {       
         try
@@ -134,37 +129,31 @@ public class KeysIndex extends PerColumnSecondaryIndex
         }
     }
 
-    @Override
     public void unregisterMbean()
     {
         indexCfs.unregisterMBean();
     }
 
-    @Override
-    public ColumnFamilyStore getUnderlyingCfs()
+    public ColumnFamilyStore getIndexCfs()
     {
        return indexCfs;
     }
 
-    @Override
     public SecondaryIndexSearcher createSecondaryIndexSearcher(Set<ByteBuffer> columns)
     {
         return new KeysSearcher(baseCfs.indexManager, columns);
     }
 
-    @Override
     public String getIndexName()
     {
         return indexCfs.columnFamily;
     }
 
-    @Override
     public void renameIndex(String newCfName) throws IOException
     {
         indexCfs.renameSSTables(indexCfs.columnFamily.replace(baseCfs.columnFamily, newCfName));
     }
 
-    @Override
     public void validateOptions() throws ConfigurationException
     {
         // no options used

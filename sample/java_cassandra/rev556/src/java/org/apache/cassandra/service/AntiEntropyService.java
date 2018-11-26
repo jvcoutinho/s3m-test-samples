@@ -39,6 +39,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.io.AbstractCompactedRow;
 import org.apache.cassandra.io.ICompactSerializer;
 import org.apache.cassandra.io.sstable.SSTableReader;
@@ -271,6 +272,7 @@ public class AntiEntropyService
         private transient long validated;
         private transient MerkleTree.TreeRange range;
         private transient MerkleTree.TreeRangeIterator ranges;
+        private transient DecoratedKey lastKey;
 
         public final static MerkleTree.RowHash EMPTY_ROW = new MerkleTree.RowHash(null, new byte[0]);
         
@@ -341,6 +343,10 @@ public class AntiEntropyService
          */
         public void add(AbstractCompactedRow row)
         {
+            assert lastKey == null || lastKey.compareTo(row.key) < 0
+                   : "row " + row.key + " received out of order wrt " + lastKey;
+            lastKey = row.key;
+
             if (mintoken != null)
             {
                 assert ranges != null : "Validator was not prepared()";
@@ -751,6 +757,16 @@ public class AntiEntropyService
             {
                 logger.info("No neighbors to repair with: " + getName() + " completed.");
                 return;
+            }
+
+            // Checking all nodes are live
+            for (InetAddress endpoint : endpoints)
+            {
+                if (!FailureDetector.instance.isAlive(endpoint))
+                {
+                    logger.info("Could not proceed on repair because a neighbor (" + endpoint + ") is dead: " + getName() + " failed.");
+                    return;
+                }
             }
 
             // begin a repair session

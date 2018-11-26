@@ -16,7 +16,6 @@
 package org.gradle.nativebinaries.toolchain.internal.gcc;
 
 import org.gradle.api.Action;
-import org.gradle.api.DomainObjectSet;
 import org.gradle.api.Transformer;
 import org.gradle.api.internal.file.FileResolver;
 import org.gradle.internal.Actions;
@@ -100,7 +99,7 @@ public abstract class AbstractGccCompatibleToolChain extends ExtendableToolChain
         target(platform, Actions.<ConfigurableToolChain>doNothing());
     }
 
-    public void target(DomainObjectSet<Platform> platforms) {
+    public void target(Iterable<? extends Platform> platforms) {
         target(platforms, Actions.<ConfigurableToolChain>doNothing());
     }
 
@@ -112,12 +111,16 @@ public abstract class AbstractGccCompatibleToolChain extends ExtendableToolChain
         target(platformNames, Actions.<ConfigurableToolChain>doNothing());
     }
 
-    public void target(Platform platform, Action<ConfigurableToolChain> action) {
+    public void target(String... platformNames) {
+        target(Arrays.asList(platformNames), Actions.<ConfigurableToolChain>doNothing());
+    }
+
+    public void target(Platform platform, Action<? super ConfigurableToolChain> action) {
         target(platform.getName(), action);
     }
 
-    public void target(DomainObjectSet<Platform> platforms, Action<ConfigurableToolChain> action) {
-        Set<String> platformNames = CollectionUtils.collect(platforms, new Transformer<String, Platform>() {
+    public void target(Iterable<? extends Platform> platforms, Action<? super ConfigurableToolChain> action) {
+        List<String> platformNames = CollectionUtils.collect(platforms, new Transformer<String, Platform>() {
             public String transform(Platform original) {
                 return original.getName();
             }
@@ -125,11 +128,11 @@ public abstract class AbstractGccCompatibleToolChain extends ExtendableToolChain
         target(new DefaultTargetPlatformConfiguration(platformNames, action));
     }
 
-    public void target(String platformName, Action<ConfigurableToolChain> action) {
+    public void target(String platformName, Action<? super ConfigurableToolChain> action) {
         target(new DefaultTargetPlatformConfiguration(asList(platformName), action));
     }
 
-    public void target(List<String> platformNames, Action<ConfigurableToolChain> action) {
+    public void target(List<String> platformNames, Action<? super ConfigurableToolChain> action) {
         target(new DefaultTargetPlatformConfiguration(platformNames, action));
     }
 
@@ -147,7 +150,7 @@ public abstract class AbstractGccCompatibleToolChain extends ExtendableToolChain
         }
 
         DefaultGccConfigurableToolChain configurableToolChain  = instantiator.newInstance(DefaultGccConfigurableToolChain.class, CommandLineToolConfiguration.class, getAsMap(), instantiator, getName(), getDisplayName());
-        // apply the platform configuration
+
         targetPlatformConfigurationConfiguration.apply(configurableToolChain);
 
         initTools(configurableToolChain, result);
@@ -307,9 +310,9 @@ public abstract class AbstractGccCompatibleToolChain extends ExtendableToolChain
 
         //TODO this should be a container of platforms
         private final Collection<String> platformNames;
-        private Action<ConfigurableToolChain> configurationAction;
+        private Action<? super ConfigurableToolChain> configurationAction;
 
-        public DefaultTargetPlatformConfiguration(Collection<String> targetPlatformNames, Action<ConfigurableToolChain> configurationAction) {
+        public DefaultTargetPlatformConfiguration(Collection<String> targetPlatformNames, Action<? super ConfigurableToolChain> configurationAction) {
             this.platformNames = targetPlatformNames;
             this.configurationAction = configurationAction;
         }

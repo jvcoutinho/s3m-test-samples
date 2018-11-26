@@ -1,13 +1,13 @@
 package redis.clients.jedis;
 
+import redis.clients.jedis.BinaryClient.LIST_POSITION;
+import redis.clients.util.Hashing;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.regex.Pattern;
-
-import redis.clients.jedis.BinaryClient.LIST_POSITION;
-import redis.clients.util.Hashing;
 
 public class ShardedJedis extends BinaryShardedJedis implements JedisCommands {
     public ShardedJedis(List<JedisShardInfo> shards) {
@@ -30,6 +30,13 @@ public class ShardedJedis extends BinaryShardedJedis implements JedisCommands {
     public String set(String key, String value) {
 	Jedis j = getShard(key);
 	return j.set(key, value);
+    }
+
+    @Override
+    public String set(String key, String value, String nxxx,
+               String expx, long time) {
+        Jedis j = getShard(key);
+        return j.set(key, value, nxxx, expx, time);
     }
 
     public String get(String key) {
@@ -132,6 +139,11 @@ public class ShardedJedis extends BinaryShardedJedis implements JedisCommands {
 	return j.incrBy(key, integer);
     }
 
+    public Double incrByFloat(String key, double integer) {
+        Jedis j = getShard(key);
+        return j.incrByFloat(key, integer);
+    }
+
     public Long incr(String key) {
 	Jedis j = getShard(key);
 	return j.incr(key);
@@ -175,6 +187,11 @@ public class ShardedJedis extends BinaryShardedJedis implements JedisCommands {
     public Long hincrBy(String key, String field, long value) {
 	Jedis j = getShard(key);
 	return j.hincrBy(key, field, value);
+    }
+
+    public Double hincrByFloat(String key, String field, double value) {
+        Jedis j = getShard(key);
+        return j.hincrByFloat(key, field, value);
     }
 
     public Boolean hexists(String key, String field) {
@@ -569,5 +586,17 @@ public class ShardedJedis extends BinaryShardedJedis implements JedisCommands {
     public ScanResult<Tuple> zscan(String key, final String cursor) {
 	Jedis j = getShard(key);
 	return j.zscan(key, cursor);
+    }
+
+    @Override
+    public Long pfadd(String key, String... elements) {
+	Jedis j = getShard(key);
+	return j.pfadd(key, elements);
+    }
+
+    @Override
+    public long pfcount(String key) {
+	Jedis j = getShard(key);
+	return j.pfcount(key);
     }
 }

@@ -902,10 +902,10 @@ public class CliClient extends CliUserHelp
                 cfDef.setKey_cache_size(Double.parseDouble(mValue));
                 break;
             case READ_REPAIR_CHANCE:
-                double chance = Double.parseDouble(mValue) / 100;
+                double chance = Double.parseDouble(mValue);
 
                 if (chance > 1)
-                    throw new RuntimeException("Error: read_repair_chance / 100 should not be greater than 1.");
+                    throw new RuntimeException("Error: read_repair_chance should not be greater than 1.");
 
                 cfDef.setRead_repair_chance(chance);
                 break;
@@ -1352,7 +1352,7 @@ public class CliClient extends CliUserHelp
                 sessionState.out.printf("      Row cache size / save period in seconds: %s/%s%n", cf_def.row_cache_size, cf_def.row_cache_save_period_in_seconds);
                 sessionState.out.printf("      Key cache size / save period in seconds: %s/%s%n", cf_def.key_cache_size, cf_def.key_cache_save_period_in_seconds);
                 sessionState.out.printf("      Memtable thresholds: %s/%s/%s (millions of ops/minutes/MB)%n",
-                                cf_def.memtable_operations_in_millions, cf_def.memtable_throughput_in_mb, cf_def.memtable_flush_after_mins);
+                                cf_def.memtable_operations_in_millions, cf_def.memtable_flush_after_mins, cf_def.memtable_throughput_in_mb);
                 sessionState.out.printf("      GC grace seconds: %s%n", cf_def.gc_grace_seconds);
                 sessionState.out.printf("      Compaction min/max thresholds: %s/%s%n", cf_def.min_compaction_threshold, cf_def.max_compaction_threshold);
                 sessionState.out.printf("      Read repair chance: %s%n", cf_def.read_repair_chance);

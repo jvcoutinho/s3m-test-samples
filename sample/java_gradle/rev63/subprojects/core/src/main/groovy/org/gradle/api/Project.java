@@ -495,6 +495,7 @@ public interface Project extends Comparable<Project>, ExtensionAware {
     /**
      * <p>Declares that this project has an execution dependency on the project with the given path.</p>
      *
+     * @deprecated Use {@link Task#dependsOn(Object...)} instead.
      * @param path The path of the project which this project depends on.
      * @throws UnknownProjectException If no project with the given path exists.
      */
@@ -504,6 +505,7 @@ public interface Project extends Comparable<Project>, ExtensionAware {
     /**
      * <p>Declares that this project has an execution dependency on the project with the given path.</p>
      *
+     * @deprecated Use {@link Task#dependsOn(Object...)} instead.
      * @param path The path of the project which this project depends on.
      * @param evaluateDependsOnProject If true, adds an evaluation dependency.
      * @throws UnknownProjectException If no project with the given path exists.
@@ -529,6 +531,7 @@ public interface Project extends Comparable<Project>, ExtensionAware {
     /**
      * <p>Declares that all child projects of this project have an execution dependency on this project.</p>
      *
+     * @deprecated Use {@link Task#dependsOn(Object...)} instead.
      * @return this project.
      */
     @Deprecated
@@ -537,6 +540,7 @@ public interface Project extends Comparable<Project>, ExtensionAware {
     /**
      * <p>Declares that this project has an execution dependency on each of its child projects.</p>
      *
+     * @deprecated Use {@link Task#dependsOn(Object...)} instead.
      * @return this project.
      */
     @Deprecated
@@ -545,6 +549,9 @@ public interface Project extends Comparable<Project>, ExtensionAware {
     /**
      * <p>Declares that this project has an execution dependency on each of its child projects.</p>
      *
+     * @deprecated To definde task dependencies use {@link Task#dependsOn(Object...)} instead. 
+     * For declaring evaluation dependencies to child projects, use evaluation dependencies
+     * use {@link #evaluationDependsOnChildren()}.
      * @param evaluateDependsOnProject If true, adds an evaluation dependency.
      * @return this project.
      */
@@ -611,6 +618,9 @@ public interface Project extends Comparable<Project>, ExtensionAware {
      *
      * <ul>
      *
+     * <li>A {@link CharSequence} / {@link String}. Interpreted relative to the project directory, as for {@link #file(Object)}. A string
+     * that starts with {@code file:} is treated as a file URL.</li>
+     *
      * <li>{@link File}. If the file is an absolute file, it is returned as is. Otherwise, the file's path is
      * interpreted relative to the project directory.</li>
      *
@@ -621,10 +631,8 @@ public interface Project extends Comparable<Project>, ExtensionAware {
      *
      * <li>{@link java.util.concurrent.Callable}. The callable's return value is resolved recursively.</li>
      *
-     * <li>{@link Object}. The object's {@code toString()} value is interpreted as a path. If the path is a relative
-     * path, the project directory will be used as a base directory. A String starting with {@code file:} is treated as
-     * a file URL.</li>
-     *
+     * <li>An Object. Its {@code toString()} value is treated the same way as a String, as for {@link #file(Object)}.
+     * This handling of custom Objects has been deprecated and will be removed in the next version of Gradle.</li>
      * </ul>
      *
      * @param path The object to resolve as a File.
@@ -666,7 +674,7 @@ public interface Project extends Comparable<Project>, ExtensionAware {
      * <p>Returns a {@link ConfigurableFileCollection} containing the given files. You can pass any of the following
      * types to this method:</p>
      *
-     * <ul> <li>A {@link String}. Interpreted relative to the project directory, as for {@link #file(Object)}. A string
+     * <ul> <li>A {@link CharSequence} / {@link String}. Interpreted relative to the project directory, as for {@link #file(Object)}. A string
      * that starts with {@code file:} is treated as a file URL.</li>
      *
      * <li>A {@link File}. Interpreted relative to the project directory, as for {@link #file(Object)}.</li>
@@ -687,13 +695,15 @@ public interface Project extends Comparable<Project>, ExtensionAware {
      * <li>A Closure. May return any of the types listed here. The return value of the closure is recursively converted
      * to files. A {@code null} return value is treated as an empty collection.</li>
      *
-     * <li>An Object. Its {@code toString()} value is treated the same way as a String, as for {@link
-     * #file(Object)}.</li> </ul>
+     * <li>A {@link Task}. Converted to the task's output files.</li>
      *
      * <li>A {@link org.gradle.api.tasks.TaskOutputs}. Converted to the output files the related task.</li>
      *
+     * <li>An Object. Its {@code toString()} value is treated the same way as a String, as for {@link #file(Object)}.
+     * Handling custom Objects has been deprecated and will be removed in the next version of Gradle.</li>
+     *
      * <li>A Closure. May return any of the types listed here. The return value of the closure is recursively converted
-     * to files. A {@code null} return value is treated as an empty collection.</li>
+     * to files. A {@code null} return value is treated as an empty collection.</li></ul>
      * <p>The returned file collection is lazy, so that the paths are evaluated only when the contents of the file
      * collection are queried. The file collection is also live, so that it evaluates the above each time the contents
      * of the collection is queried.</p>

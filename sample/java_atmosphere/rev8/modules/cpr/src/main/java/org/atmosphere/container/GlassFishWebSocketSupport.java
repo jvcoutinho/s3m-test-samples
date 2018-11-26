@@ -38,22 +38,24 @@
 package org.atmosphere.container;
 
 import com.sun.grizzly.tcp.Request;
-import com.sun.grizzly.websockets.BaseServerWebSocket;
 import com.sun.grizzly.websockets.DataFrame;
+import com.sun.grizzly.websockets.DefaultWebSocket;
 import com.sun.grizzly.websockets.WebSocketApplication;
 import com.sun.grizzly.websockets.WebSocketEngine;
-import org.atmosphere.cpr.AtmosphereServlet;
+import org.atmosphere.container.version.GrizzlyWebSocket;
 import org.atmosphere.cpr.AtmosphereServlet.Action;
 import org.atmosphere.cpr.AtmosphereServlet.AtmosphereConfig;
-import org.atmosphere.websocket.WebSocketProcessor;
 import org.atmosphere.websocket.WebSocket;
+import org.atmosphere.websocket.WebSocketAdapter;
+import org.atmosphere.websocket.WebSocketProcessor;
+import org.atmosphere.websocket.WebSocketProtocol;
+import org.atmosphere.websocket.protocol.SimpleHttpProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletRequestWrapper;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 
@@ -75,7 +77,7 @@ public class GlassFishWebSocketSupport extends GrizzlyCometSupport {
     @Override
     public void init(ServletConfig sc) throws ServletException {
         super.init(sc);
-        WebSocketEngine.getEngine().register(sc.getServletContext().getContextPath(), new GrizzlyApplication());
+        WebSocketEngine.getEngine().register(new GrizzlyApplication(config));
     }
 
     /**
@@ -118,25 +120,29 @@ public class GlassFishWebSocketSupport extends GrizzlyCometSupport {
     /**
      * Grizzly support for WebSocket.
      */
-    public class GrizzlyApplication extends WebSocketApplication {
+    private final static class GrizzlyApplication extends WebSocketApplication {
+
+        private final AtmosphereConfig config;
 
         private WebSocketProcessor webSocketProcessor;
+        private final WebSocketProtocol webSocketProtocol;
+
+        public GrizzlyApplication(AtmosphereConfig config) {
+            this.config = config;
+            this.webSocketProtocol = config.getServlet().getWebSocketProtocol();
+        }
 
         public void onConnect(com.sun.grizzly.websockets.WebSocket w) {
-
-            if (!BaseServerWebSocket.class.isAssignableFrom(w.getClass())) {
+            super.onConnect(w);
+            logger.debug("onOpen");
+            if (!DefaultWebSocket.class.isAssignableFrom(w.getClass())) {
                 throw new IllegalStateException();
             }
 
-            BaseServerWebSocket webSocket = BaseServerWebSocket.class.cast(w);
+            DefaultWebSocket webSocket = DefaultWebSocket.class.cast(w);
             try {
-
-                webSocketProcessor = (WebSocketProcessor) GrizzlyWebSocket.class.getClassLoader()
-                        .loadClass(config.getServlet().getWebSocketProtocolClassName())
-                        .getDeclaredConstructor(new Class[]{AtmosphereServlet.class, WebSocket.class})
-                        .newInstance(new Object[]{config.getServlet(), new GrizzlyWebSocket(webSocket)});
-
-                webSocketProcessor.dispatch(new HttpServletRequestWrapper(webSocket.getRequest()));
+                webSocketProcessor = new WebSocketProcessor(config.getServlet(), new GrizzlyWebSocket(webSocket), webSocketProtocol);
+                webSocketProcessor.dispatch(webSocket.getRequest());
             } catch (Exception e) {
                 logger.warn("failed to connect to web socket", e);
             }
@@ -147,12 +153,43 @@ public class GlassFishWebSocketSupport extends GrizzlyCometSupport {
             return true;
         }
 
-        public void onMessage(com.sun.grizzly.websockets.WebSocket w, DataFrame dataFrame) {
-            webSocketProcessor.invokeWebSocketProtocol(dataFrame.getTextPayload());
+        @Override
+        public void onClose(com.sun.grizzly.websockets.WebSocket w, DataFrame df) {
+            super.onClose(w, df);
+            logger.debug("onClose {} ");
+            webSocketProcessor.close();
         }
 
-        public void onClose(com.sun.grizzly.websockets.WebSocket webSocket) {
-            webSocketProcessor.close();
+        @Override
+        public void onMessage(com.sun.grizzly.websockets.WebSocket w, String text) {
+            logger.debug("onMessage {} ");
+            webSocketProcessor.invokeWebSocketProtocol(text);
+        }
+
+        @Override
+        public void onMessage(com.sun.grizzly.websockets.WebSocket w, byte[] bytes) {
+            logger.debug("onMessage (bytes) {} ");
+            webSocketProcessor.invokeWebSocketProtocol(bytes, 0, bytes.length);
+        }
+
+        @Override
+        public void onPing(com.sun.grizzly.websockets.WebSocket w, byte[] bytes) {
+            logger.debug("onPing (bytes) {} ");
+        }
+
+        @Override
+        public void onPong(com.sun.grizzly.websockets.WebSocket w, byte[] bytes) {
+            logger.debug("onPong (bytes) {} ");
+        }
+
+        @Override
+        public void onFragment(com.sun.grizzly.websockets.WebSocket w, byte[] bytes, boolean last) {
+            logger.debug("onFragment (bytes) {} ");
+        }
+
+        @Override
+        public void onFragment(com.sun.grizzly.websockets.WebSocket w, String text, boolean last) {
+            logger.debug("onFragment (string) {} ");
         }
 
     }
@@ -160,36 +197,5 @@ public class GlassFishWebSocketSupport extends GrizzlyCometSupport {
     @Override
     public boolean supportWebSocket() {
         return true;
-    }
-
-    public class GrizzlyWebSocket implements WebSocket {
-
-        private final com.sun.grizzly.websockets.WebSocket webSocket;
-
-        public GrizzlyWebSocket(com.sun.grizzly.websockets.WebSocket webSocket) {
-            this.webSocket = webSocket;
-        }
-
-        public void writeError(int errorCode, String message) throws IOException {
-        }
-
-        public void redirect(String location) throws IOException {
-        }
-
-        public void write(byte frame, String data) throws IOException {
-            webSocket.send(data);
-        }
-
-        public void write(byte frame, byte[] data) throws IOException {
-            webSocket.send(new String(data));
-        }
-
-        public void write(byte frame, byte[] data, int offset, int length) throws IOException {
-            webSocket.send(new String(data, offset, length));
-        }
-
-        public void close() throws IOException {
-            webSocket.close();
-        }
     }
 }

@@ -27,8 +27,8 @@ import java.util.logging.Level;
 
 import org.apache.commons.lang.StringUtils;
 import org.cloudifysource.dsl.cloud.Cloud;
-import org.cloudifysource.dsl.cloud.CloudTemplate;
 import org.cloudifysource.dsl.cloud.RemoteExecutionModes;
+import org.cloudifysource.dsl.cloud.compute.ComputeTemplate;
 import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.esc.driver.provisioning.BaseProvisioningDriver;
 import org.cloudifysource.esc.driver.provisioning.CloudProvisioningException;
@@ -36,7 +36,7 @@ import org.cloudifysource.esc.driver.provisioning.MachineDetails;
 import org.cloudifysource.esc.util.IPUtils;
 
 /**
- * 
+ *
  * @author yael
  * @since 2.5.0
  *
@@ -44,20 +44,20 @@ import org.cloudifysource.esc.util.IPUtils;
 public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 
 	private static String PROVIDER_ID = "dynamic-byon";
-	private AtomicInteger idCounter = new AtomicInteger(0);
+	private final AtomicInteger idCounter = new AtomicInteger(0);
 	private final Object mutex = new Object();
-	private LinkedList<String> managementMachines = new LinkedList<String>();
+	private final LinkedList<String> managementMachines = new LinkedList<String>();
 
 	@Override
-	public MachineDetails startMachine(String locationId, long duration, TimeUnit unit) 
+	public MachineDetails startMachine(String locationId, long duration, TimeUnit unit)
 			throws TimeoutException, CloudProvisioningException {
 		String currnentId = PROVIDER_ID + "{" + idCounter.getAndIncrement() + "}";
-		final CloudTemplate template = cloud.getTemplates().get(cloudTemplateName);
-		
+		final ComputeTemplate template = cloud.getCloudCompute().getTemplates().get(cloudTemplateName);
+
 		Map<String, Object> custom = template.getCustom();
 		Closure<String> getNodeClosure =  (Closure<String>) custom.get(CloudifyConstants.DYNAMIC_BYON_START_MACHINE_KEY);
 		String ip = getNodeClosure.call();
-		
+
 		return createMachine(currnentId, template, ip);
 	}
 
@@ -65,27 +65,27 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 	public MachineDetails[] startManagementMachines(long duration, TimeUnit unit)
 			throws TimeoutException, CloudProvisioningException {
 		publishEvent(EVENT_ATTEMPT_START_MGMT_VMS);
-		
-		final CloudTemplate managementTemplate =
-				this.cloud.getTemplates().get(this.cloud.getConfiguration().getManagementMachineTemplate());
+
+		final ComputeTemplate managementTemplate =
+				this.cloud.getCloudCompute().getTemplates().get(this.cloud.getConfiguration().getManagementMachineTemplate());
 		Map<String, Object> custom = managementTemplate.getCustom();
 		@SuppressWarnings("unchecked")
 		Closure<List<String>> getNodesClosure =  (Closure<List<String>>) custom.get(CloudifyConstants.DYNAMIC_BYON_START_MNG_MACHINES_KEY);
 		List<String> ips = getNodesClosure.call();
-		
+
 		final int numberOfManagementMachines = this.cloud.getProvider().getNumberOfManagementMachines();
 		final int size = ips.size();
 		if (size != numberOfManagementMachines) {
-			throw new CloudProvisioningException("DynamicByonProvisioningDriver [startManagementMachines] - expected " 
+			throw new CloudProvisioningException("DynamicByonProvisioningDriver [startManagementMachines] - expected "
 					+ numberOfManagementMachines + " management machines, but got " + size + " machines.");
 		}
-		synchronized (mutex) {			
+		synchronized (mutex) {
 			managementMachines.addAll(ips);
 		}
-		
+
 		logger.info("Starting " + numberOfManagementMachines + " management machines.");
 		final long endTime = System.currentTimeMillis() + unit.toMillis(duration);
-		final MachineDetails[] createdMachines = doStartManagementMachines(endTime, numberOfManagementMachines);		
+		final MachineDetails[] createdMachines = doStartManagementMachines(endTime, numberOfManagementMachines);
 		publishEvent(EVENT_MGMT_VMS_STARTED);
 		logger.info("Successfully added " + numberOfManagementMachines + " management machines: " + ips);
 		return createdMachines;
@@ -96,7 +96,7 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 			throws InterruptedException, TimeoutException,
 			CloudProvisioningException {
 		logger.info("Stopping machine [" + machineIp + "]");
-		final CloudTemplate template = cloud.getTemplates().get(cloudTemplateName);
+		final ComputeTemplate template = cloud.getCloudCompute().getTemplates().get(cloudTemplateName);
 		final Map<String, Object> custom = template.getCustom();
 		Closure<?> stopClosure =  (Closure<?>) custom.get(CloudifyConstants.DYNAMIC_BYON_STOP_MACHINE_KEY);
 		stopClosure.call(machineIp);
@@ -104,13 +104,14 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 	}
 
 	@Override
-	public void stopManagementMachines() 
+	public void stopManagementMachines()
 			throws TimeoutException, CloudProvisioningException {
-		CloudTemplate template = cloud.getTemplates().get(cloud.getConfiguration().getManagementMachineTemplate());
+		ComputeTemplate template = cloud.getCloudCompute().getTemplates()
+				.get(cloud.getConfiguration().getManagementMachineTemplate());
 		Map<String, Object> custom = template.getCustom();
 		Closure<?> stopClosure =  (Closure<?>) custom.get(CloudifyConstants.DYNAMIC_BYON_STOP_MACHINE_KEY);
 		stopClosure.call();
-		synchronized (mutex) {			
+		synchronized (mutex) {
 			managementMachines.clear();
 		}
 	}
@@ -125,11 +126,11 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 	protected void initDeployer(Cloud cloud) {
 		// TODO Auto-generated method stub
 	}
-	
+
 	@Override
-	protected MachineDetails createServer(String serverName, long endTime, CloudTemplate template) 
+	protected MachineDetails createServer(String serverName, long endTime, ComputeTemplate template) 
 			throws CloudProvisioningException, TimeoutException {
-		
+
 		String ip;
 		synchronized (mutex) {
 			ip = managementMachines.removeFirst();
@@ -141,12 +142,12 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 			throw new TimeoutException();
 		}
 		logger.info("Successfully started machine [" + ip + "]");
-		
+
 		return machine;
 	}
 
 	private MachineDetails createMachine(String serverName,
-			CloudTemplate template, String ip) throws CloudProvisioningException {
+			ComputeTemplate template, String ip) throws CloudProvisioningException {
 		final CustomNodeImpl customNode = new CustomNodeImpl(PROVIDER_ID, serverName, ip,
 				template.getUsername(), template.getPassword(), serverName);
 
@@ -154,7 +155,7 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 			String resolvedIP = IPUtils.resolveHostName(customNode.getPrivateIP());
 			customNode.setResolvedIP(resolvedIP);
 			if (template.getRemoteExecution() == RemoteExecutionModes.WINRM) {
-				customNode.setLoginPort(RemoteExecutionModes.WINRM.getPort());
+				customNode.setLoginPort(RemoteExecutionModes.WINRM.getDefaultPort());
 			}
 			IPUtils.validateConnection(customNode.getResolvedIP(), customNode.getLoginPort());
 		} catch (Exception e) {
@@ -164,7 +165,7 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 					+ ", connection failed on port "
 					+ customNode.getLoginPort(), e);
 			throw new CloudProvisioningException(e);
-		} 
+		}
 		return createMachineDetails(customNode, template);
 	}
 
@@ -179,7 +180,7 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 						+ firstCreationException.getMessage(), firstCreationException);
 	}
 
-	private MachineDetails createMachineDetails(CustomNodeImpl customNode, CloudTemplate template) throws CloudProvisioningException {
+	private MachineDetails createMachineDetails(CustomNodeImpl customNode, ComputeTemplate template) throws CloudProvisioningException {
 		MachineDetails machineDetails = new MachineDetails();
 
 		machineDetails.setAgentRunning(false);
@@ -209,6 +210,11 @@ public class DynamicByonProvisioningDriver extends BaseProvisioningDriver {
 		machineDetails.setFileTransferMode(template.getFileTransfer());
 
 		return machineDetails;
+	}
+
+	@Override
+	public Object getComputeContext() {
+		return null;
 	}
 
 }

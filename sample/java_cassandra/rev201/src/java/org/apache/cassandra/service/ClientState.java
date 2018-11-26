@@ -122,7 +122,7 @@ public class ClientState
     public void hasKeyspaceSchemaAccess(Permission perm) throws InvalidRequestException
     {
         validateLogin();
-        
+
         resourceClear();
         Set<Permission> perms = DatabaseDescriptor.getAuthority().authorize(user, resource);
 

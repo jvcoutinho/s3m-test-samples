@@ -3,9 +3,43 @@ package org.junit.experimental.interceptor;
 import org.junit.runners.model.FrameworkMethod;
 import org.junit.runners.model.Statement;
 
-public class TestWatchman implements StatementInterceptor {
-	public Statement intercept(final Statement base,
-			final FrameworkMethod method) {
+/**
+ * TestWatchman is a base class for Rules that take note of the testing
+ * action, without modifying it. For example, this class will keep a log of each
+ * passing and failing test:
+ * 
+ * <pre>
+ * public static class WatchmanTest {
+ * 	private static String watchedLog;
+ * 
+ * 	&#064;Rule
+ * 	public MethodRule watchman= new TestWatchman() {
+ * 		&#064;Override
+ * 		public void failed(Throwable e, FrameworkMethod method) {
+ * 			watchedLog+= method.getName() + &quot; &quot; + e.getClass().getSimpleName()
+ * 					+ &quot;\n&quot;;
+ * 		}
+ * 
+ * 		&#064;Override
+ * 		public void succeeded(FrameworkMethod method) {
+ * 			watchedLog+= method.getName() + &quot; &quot; + &quot;success!\n&quot;;
+ * 		}
+ * 	};
+ * 
+ * 	&#064;Test
+ * 	public void fails() {
+ * 		fail();
+ * 	}
+ * 
+ * 	&#064;Test
+ * 	public void succeeds() {
+ * 	}
+ * }
+ * </pre>
+ */
+public class TestWatchman implements MethodRule {
+	public Statement apply(final Statement base, final FrameworkMethod method,
+			Object target) {
 		return new Statement() {
 			@Override
 			public void evaluate() throws Throwable {
@@ -22,20 +56,38 @@ public class TestWatchman implements StatementInterceptor {
 			}
 		};
 	}
-	
-	// TODO (May 25, 2009 9:44:36 PM): Fix max and Theories
 
+	/**
+	 * Invoked when a test method succeeds
+	 * 
+	 * @param method
+	 */
 	public void succeeded(FrameworkMethod method) {
 	}
 
-	// TODO (Apr 28, 2009 10:50:47 PM): is this right? Is
-	// FrameworkMethod too powerful?
+	/**
+	 * Invoked when a test method fails
+	 * 
+	 * @param e 
+	 * @param method
+	 */
 	public void failed(Throwable e, FrameworkMethod method) {
 	}
 
+	/**
+	 * Invoked when a test method is about to start
+	 * 
+	 * @param method  
+	 */
 	public void starting(FrameworkMethod method) {
 	}
 
+
+	/**
+	 * Invoked when a test method finishes (whether passing or failing)
+	 * 
+	 * @param method  
+	 */
 	public void finished(FrameworkMethod method) {
 	}
 }

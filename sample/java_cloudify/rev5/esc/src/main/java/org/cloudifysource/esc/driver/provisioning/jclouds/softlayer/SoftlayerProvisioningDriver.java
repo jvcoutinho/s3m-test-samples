@@ -20,7 +20,11 @@ package org.cloudifysource.esc.driver.provisioning.jclouds.softlayer;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.Module;
+import org.cloudifysource.domain.cloud.compute.ComputeTemplate;
+import org.cloudifysource.esc.driver.provisioning.CloudProvisioningException;
+import org.cloudifysource.esc.driver.provisioning.ComputeDriverConfiguration;
 import org.cloudifysource.esc.driver.provisioning.jclouds.DefaultProvisioningDriver;
+import org.cloudifysource.esc.util.Utils;
 import org.jclouds.softlayer.compute.functions.VirtualGuestToNodeMetadata;
 import org.jclouds.softlayer.compute.functions.VirtualGuestToReducedNodeMetaData;
 
@@ -36,15 +40,43 @@ import java.util.Set;
 public class SoftlayerProvisioningDriver extends DefaultProvisioningDriver {
 
     @Override
-    public Set<Module> setupModules() {
-        Set<Module> modules = super.setupModules();
+    public void setConfig(final ComputeDriverConfiguration configuration) throws CloudProvisioningException {
 
-        modules.add(new AbstractModule() {
-            @Override
-            protected void configure() {
-                bind(VirtualGuestToNodeMetadata.class).to(VirtualGuestToReducedNodeMetaData.class);
-            }
-        });
+        ComputeTemplate computeTemplate =
+                configuration.getCloud().getCloudCompute().getTemplates().get(configuration.getCloudTemplate());
+        boolean bareMetal = Utils.getBoolean(computeTemplate.getCustom()
+                .get("org.cloudifysource.softlayer.bmi"), false);
+        if (bareMetal) {
+            configuration.getCloud().getProvider().setProvider("softlayer-bmi");
+        } else {
+            configuration.getCloud().getProvider().setProvider("softlayer");
+        }
+        super.setConfig(configuration);
+    }
+
+    @Override
+    public Set<Module> setupModules(final String templateName, final ComputeTemplate template) {
+        Set<Module> modules = super.setupModules(templateName, template);
+        boolean bareMetal = Utils.getBoolean(template.getCustom()
+                .get("org.cloudifysource.softlayer.bmi"), false);
+        if (!bareMetal) {
+            modules.add(new AbstractModule() {
+                @Override
+                protected void configure() {
+                    bind(VirtualGuestToNodeMetadata.class).to(VirtualGuestToReducedNodeMetaData.class);
+                }
+            });
+        }
         return modules;
+    }
+
+    @Override
+    protected String getProviderForTemplate(final String templateName, final ComputeTemplate template) {
+        boolean bareMetal = Utils.getBoolean(template.getCustom()
+                .get("org.cloudifysource.softlayer.bmi"), false);
+        if (bareMetal) {
+            return "softlayer-bmi";
+        }
+        return "softlayer";
     }
 }

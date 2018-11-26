@@ -15,7 +15,6 @@
  */
 package org.atmosphere.cpr;
 
-import org.atmosphere.websocket.WebSocketProcessor;
 import org.atmosphere.websocket.WebSocketProtocol;
 
 /**
@@ -165,4 +164,37 @@ public interface ApplicationConfig {
      * Recover from a {@link Broadcaster} that has been destroyed. Default is true.
      */
     String RECOVER_DEAD_BROADCASTER = ApplicationConfig.class.getPackage().getName() + ".recoverFromDestroyedBroadcaster";
+    /**
+     * Tell Atmosphere which AtmosphereHandler should be used. You can do the same using atmosphere.xml
+     */
+    String ATMOSPHERE_HANDLER = AtmosphereHandler.class.getName();
+    /**
+     * The AtmosphereHandler defined using the property will be mapped to that value. Same as atmosphere.xml
+     */
+    String ATMOSPHERE_HANDLER_MAPPING = AtmosphereHandler.class.getName() + ".contextRoot";
+    /**
+     * The Servlet's name where {@link Meteor} will be available
+     */
+    String SERVLET_CLASS = "org.atmosphere.servlet";
+    /**
+     * The Filter's name where {@link Meteor} will be available
+     */
+    String FILTER_CLASS = "org.atmosphere.filter";
+    /**
+     * The Servlet's mapping value to the SERVLET_CLASS
+     */
+    String MAPPING = "org.atmosphere.mapping";
+     /**
+     * The Servlet's mapping value to the FILTER_CLASS
+     */
+    String FILTER_NAME = "org.atmosphere.filter.name";
+    /**
+     * Define when a broadcasted message is cached. Value can be 'beforeFilter' or 'afterFilter'. Default is afterFilter
+     */
+    String BROADCASTER_CACHE_STRATEGY = BroadcasterCache.class.getName() + ".strategy";
+    /**
+     * Support the Jersey location header for resuming. WARNING: this can cause memory leak if the connection is never
+     * resumed.
+     */
+    String SUPPORT_LOCATION_HEADER = "org.atmosphere.jersey.supportLocationHeader";
 }

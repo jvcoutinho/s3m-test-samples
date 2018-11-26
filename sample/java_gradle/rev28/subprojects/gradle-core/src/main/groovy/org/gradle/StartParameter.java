@@ -44,6 +44,12 @@ import java.util.*;
  * @see GradleLauncher
  */
 public class StartParameter {
+    public static final String GRADLE_USER_HOME_PROPERTY_KEY = "gradle.user.home";
+    /**
+     * The default user home directory.
+     */
+    public static final File DEFAULT_GRADLE_USER_HOME = new File(System.getProperty("user.home") + "/.gradle");
+
     /**
      * Specifies the detail to include in stacktraces.
      */
@@ -59,11 +65,6 @@ public class StartParameter {
     private boolean searchUpwards = true;
     private Map<String, String> projectProperties = new HashMap<String, String>();
     private Map<String, String> systemPropertiesArgs = new HashMap<String, String>();
-    public static final String GRADLE_USER_HOME_PROPERTY_KEY = "gradle.user.home";
-    /**
-     * The default user home directory.
-     */
-    public static final File DEFAULT_GRADLE_USER_HOME = new File(System.getProperty("user.home") + "/.gradle");
     private File gradleUserHomeDir = new File(GUtil.elvis(System.getProperty(GRADLE_USER_HOME_PROPERTY_KEY), DEFAULT_GRADLE_USER_HOME.getAbsolutePath()));
     private CacheUsage cacheUsage = CacheUsage.ON;
     private ScriptSource buildScriptSource;
@@ -74,9 +75,6 @@ public class StartParameter {
     private ShowStacktrace showStacktrace = ShowStacktrace.INTERNAL_EXCEPTIONS;
     private File buildFile;
     private List<File> initScripts = new ArrayList<File>();
-    private boolean showHelp;
-    private boolean showVersion;
-    private boolean launchGUI;
     private boolean dryRun;
     private boolean noOpt;
     private boolean colorOutput = true;
@@ -114,8 +112,6 @@ public class StartParameter {
         startParameter.logLevel = logLevel;
         startParameter.colorOutput = colorOutput;
         startParameter.showStacktrace = showStacktrace;
-        startParameter.showHelp = showHelp;
-        startParameter.showVersion = showVersion;
         startParameter.dryRun = dryRun;
         startParameter.noOpt = noOpt;
         startParameter.profile = profile;
@@ -380,22 +376,6 @@ public class StartParameter {
         this.cacheUsage = cacheUsage;
     }
 
-    public boolean isShowHelp() {
-        return showHelp;
-    }
-
-    public void setShowHelp(boolean showHelp) {
-        this.showHelp = showHelp;
-    }
-
-    public boolean isShowVersion() {
-        return showVersion;
-    }
-
-    public void setShowVersion(boolean showVersion) {
-        this.showVersion = showVersion;
-    }
-
     public boolean isDryRun() {
         return dryRun;
     }
@@ -503,17 +483,6 @@ public class StartParameter {
     }
 
     /**
-       Determines whether or not the GUI was requested to be launched.
-    */
-    public boolean isLaunchGUI() {
-        return launchGUI;
-    }
-
-    public void setLaunchGUI(boolean launchGUI) {
-        this.launchGUI = launchGUI;
-    }
-
-    /**
      * Returns true if logging output should be displayed in color when Gradle is running in a terminal which supports
      * color output. The default value is true.
      *
@@ -567,9 +536,6 @@ public class StartParameter {
                 ", showStacktrace=" + showStacktrace +
                 ", buildFile=" + buildFile +
                 ", initScripts=" + initScripts +
-                ", showHelp=" + showHelp +
-                ", showVersion=" + showVersion +
-                ", launchGUI=" + launchGUI +
                 ", dryRun=" + dryRun +
                 ", noOpt=" + noOpt +
                 ", profile=" + profile +

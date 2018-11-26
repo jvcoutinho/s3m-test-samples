@@ -25,6 +25,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -136,6 +138,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     private volatile DefaultInteger rowCacheSaveInSeconds;
     private volatile DefaultInteger keyCacheSaveInSeconds;
 
+    /** Lock to allow migrations to block all flushing, so we can be sure not to write orphaned data files */
+    public final Lock flushLock = new ReentrantLock();
+    
     // Locally held row/key cache scheduled tasks
     private volatile ScheduledFuture<?> saveRowCacheTask;
     private volatile ScheduledFuture<?> saveKeyCacheTask;
@@ -695,21 +700,12 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
          * contexts (commitlog position) were read, even though the flush executor
          * is multithreaded.
          */
-        Table.flusherLock.writeLock().lock();
+        Table.switchLock.writeLock().lock();
         try
         {
             if (oldMemtable.isFrozen())
             {
                 logger.debug("memtable is already frozen; another thread must be flushing it");
-                return null;
-            }
-
-            boolean isDropped = isIndex()
-                              ? DatabaseDescriptor.getCFMetaData(table.name, getParentColumnfamily()) == null
-                              : DatabaseDescriptor.getCFMetaData(metadata.cfId) == null;
-            if (isDropped)
-            {
-                logger.debug("column family was dropped; no point in flushing");
                 return null;
             }
 
@@ -759,8 +755,15 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
         finally
         {
-            Table.flusherLock.writeLock().unlock();
+            Table.switchLock.writeLock().unlock();
         }
+    }
+
+    public boolean isDropped()
+    {
+        return isIndex()
+               ? DatabaseDescriptor.getCFMetaData(table.name, getParentColumnfamily()) == null
+               : DatabaseDescriptor.getCFMetaData(metadata.cfId) == null;
     }
 
     void switchBinaryMemtable(DecoratedKey key, ByteBuffer buffer)
@@ -1084,14 +1087,14 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
      */
     private Memtable getMemtableThreadSafe()
     {
-        Table.flusherLock.readLock().lock();
+        Table.switchLock.readLock().lock();
         try
         {
             return memtable;
         }
         finally
         {
-            Table.flusherLock.readLock().unlock();
+            Table.switchLock.readLock().unlock();
         }
     }
 
@@ -1138,7 +1141,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 // TODO this actually isn't a good meature of pending tasks
     public int getPendingTasks()
     {
-        return Table.flusherLock.getQueueLength();
+        return Table.switchLock.getQueueLength();
     }
 
     public long getWriteCount()

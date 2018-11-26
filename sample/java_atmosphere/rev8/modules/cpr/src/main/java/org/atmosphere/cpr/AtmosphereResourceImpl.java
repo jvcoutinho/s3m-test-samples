@@ -72,6 +72,8 @@ public class AtmosphereResourceImpl implements
     private static final Logger logger = LoggerFactory.getLogger(AtmosphereResourceImpl.class);
 
     public static final String PRE_SUSPEND = AtmosphereResourceImpl.class.getName() + ".preSuspend";
+    public static final String SKIP_BROADCASTER_CREATION = AtmosphereResourceImpl.class.getName() + ".skipBroadcasterCreation";
+    public static final String METEOR = Meteor.class.getName();
 
     // The {@link HttpServletRequest}
     private final HttpServletRequest req;
@@ -89,6 +91,7 @@ public class AtmosphereResourceImpl implements
     private final AtmosphereResourceEventImpl event;
     private String beginCompatibleData;
     private boolean useWriter = true;
+    private boolean isResumed = false;
 
     private final ConcurrentLinkedQueue<AtmosphereResourceEventListener> listeners =
             new ConcurrentLinkedQueue<AtmosphereResourceEventListener>();
@@ -159,61 +162,77 @@ public class AtmosphereResourceImpl implements
     public void resume() {
         // Strangely but possible two thread try to resume at the same time.
         try {
-        synchronized (event) {
-            if (!event.isResuming() && !event.isResumedOnTimeout() && event.isSuspended() && isInScope) {
-                action.type = AtmosphereServlet.Action.TYPE.RESUME;
+            synchronized (event) {
+                if (!isResumed && isInScope) {
+                    action.type = AtmosphereServlet.Action.TYPE.RESUME;
+                    isResumed = true;
 
-                try {
-                    logger.debug("Resuming {}", getRequest());
-                } catch (Throwable ex) {
-                    // Jetty NPE toString()
-                    // Ignore
-                    // Stop here as the request object as becomes invalid.
-                    return;
-                }
-
-                // We need it as Jetty doesn't support timeout
-                Broadcaster b = getBroadcaster(false);
-                if (!b.isDestroyed() && b instanceof DefaultBroadcaster) {
-                    ((DefaultBroadcaster) b).broadcastOnResume(this);
-                }
-
-                notifyListeners();
-                listeners.clear();
-
-                try {
-                    if (!b.isDestroyed()) {
-                        broadcaster.removeAtmosphereResource(this);
+                    try {
+                        logger.debug("Resuming {}", getRequest());
+                    } catch (Throwable ex) {
+                        // Jetty NPE toString()
+                        // Ignore
+                        // Stop here as the request object as becomes invalid.
+                        return;
                     }
-                } catch (IllegalStateException ex) {
-                    logger.warn("Unable to resume", this);
-                    logger.debug(ex.getMessage(), ex);
+
+                    // We need it as Jetty doesn't support timeout
+                    Broadcaster b = getBroadcaster(false);
+                    if (!b.isDestroyed() && b instanceof DefaultBroadcaster) {
+                        ((DefaultBroadcaster) b).broadcastOnResume(this);
+                    }
+
+                    notifyListeners();
+                    listeners.clear();
+
+                    try {
+                        if (!b.isDestroyed()) {
+                            broadcaster.removeAtmosphereResource(this);
+                        }
+                    } catch (IllegalStateException ex) {
+                        logger.warn("Unable to resume", this);
+                        logger.debug(ex.getMessage(), ex);
+                    }
+
+                    if (b.getScope() == Broadcaster.SCOPE.REQUEST) {
+                        logger.debug("Broadcaster's scope is set to request, destroying it {}", b.getID());
+                        b.destroy();
+                    }
+
+                    // Resuming here means we need to pull away from all other Broadcaster, if they exists.
+                    if (BroadcasterFactory.getDefault() != null) {
+                        BroadcasterFactory.getDefault().removeAllAtmosphereResource(this);
+                    }
+
+                    try {
+                        req.setAttribute(ApplicationConfig.RESUMED_ON_TIMEOUT, Boolean.FALSE);
+                        Meteor m = (Meteor) req.getAttribute(METEOR);
+                        if (m != null) {
+                            m.destroy();
+                        }
+                    } catch (Exception ex) {
+                        logger.debug("Cannot resume an already resumed/cancelled request");
+                    }
+
+                    if (req.getAttribute(PRE_SUSPEND) == null) {
+                        cometSupport.action(this);
+                    }
+                } else {
+                    logger.debug("Cannot resume an already resumed/cancelled request {}", getRequest());
                 }
 
-                if (b.getScope() == Broadcaster.SCOPE.REQUEST) {
-                    logger.debug("Broadcaster's scope is set to request, destroying it {}", b.getID());
-                    b.destroy();
+                if (AtmosphereResponse.class.isAssignableFrom(response.getClass())) {
+                    AtmosphereResponse.class.cast(response).destroy();
                 }
 
-                // Resuming here means we need to pull away from all other Broadcaster, if they exists.
-                if (BroadcasterFactory.getDefault() != null) {
-                    BroadcasterFactory.getDefault().removeAllAtmosphereResource(this);
+                if (AtmosphereRequest.class.isAssignableFrom(req.getClass())) {
+                    AtmosphereRequest.class.cast(req).destroy();
                 }
-
-                try {
-                    req.setAttribute(ApplicationConfig.RESUMED_ON_TIMEOUT, Boolean.FALSE);
-                } catch (Exception ex) {
-                    logger.debug("Cannot resume an already resumed/cancelled request");
-                }
-                if (req.getAttribute(PRE_SUSPEND) == null) {
-                    cometSupport.action(this);
-                }
-            } else {
-                logger.debug("Cannot resume an already resumed/cancelled request {}", getRequest());
             }
-        }
         } catch (Throwable t) {
             logger.trace("Wasn't able to resume a connection {}", this, t);
+        } finally {
+            event.setMessage(null);
         }
     }
 
@@ -252,7 +271,12 @@ public class AtmosphereResourceImpl implements
 
     public void suspend(long timeout, boolean flushComment) {
 
-        if (req.getSession(false) != null && req.getSession().getMaxInactiveInterval() != -1 && req.getSession().getMaxInactiveInterval() * 1000 < timeout) {
+        if (event.isSuspended()) return;
+
+        if (config.isSupportSession()
+                && req.getSession(false) != null
+                && req.getSession().getMaxInactiveInterval() != -1
+                && req.getSession().getMaxInactiveInterval() * 1000 < timeout) {
             throw new IllegalStateException("Cannot suspend a " +
                     "response longer than the session timeout. Increase the value of session-timeout in web.xml");
         }
@@ -266,7 +290,7 @@ public class AtmosphereResourceImpl implements
         if (!event.isResumedOnTimeout()) {
 
             if (req.getHeaders("Connection") != null && req.getHeaders("Connection").hasMoreElements()) {
-                String[] e = req.getHeaders("Connection").nextElement().split(",");
+                String[] e = req.getHeaders("Connection").nextElement().toString().split(",");
                 for (String upgrade : e) {
                     if (upgrade.trim().equalsIgnoreCase(WEBSOCKET_UPGRADE)) {
                         if (writeHeaders && !cometSupport.supportWebSocket()) {
@@ -301,9 +325,18 @@ public class AtmosphereResourceImpl implements
 
             // TODO: We can possibly optimize that call by avoiding creating a Broadcaster if we are sure the Broadcaster
             // is unique.
-            if (broadcaster.getScope() == Broadcaster.SCOPE.REQUEST) {
-                String id = broadcaster.getID();
-                Class<? extends Broadcaster> clazz = broadcaster.getClass();
+            boolean isJersey = req.getAttribute(FrameworkConfig.CONTAINER_RESPONSE) != null;
+
+            boolean skipCreation = false;
+            if (req.getAttribute(SKIP_BROADCASTER_CREATION) != null) {
+                skipCreation = true;
+            }
+
+            // Null means SCOPE=REQUEST set by a Meteor
+            if (!skipCreation && (broadcaster == null || broadcaster.getScope() == Broadcaster.SCOPE.REQUEST) && !isJersey) {
+                String id = broadcaster != null ? broadcaster.getID() : getClass().getName();
+                Class<? extends Broadcaster> clazz = broadcaster != null ? broadcaster.getClass() : DefaultBroadcaster.class;
+
                 broadcaster = BroadcasterFactory.getDefault().lookup(clazz, id, false);
                 if (broadcaster == null || broadcaster.getAtmosphereResources().size() > 0) {
                     broadcaster = BroadcasterFactory.getDefault().lookup(clazz, id + "/" + UUID.randomUUID(), true);
@@ -343,12 +376,11 @@ public class AtmosphereResourceImpl implements
         }
     }
 
-
     /**
      * {@inheritDoc}
      */
-    public HttpServletRequest getRequest() {
-        if (!isInScope) {
+    public HttpServletRequest getRequest(boolean enforceScope) {
+        if (enforceScope && !isInScope) {
             throw new IllegalStateException("Request object no longer" + " valid. This object has been cancelled");
         }
         return req;
@@ -357,11 +389,25 @@ public class AtmosphereResourceImpl implements
     /**
      * {@inheritDoc}
      */
-    public HttpServletResponse getResponse() {
-        if (!isInScope) {
+    public HttpServletResponse getResponse(boolean enforceScope) {
+        if (enforceScope && !isInScope) {
             throw new IllegalStateException("Response object no longer valid. This object has been cancelled");
         }
         return response;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public HttpServletRequest getRequest() {
+        return getRequest(true);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    public HttpServletResponse getResponse() {
+        return getResponse(true);
     }
 
     /**
@@ -371,7 +417,7 @@ public class AtmosphereResourceImpl implements
         return getBroadcaster(true);
     }
 
-    private Broadcaster getBroadcaster(boolean autoCreate) {
+    protected Broadcaster getBroadcaster(boolean autoCreate) {
         if (broadcaster == null) {
             throw new IllegalStateException("No Broadcaster associated with this AtmosphereResource.");
         }
@@ -382,14 +428,16 @@ public class AtmosphereResourceImpl implements
         }
 
         if (autoCreate && broadcaster.isDestroyed() && BroadcasterFactory.getDefault() != null) {
-            logger.warn("Broadcaster {} has been destroyed and cannot be re-used. Recreating a new one with the same name. You can turn off that" +
+            logger.debug("Broadcaster {} has been destroyed and cannot be re-used. Recreating a new one with the same name. You can turn off that" +
                     " mechanism by adding, in web.xml, {} set to false", broadcaster.getID(), ApplicationConfig.RECOVER_DEAD_BROADCASTER);
 
+            Broadcaster.SCOPE scope = broadcaster.getScope();
             synchronized (this) {
-                String id = broadcaster.getScope() != Broadcaster.SCOPE.REQUEST ? broadcaster.getID() : broadcaster.getID() + ".recovered" + UUID.randomUUID();
+                String id = scope != Broadcaster.SCOPE.REQUEST ? broadcaster.getID() : broadcaster.getID() + ".recovered" + UUID.randomUUID();
 
                 // Another Thread may have added the Broadcaster.
                 broadcaster = BroadcasterFactory.getDefault().lookup(id, true);
+                broadcaster.setScope(scope);
                 broadcaster.addAtmosphereResource(this);
             }
         }
@@ -425,7 +473,7 @@ public class AtmosphereResourceImpl implements
      *
      * @param isInScope
      */
-    protected void setIsInScope(boolean isInScope) {
+    public void setIsInScope(boolean isInScope) {
         this.isInScope = isInScope;
     }
 
@@ -546,16 +594,31 @@ public class AtmosphereResourceImpl implements
             return;
         }
 
-        if (event.isResuming() || event.isResumedOnTimeout()) {
-            onResume(event);
-        } else if (event.isCancelled()) {
-            onDisconnect(event);
-        } else if (!isSuspendEvent.getAndSet(true) && event.isSuspended()) {
-            onSuspend(event);
-        } else if (event.throwable() != null) {
-            onThrowable(event);
-        } else {
-            onBroadcast(event);
+        Action oldAction = action;
+        try {
+            if (event.isResuming() || event.isResumedOnTimeout()) {
+                onResume(event);
+            } else if (event.isCancelled()) {
+                onDisconnect(event);
+            } else if (!isSuspendEvent.getAndSet(true) && event.isSuspended()) {
+                onSuspend(event);
+            } else if (event.throwable() != null) {
+                onThrowable(event);
+            } else {
+                onBroadcast(event);
+            }
+
+            if (oldAction.type != action.type) {
+                action().type = Action.TYPE.CREATED;
+            }
+        } catch (Throwable t) {
+            logger.trace("Listener error {}", t);
+            AtmosphereResourceEventImpl.class.cast(event).setThrowable(t);
+            try {
+                onThrowable(event);
+            } catch (Throwable t2) {
+                logger.warn("Listener error {}", t2);
+            }
         }
     }
 
@@ -603,6 +666,30 @@ public class AtmosphereResourceImpl implements
 
     public ConcurrentLinkedQueue<AtmosphereResourceEventListener> atmosphereResourceEventListener() {
         return listeners;
+    }
+
+    public void cancel() throws IOException {
+        action.type = Action.TYPE.RESUME;
+        cometSupport.action(this);
+        // We must close the underlying WebSocket as well.
+        if (AtmosphereResponse.class.isAssignableFrom(response.getClass())) {
+            AtmosphereResponse.class.cast(response).close();
+            AtmosphereResponse.class.cast(response).destroy();
+        }
+
+        if (AtmosphereRequest.class.isAssignableFrom(req.getClass())) {
+            AtmosphereRequest.class.cast(req).destroy();
+        }
+
+        // TODO: Grab some measurement.
+//        req = null;
+//        response = null;
+
+        // Just in case
+        if (broadcaster != null) {
+            broadcaster.removeAtmosphereResource(this);
+        }
+        event.destroy();
     }
 
     @Override

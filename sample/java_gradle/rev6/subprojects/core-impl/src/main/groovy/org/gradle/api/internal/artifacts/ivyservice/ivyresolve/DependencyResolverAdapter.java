@@ -34,17 +34,21 @@ import java.text.ParseException;
  * A {@link ModuleVersionRepository} wrapper around an Ivy {@link DependencyResolver}.
  */
 public class DependencyResolverAdapter implements ModuleVersionRepository {
-    private final String id;
+    private final DependencyResolverIdentifier identifier;
     private final DependencyResolver resolver;
     private final DownloadOptions downloadOptions = new DownloadOptions();
 
-    public DependencyResolverAdapter(String id, DependencyResolver resolver) {
-        this.id = id;
+    public DependencyResolverAdapter(DependencyResolver resolver) {
+        this.identifier = new DependencyResolverIdentifier(resolver);
         this.resolver = resolver;
     }
 
     public String getId() {
-        return id;
+        return identifier.getUniqueId();
+    }
+
+    public String getName() {
+        return identifier.getName();
     }
 
     @Override
@@ -83,7 +87,7 @@ public class DependencyResolverAdapter implements ModuleVersionRepository {
             }
             return new DefaultModuleVersionDescriptor(revision.getDescriptor(), isChanging(revision));
         } catch (ParseException e) {
-            throw UncheckedException.asUncheckedException(e);
+            throw UncheckedException.throwAsUncheckedException(e);
         }
     }
 

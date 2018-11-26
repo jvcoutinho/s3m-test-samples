@@ -13,6 +13,11 @@
 package clojure.lang;
 
 import java.math.BigInteger;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.lang.ref.SoftReference;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.Reference;
 
 public class Util{
 static public boolean equiv(Object k1, Object k2){
@@ -22,11 +27,17 @@ static public boolean equiv(Object k1, Object k2){
 		{
 		if(k1 instanceof Number && k2 instanceof Number)
 			return Numbers.equiv(k1, k2);
-		else if(k1 instanceof IPersistentCollection && k2 instanceof IPersistentCollection)
-			return ((IPersistentCollection)k1).equiv(k2);
+		else if(k1 instanceof IPersistentCollection || k2 instanceof IPersistentCollection)
+			return pcequiv(k1,k2);
 		return k1.equals(k2);
 		}
 	return false;
+}
+
+static public boolean pcequiv(Object k1, Object k2){
+	if(k1 instanceof IPersistentCollection)
+		return ((IPersistentCollection)k1).equiv(k2);
+	return ((IPersistentCollection)k2).equiv(k1);
 }
 
 static public boolean equals(Object k1, Object k2){
@@ -89,4 +100,17 @@ static public ISeq ret1(ISeq ret, Object nil){
 		return ret;
 }
 
+static public <K,V> void clearCache(ReferenceQueue rq, ConcurrentHashMap<K, SoftReference<V>> cache){
+		//cleanup any dead entries
+	if(rq.poll() != null)
+		{
+		while(rq.poll() != null)
+			;
+		for(Map.Entry<K, SoftReference<V>> e : cache.entrySet())
+			{
+			if(e.getValue().get() == null)
+				cache.remove(e.getKey(), e.getValue());
+			}
+		}
+}
 }

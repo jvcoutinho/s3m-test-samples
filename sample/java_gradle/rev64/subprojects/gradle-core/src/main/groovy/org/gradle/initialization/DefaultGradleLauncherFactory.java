@@ -32,7 +32,6 @@ import org.gradle.listener.ListenerManager;
 import org.gradle.logging.LoggingManagerFactory;
 import org.gradle.logging.LoggingManagerInternal;
 import org.gradle.logging.ProgressLoggerFactory;
-import org.gradle.logging.ProgressLoggingBridge;
 import org.gradle.util.WrapUtil;
 
 /**
@@ -54,7 +53,6 @@ public class DefaultGradleLauncherFactory implements GradleLauncherFactory {
 
         // Register default loggers 
         ListenerManager listenerManager = sharedServices.get(ListenerManager.class);
-        listenerManager.useLogger(new ProgressLoggingBridge());
         listenerManager.addListener(new BuildProgressLogger(sharedServices.get(ProgressLoggerFactory.class)));
     }
 
@@ -71,6 +69,7 @@ public class DefaultGradleLauncherFactory implements GradleLauncherFactory {
         ListenerManager listenerManager = serviceRegistry.get(ListenerManager.class);
         LoggingManagerInternal loggingManager = serviceRegistry.get(LoggingManagerFactory.class).create();
         loggingManager.setLevel(startParameter.getLogLevel());
+        loggingManager.colorStdOutAndStdErr(startParameter.isColorOutput());
 
         //this hooks up the ListenerManager and LoggingConfigurer so you can call Gradle.addListener() with a StandardOutputListener.
         loggingManager.addStandardOutputListener(listenerManager.getBroadcaster(StandardOutputListener.class));

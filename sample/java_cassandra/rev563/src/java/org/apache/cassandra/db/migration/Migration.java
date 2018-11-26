@@ -45,8 +45,6 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.UUIDGen;
 
-import static com.google.common.base.Charsets.UTF_8;
-
 /**
  * A migration represents a single metadata mutation (cf dropped, added, etc.).  Migrations can be applied locally, or
  * serialized and sent to another machine where it can be applied there. Each migration has a version represented by
@@ -94,22 +92,6 @@ public abstract class Migration
         this.lastVersion = lastVersion;
     }
     
-    // block compactions and flushing.
-    protected final void acquireLocks()
-    {
-        CompactionManager.instance.getCompactionLock().lock();
-        Table.getFlushLock().lock();
-    }
-    
-    protected final void releaseLocks()
-    {
-        Table.getFlushLock().unlock();
-        CompactionManager.instance.getCompactionLock().unlock();
-    }
-
-    /** override this to perform logic before writing the migration or applying it.  defaults to nothing. */
-    public void beforeApplyModels() {}
-    
     /** apply changes */
     public final void apply() throws IOException, ConfigurationException
     {
@@ -121,8 +103,6 @@ public abstract class Migration
         if (!clientMode)
             rm.apply();
 
-        beforeApplyModels();
-        
         // write migration.
         if (!clientMode)
         {
@@ -237,12 +217,12 @@ public abstract class Migration
         long now = System.currentTimeMillis();
         // add a column for each keyspace
         for (KSMetaData ksm : ksms)
-            rm.add(new QueryPath(SCHEMA_CF, null, ByteBuffer.wrap(ksm.name.getBytes(UTF_8))), SerDeUtils.serialize(ksm.deflate()), now);
+            rm.add(new QueryPath(SCHEMA_CF, null, ByteBufferUtil.bytes(ksm.name)), SerDeUtils.serialize(ksm.deflate()), now);
         // add the schema
         rm.add(new QueryPath(SCHEMA_CF,
                              null,
                              DefsTable.DEFINITION_SCHEMA_COLUMN_NAME),
-                             ByteBuffer.wrap(org.apache.cassandra.avro.KsDef.SCHEMA$.toString().getBytes(UTF_8)),
+                             ByteBufferUtil.bytes(org.apache.cassandra.avro.KsDef.SCHEMA$.toString()),
                              now);
         return rm;
     }
@@ -323,7 +303,7 @@ public abstract class Migration
     
     public static ByteBuffer toUTF8Bytes(UUID version)
     {
-        return ByteBuffer.wrap(version.toString().getBytes(UTF_8));
+        return ByteBufferUtil.bytes(version.toString());
     }
     
     public static boolean isLegalName(String s)

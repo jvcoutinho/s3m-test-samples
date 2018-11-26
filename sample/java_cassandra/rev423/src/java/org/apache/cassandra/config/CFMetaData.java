@@ -50,7 +50,7 @@ public final class CFMetaData
     public final static double DEFAULT_KEY_CACHE_SIZE = 200000;
     public final static double DEFAULT_READ_REPAIR_CHANCE = 1.0;
     public final static int DEFAULT_ROW_CACHE_SAVE_PERIOD_IN_SECONDS = 0;
-    public final static int DEFAULT_KEY_CACHE_SAVE_PERIOD_IN_SECONDS = 3600;
+    public final static int DEFAULT_KEY_CACHE_SAVE_PERIOD_IN_SECONDS = 4 * 3600;
     public final static int DEFAULT_GC_GRACE_SECONDS = 864000;
     public final static int DEFAULT_MIN_COMPACTION_THRESHOLD = 4;
     public final static int DEFAULT_MAX_COMPACTION_THRESHOLD = 32;
@@ -801,14 +801,17 @@ public final class CFMetaData
         newDef.subcomparator_type = def.getSubcomparator_type();
         
         List<org.apache.cassandra.avro.ColumnDef> columnMeta = new ArrayList<org.apache.cassandra.avro.ColumnDef>();
-        for (org.apache.cassandra.thrift.ColumnDef cdef : def.getColumn_metadata())
+        if (def.isSetColumn_metadata())
         {
-            org.apache.cassandra.avro.ColumnDef tdef = new org.apache.cassandra.avro.ColumnDef();
-            tdef.name = ByteBufferUtil.clone(cdef.BufferForName());
-            tdef.validation_class = cdef.getValidation_class();
-            tdef.index_name = cdef.getIndex_name();
-            tdef.index_type = cdef.getIndex_type() == null ? null : org.apache.cassandra.avro.IndexType.valueOf(cdef.getIndex_type().name());
-            columnMeta.add(tdef);
+            for (org.apache.cassandra.thrift.ColumnDef cdef : def.getColumn_metadata())
+            {
+                org.apache.cassandra.avro.ColumnDef tdef = new org.apache.cassandra.avro.ColumnDef();
+                tdef.name = ByteBufferUtil.clone(cdef.BufferForName());
+                tdef.validation_class = cdef.getValidation_class();
+                tdef.index_name = cdef.getIndex_name();
+                tdef.index_type = cdef.getIndex_type() == null ? null : org.apache.cassandra.avro.IndexType.valueOf(cdef.getIndex_type().name());
+                 columnMeta.add(tdef);
+            }
         }
         newDef.column_metadata = columnMeta;
         return newDef;

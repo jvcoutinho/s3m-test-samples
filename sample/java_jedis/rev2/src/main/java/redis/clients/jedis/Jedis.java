@@ -7,7 +7,7 @@ import redis.clients.util.Slowlog;
 import java.net.URI;
 import java.util.*;
 
-public class Jedis extends BinaryJedis implements JedisCommands, MultiKeyCommands, AdvancedJedisCommands, ScriptingCommands {
+public class Jedis extends BinaryJedis implements JedisCommands, MultiKeyCommands, AdvancedJedisCommands, ScriptingCommands, ClusterCommands {
     public Jedis(final String host) {
 	super(host);
     }
@@ -3076,4 +3076,64 @@ public class Jedis extends BinaryJedis implements JedisCommands, MultiKeyCommand
     	String relpy = client.getBulkReply();
     	return (relpy != null ? new Double(relpy) : null);
     }
+
+    public String clusterNodes() {
+    	checkIsInMulti();
+    	client.clusterNodes();
+    	return client.getBulkReply();
+    }
+    
+    public String clusterMeet(final String ip, final int port) {
+    	checkIsInMulti();
+    	client.clusterMeet(ip, port);
+    	return client.getStatusCodeReply();
+    }
+    
+    public String clusterAddSlots(final int ...slots) {
+    	checkIsInMulti();
+    	client.clusterAddSlots(slots);
+    	return client.getStatusCodeReply();
+    }
+    
+    public String clusterDelSlots(final int ...slots) {
+    	checkIsInMulti();
+    	client.clusterDelSlots(slots);
+    	return client.getStatusCodeReply();
+    }
+    
+    public String clusterInfo() {
+    	checkIsInMulti();
+    	client.clusterInfo();
+    	return client.getStatusCodeReply();
+    }
+    
+    public List<String> clusterGetKeysInSlot(final int slot, final int count) {
+    	checkIsInMulti();
+    	client.clusterGetKeysInSlot(slot, count);
+    	return client.getMultiBulkReply();
+    }
+    
+    public String clusterSetSlotNode(final int slot, final String nodeId) {
+    	checkIsInMulti();
+    	client.clusterSetSlotNode(slot, nodeId);
+    	return client.getStatusCodeReply();
+    }
+    
+    public String clusterSetSlotMigrating(final int slot, final String nodeId) {
+    	checkIsInMulti();
+    	client.clusterSetSlotMigrating(slot, nodeId);
+    	return client.getStatusCodeReply();
+    }
+    
+    public String clusterSetSlotImporting(final int slot, final String nodeId) {
+    	checkIsInMulti();
+    	client.clusterSetSlotImporting(slot, nodeId);
+    	return client.getStatusCodeReply();
+    }
+
+	public String asking() {
+		checkIsInMulti();
+    	client.asking();
+    	return client.getStatusCodeReply();
+	}
 }

@@ -29,14 +29,16 @@ import java.util.logging.Level;
 
 import org.apache.commons.lang.StringUtils;
 import org.cloudifysource.dsl.cloud.Cloud;
-import org.cloudifysource.dsl.cloud.CloudTemplate;
+import org.cloudifysource.dsl.cloud.compute.ComputeTemplate;
 import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.dsl.internal.CloudifyErrorMessages;
+import org.cloudifysource.dsl.rest.response.ControllerDetails;
 import org.cloudifysource.esc.byon.ByonDeployer;
 import org.cloudifysource.esc.driver.provisioning.BaseProvisioningDriver;
 import org.cloudifysource.esc.driver.provisioning.CloudProvisioningException;
 import org.cloudifysource.esc.driver.provisioning.CustomNode;
 import org.cloudifysource.esc.driver.provisioning.MachineDetails;
+import org.cloudifysource.esc.driver.provisioning.ManagementLocator;
 import org.cloudifysource.esc.driver.provisioning.ProvisioningDriver;
 import org.cloudifysource.esc.driver.provisioning.context.ProvisioningDriverClassContextAware;
 import org.cloudifysource.esc.util.FileUtils;
@@ -62,8 +64,9 @@ import com.gigaspaces.grid.gsa.GSA;
  *
  */
 public class ByonProvisioningDriver extends BaseProvisioningDriver implements ProvisioningDriver,
-		ProvisioningDriverClassContextAware {
+		ProvisioningDriverClassContextAware, ManagementLocator {
 
+	private static final int MANAGEMENT_LOCATION_TIMEOUT = 10;
 	private static final int THREAD_WAITING_IDLE_TIME_IN_SECS = 10;
 	private static final int AGENT_SHUTDOWN_TIMEOUT_IN_MINUTES = 2;
 	private static final String CLOUD_NODES_LIST = "nodesList";
@@ -79,14 +82,15 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 	private boolean cleanRemoteDirectoryOnStart = false;
 
 	@SuppressWarnings("unchecked")
-	private void addTemplatesToDeployer(final ByonDeployer deployer, final Map<String, CloudTemplate> templatesMap)
+	private void addTemplatesToDeployer(final ByonDeployer deployer, final Map<String, ComputeTemplate> templatesMap)
 			throws Exception {
 		logger.info("addTempaltesToDeployer - adding the following tempaltes to the deployer: "
 				+ templatesMap.keySet());
 
 		List<Map<String, String>> nodesList = null;
 		for (final String templateName : templatesMap.keySet()) {
-			final Map<String, Object> customSettings = cloud.getTemplates().get(templateName).getCustom();
+			final Map<String, Object> customSettings = cloud.getCloudCompute()
+					.getTemplates().get(templateName).getCustom();
 			if (customSettings != null) {
 				final List<Map<Object, Object>> originalNodesList =
 						(List<Map<Object, Object>>) customSettings.get(CLOUD_NODES_LIST);
@@ -116,10 +120,10 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 		List<Map<String, String>> nodesList;
 		nodesList = new LinkedList<Map<String, String>>();
 
-		for (Map<Object, Object> originalMap : originalNodesList) {
-			Map<String, String> newMap = new LinkedHashMap<String, String>();
-			Set<Entry<Object, Object>> entries = originalMap.entrySet();
-			for (Entry<Object, Object> entry : entries) {
+		for (final Map<Object, Object> originalMap : originalNodesList) {
+			final Map<String, String> newMap = new LinkedHashMap<String, String>();
+			final Set<Entry<Object, Object>> entries = originalMap.entrySet();
+			for (final Entry<Object, Object> entry : entries) {
 				newMap.put(entry.getKey().toString(), entry.getValue().toString());
 			}
 			nodesList.add(newMap);
@@ -138,7 +142,7 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 						throws Exception {
 					logger.info("Creating BYON context deployer for cloud: " + cloud.getName());
 					final ByonDeployer newDeployer = new ByonDeployer();
-					addTemplatesToDeployer(newDeployer, cloud.getTemplates());
+					addTemplatesToDeployer(newDeployer, cloud.getCloudCompute().getTemplates());
 					return newDeployer;
 				}
 			});
@@ -163,7 +167,7 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 	 * @throws Exception .
 	 */
 	public void updateDeployerTemplates(final Cloud cloud) throws Exception {
-		final Map<String, CloudTemplate> cloudTemplatesMap = cloud.getTemplates();
+		final Map<String, ComputeTemplate> cloudTemplatesMap = cloud.getCloudCompute().getTemplates();
 		final List<String> cloudTemplateNames = new LinkedList<String>(cloudTemplatesMap.keySet());
 		final List<String> deployerTemplateNames = deployer.getTemplatesList();
 
@@ -177,9 +181,9 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 		missingTemplates.removeAll(deployerTemplateNames);
 		if (!missingTemplates.isEmpty()) {
 			logger.info("initDeployer - found missing templates: " + missingTemplates);
-			final Map<String, CloudTemplate> templatesMap = new HashMap<String, CloudTemplate>();
+			final Map<String, ComputeTemplate> templatesMap = new HashMap<String, ComputeTemplate>();
 			for (final String templateName : missingTemplates) {
-				final CloudTemplate cloudTemplate = cloudTemplatesMap.get(templateName);
+				final ComputeTemplate cloudTemplate = cloudTemplatesMap.get(templateName);
 				templatesMap.put(templateName, cloudTemplate);
 			}
 			addTemplatesToDeployer(deployer, templatesMap);
@@ -257,13 +261,13 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 		}
 		final String newServerName = createNewServerName();
 		logger.info("Attempting to start a new cloud machine");
-		final CloudTemplate template = this.cloud.getTemplates().get(cloudTemplateName);
+		final ComputeTemplate template = this.cloud.getCloudCompute().getTemplates().get(cloudTemplateName);
 
 		return createServer(newServerName, endTime, template);
 	}
 
 	@Override
-	protected MachineDetails createServer(final String serverName, final long endTime, final CloudTemplate template)
+	protected MachineDetails createServer(final String serverName, final long endTime, final ComputeTemplate template)
 			throws CloudProvisioningException, TimeoutException {
 
 		final CustomNode node;
@@ -343,6 +347,20 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 		logger.info("DefaultCloudProvisioning: startMachine - management == " + management);
 
 		// first check if management already exists
+		final MachineDetails[] mds = findManagementInAdmin();
+		if (mds.length != 0) {
+			return mds;
+		}
+
+		// launch the management machines
+		publishEvent(EVENT_ATTEMPT_START_MGMT_VMS);
+		final int numberOfManagementMachines = this.cloud.getProvider().getNumberOfManagementMachines();
+		final MachineDetails[] createdMachines = doStartManagementMachines(endTime, numberOfManagementMachines);
+		publishEvent(EVENT_MGMT_VMS_STARTED);
+		return createdMachines;
+	}
+
+	private MachineDetails[] findManagementInAdmin() throws CloudProvisioningException, TimeoutException {
 		try {
 			final Set<CustomNode> managementServers = getExistingManagementServers(0);
 			if (managementServers != null && !managementServers.isEmpty()) {
@@ -360,17 +378,11 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 
 				return managementMachines;
 			}
+			return new MachineDetails[0];
 		} catch (final InterruptedException e) {
 			publishEvent("prov_management_lookup_failed");
 			throw new CloudProvisioningException("Failed to lookup existing manahement servers.", e);
 		}
-
-		// launch the management machines
-		publishEvent(EVENT_ATTEMPT_START_MGMT_VMS);
-		final int numberOfManagementMachines = this.cloud.getProvider().getNumberOfManagementMachines();
-		final MachineDetails[] createdMachines = doStartManagementMachines(endTime, numberOfManagementMachines);
-		publishEvent(EVENT_MGMT_VMS_STARTED);
-		return createdMachines;
 	}
 
 	/**
@@ -453,9 +465,12 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 		if (StringUtils.isNotBlank(managementIP)) {
 			// TODO don't fly if timeout reached because expectedGsmCount wasn't
 			// reached
-			final Admin admin = Utils.getAdminObject(managementIP, expectedGsmCount);
+			final Integer discoveryPort = getLusPort();
+			final Admin admin = Utils.getAdminObject(managementIP, expectedGsmCount, discoveryPort);
 			try {
 				final GridServiceManagers gsms = admin.getGridServiceManagers();
+				// make sure a GSM is discovered
+				gsms.waitForAtLeastOne(MANAGEMENT_LOCATION_TIMEOUT, TimeUnit.SECONDS);
 				for (final GridServiceManager gsm : gsms) {
 					final CustomNode managementServer = deployer.getServerByIP(cloudTemplateName, gsm.getMachine()
 							.getHostAddress());
@@ -472,12 +487,21 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 		return existingManagementServers;
 	}
 
+	Integer getLusPort() {
+		Integer discoveryPort = cloud.getConfiguration().getComponents().getDiscovery().getDiscoveryPort();
+		if (discoveryPort == null) {
+			discoveryPort = CloudifyConstants.DEFAULT_LUS_PORT;
+		}
+		return discoveryPort;
+	}
+
 	private void stopAgentAndWait(final int expectedGsmCount, final String ipAddress)
 			throws TimeoutException,
 			InterruptedException {
 
 		if (admin == null) {
-			admin = Utils.getAdminObject(ipAddress, expectedGsmCount);
+			final Integer discoveryPort = getLusPort();
+			admin = Utils.getAdminObject(ipAddress, expectedGsmCount, discoveryPort);
 		}
 
 		final Map<String, GridServiceAgent> agentsMap = admin.getGridServiceAgents().getHostAddress();
@@ -572,7 +596,7 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 
 	private MachineDetails createMachineDetailsFromNode(final CustomNode node)
 			throws CloudProvisioningException {
-		final CloudTemplate template = this.cloud.getTemplates().get(this.cloudTemplateName);
+		final ComputeTemplate template = this.cloud.getCloudCompute().getTemplates().get(this.cloudTemplateName);
 
 		final MachineDetails md = createMachineDetailsForTemplate(template);
 
@@ -638,4 +662,47 @@ public class ByonProvisioningDriver extends BaseProvisioningDriver implements Pr
 	public ByonDeployer getDeployer() {
 		return this.deployer;
 	}
+
+	@Override
+	public Object getComputeContext() {
+		return null;
+	}
+
+	@Override
+	public MachineDetails[] getExistingManagementServers() throws CloudProvisioningException {
+		try {
+			return findManagementInAdmin();
+		} catch (final TimeoutException e) {
+			throw new CloudProvisioningException(e);
+		}
+	}
+
+	@Override
+	public MachineDetails[] getExistingManagementServers(final ControllerDetails[] controllers)
+			throws CloudProvisioningException, UnsupportedOperationException {
+		final Set<String> ips = new HashSet<String>();
+		for (final ControllerDetails controllerDetails : controllers) {
+			ips.add(controllerDetails.getPrivateIp());
+		}
+
+		final Set<CustomNode> allNodesByTemplateName =
+				this.deployer.getAllNodesByTemplateName(this.cloud.getConfiguration().getManagementMachineTemplate());
+		final Set<CustomNode> managementNodes = new HashSet<CustomNode>();
+
+		for (final CustomNode node : allNodesByTemplateName) {
+			final String ip = node.getPrivateIP();
+			if (ips.contains(ip)) {
+				managementNodes.add(node);
+			}
+		}
+
+		final MachineDetails[] result = new MachineDetails[managementNodes.size()];
+		final int i = 0;
+		for (final CustomNode node : managementNodes) {
+			result[i] = createMachineDetailsFromNode(node);
+		}
+		return result;
+
+	}
+
 }

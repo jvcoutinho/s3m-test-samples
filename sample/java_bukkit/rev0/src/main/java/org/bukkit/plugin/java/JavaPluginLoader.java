@@ -8,6 +8,7 @@ import java.lang.reflect.Constructor;
 import java.net.URL;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.regex.Pattern;
@@ -21,8 +22,10 @@ import org.bukkit.event.entity.EntityDamageByBlockEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageByProjectileEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityListener;
+import org.bukkit.event.entity.EntityTargetEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.event.server.PluginEvent;
 import org.bukkit.event.server.ServerListener;
@@ -190,6 +193,9 @@ public final class JavaPluginLoader implements PluginLoader {
                 case REDSTONE_CHANGE:
                     trueListener.onBlockRedstoneChange((BlockFromToEvent)event);
                     break;
+                case BLOCK_BURN:
+                    trueListener.onBlockBurn((BlockBurnEvent)event);
+                    break;
             }
         } else if(listener instanceof ServerListener) {
             ServerListener trueListener = (ServerListener)listener;
@@ -230,13 +236,16 @@ public final class JavaPluginLoader implements PluginLoader {
                     trueListener.onEntityDamage((EntityDamageEvent)event);
                     break;
                 case ENTITY_DEATH:
-                    // TODO: ENTITY_DEATH hook
+                    trueListener.onEntityDeath((EntityDeathEvent)event);
                     break;
                 case ENTITY_COMBUST:
                     trueListener.onEntityCombust((EntityCombustEvent)event);
                     break;
                 case ENTITY_EXPLODE:
                     trueListener.onEntityExplode((EntityExplodeEvent)event);
+                    break;
+                case ENTITY_TARGET:
+                    trueListener.onEntityTarget((EntityTargetEvent)event);
                     break;
             }
         } else if (listener instanceof VehicleListener) {
@@ -293,10 +302,20 @@ public final class JavaPluginLoader implements PluginLoader {
 
         if (plugin.isEnabled()) {
             JavaPlugin jPlugin = (JavaPlugin)plugin;
+            ClassLoader cloader = jPlugin.getClassLoader();
 
             server.getPluginManager().callEvent(new PluginEvent(Event.Type.PLUGIN_DISABLE, plugin));
 
             jPlugin.setEnabled(false);
+
+            if (cloader instanceof PluginClassLoader) {
+                PluginClassLoader loader = (PluginClassLoader)cloader;
+                Set<String> names = loader.getClasses();
+
+                for (String name : names) {
+                    classes.remove(name);
+                }
+            }
         }
     }
 }

@@ -37,15 +37,18 @@
  */
 package org.atmosphere.websocket;
 
+import org.atmosphere.cpr.AsynchronousProcessor;
 import org.atmosphere.cpr.AtmosphereHandler;
 import org.atmosphere.cpr.AtmosphereRequest;
 import org.atmosphere.cpr.AtmosphereResource;
 import org.atmosphere.cpr.AtmosphereResourceEventImpl;
 import org.atmosphere.cpr.AtmosphereResourceEventListener;
 import org.atmosphere.cpr.AtmosphereResourceImpl;
+import org.atmosphere.cpr.AtmosphereResponse;
 import org.atmosphere.cpr.AtmosphereServlet;
 import org.atmosphere.cpr.FrameworkConfig;
 import org.atmosphere.cpr.HeaderConfig;
+import org.atmosphere.cpr.Meteor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +61,7 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Like the {@link org.atmosphere.cpr.AsynchronousProcessor} class, this class is responsible for dispatching WebSocket request to the
@@ -73,11 +77,7 @@ public class WebSocketProcessor implements Serializable {
     private final AtmosphereServlet atmosphereServlet;
     private final WebSocket webSocket;
     private final WebSocketProtocol webSocketProtocol;
-
     private final AtomicBoolean loggedMsg = new AtomicBoolean(false);
-
-    private AtmosphereResource<HttpServletRequest, HttpServletResponse> resource;
-    private AtmosphereHandler handler;
 
     public WebSocketProcessor(AtmosphereServlet atmosphereServlet, WebSocket webSocket, WebSocketProtocol webSocketProtocol) {
         this.webSocket = webSocket;
@@ -87,50 +87,91 @@ public class WebSocketProcessor implements Serializable {
 
     public final void dispatch(final HttpServletRequest request) throws IOException {
         if (!loggedMsg.getAndSet(true)) {
-            logger.info("Atmosphere detected WebSocket: {}", webSocket.getClass().getName());
+            logger.debug("Atmosphere detected WebSocket: {}", webSocket.getClass().getName());
         }
 
-        WebSocketHttpServletResponse wsr = new WebSocketHttpServletResponse<WebSocket>(webSocket);
+        String pathInfo = request.getPathInfo();
+        String requestURI = request.getRequestURI();
+        if (atmosphereServlet.getAtmosphereConfig().getWebServerName().toLowerCase().indexOf("glassfish") != -1) {
+            try {
+                pathInfo = pathInfo.substring(pathInfo.indexOf("/", 1));
+                requestURI = requestURI.substring(requestURI.indexOf("/", 1));
+            } catch (IndexOutOfBoundsException e) {
+                // Jersey will not work.
+                logger.warn("Unable to patch GlassFish WebSocket http://java.net/jira/browse/GRIZZLY-1114");
+            }
+        }
+
+        AtmosphereResponse wsr = new AtmosphereResponse<WebSocket>(webSocket, webSocketProtocol, request);
         AtmosphereRequest r = new AtmosphereRequest.Builder()
                 .request(request)
+                .pathInfo(pathInfo)
+                .requestURI(requestURI)
                 .headers(configureHeader(request))
                 .build();
 
         request.setAttribute(WebSocket.WEBSOCKET_SUSPEND, true);
+
         dispatch(r, wsr);
 
-        resource = (AtmosphereResource) request.getAttribute(FrameworkConfig.ATMOSPHERE_RESOURCE);
-        handler = (AtmosphereHandler) request.getAttribute(FrameworkConfig.ATMOSPHERE_HANDLER);
-        if (resource == null || !resource.getAtmosphereResourceEvent().isSuspended()) {
-            logger.error("No AtmosphereResource has been suspended. The WebSocket will be closed.");
-            webSocket.close();
+        webSocketProtocol.onOpen(webSocket);
+
+        if (webSocket.resource() != null && !webSocket.resource().getAtmosphereResourceEvent().isSuspended()) {
+            webSocketProtocol.onError(webSocket,
+                    new WebSocketException("No AtmosphereResource has been suspended. The WebSocket will be closed:  " + request.getRequestURI(), wsr));
         }
     }
 
     public void invokeWebSocketProtocol(String webSocketMessage) {
-        HttpServletRequest r = webSocketProtocol.parseMessage(resource, webSocketMessage);
-        dispatch(r, new WebSocketHttpServletResponse<WebSocket>(webSocket));
+        AtmosphereRequest r = webSocketProtocol.onMessage(webSocket, webSocketMessage);
+        if (r != null) {
+            AtmosphereResponse<WebSocket> w = new AtmosphereResponse<WebSocket>(webSocket, webSocketProtocol, r);
+            try {
+                dispatch(r, w);
+            } finally {
+                r.destroy();
+                w.destroy();
+            }
+        }
     }
 
     public void invokeWebSocketProtocol(byte[] data, int offset, int length) {
-        HttpServletRequest r = webSocketProtocol.parseMessage(resource, data, offset, length);
-        dispatch(r, new WebSocketHttpServletResponse<WebSocket>(webSocket));
+        AtmosphereRequest r = webSocketProtocol.onMessage(webSocket, data, offset, length);
+        if (r != null) {
+            AtmosphereResponse<WebSocket> w = new AtmosphereResponse<WebSocket>(webSocket, webSocketProtocol, r);
+            try {
+                dispatch(r, w);
+            } finally {
+                r.destroy();
+                w.destroy();
+            }
+        }
     }
 
     /**
      * Dispatch to request/response to the {@link org.atmosphere.cpr.CometSupport} implementation as it was a normal HTTP request.
      *
-     * @param request  a {@link HttpServletRequest}
-     * @param response a {@link HttpServletResponse}
+     * @param request a {@link HttpServletRequest}
+     * @param r       a {@link HttpServletResponse}
      */
-    protected final void dispatch(final HttpServletRequest request, final HttpServletResponse response) {
+    protected final void dispatch(final HttpServletRequest request, final AtmosphereResponse<?> r) {
         if (request == null) return;
         try {
-            atmosphereServlet.doCometSupport(request, response);
+            atmosphereServlet.doCometSupport(request, r);
         } catch (IOException e) {
-            logger.info("Failed invoking atmosphere servlet doCometSupport()", e);
+            logger.warn("Failed invoking atmosphere servlet doCometSupport()", e);
         } catch (ServletException e) {
-            logger.info("Failed invoking atmosphere servlet doCometSupport()", e);
+            logger.warn("Failed invoking atmosphere servlet doCometSupport()", e);
+        }
+
+        AtmosphereResource resource = (AtmosphereResource) request.getAttribute(FrameworkConfig.ATMOSPHERE_RESOURCE);
+
+        if (webSocket.resource() == null && WebSocketAdapter.class.isAssignableFrom(webSocket.getClass())) {
+            WebSocketAdapter.class.cast(webSocket).setAtmosphereResource(resource);
+        }
+
+        if (r.getStatus() >= 400) {
+            webSocketProtocol.onError(webSocket, new WebSocketException("Status code higher than 400", r));
         }
     }
 
@@ -139,55 +180,94 @@ public class WebSocketProcessor implements Serializable {
     }
 
     public void close() {
+        AtmosphereResourceImpl resource =
+                (AtmosphereResourceImpl) webSocket.resource();
         try {
-            if (handler != null && resource != null) {
-                handler.onStateChange(new AtmosphereResourceEventImpl((AtmosphereResourceImpl) resource, false, true));
+            webSocketProtocol.onClose(webSocket);
+
+            if (resource != null && resource.isInScope()) {
+                AtmosphereHandler handler = (AtmosphereHandler) resource.getRequest(false).getAttribute(FrameworkConfig.ATMOSPHERE_HANDLER);
+                AtmosphereResourceEventImpl e = new AtmosphereResourceEventImpl(resource, true, false);
+                synchronized (resource) {
+                    if (handler != null) {
+                        handler.onStateChange(e);
+                    }
+
+                    Meteor m = (Meteor) resource.getRequest().getAttribute(AtmosphereResourceImpl.METEOR);
+                    if (m != null) {
+                        m.destroy();
+                    }
+                }
+
+                try {
+                    resource.notifyListeners(e);
+                    resource.cancel();
+                } finally {
+                    AsynchronousProcessor.destroyResource(resource);
+                }
             }
         } catch (IOException e) {
-            if (AtmosphereResourceImpl.class.isAssignableFrom(resource.getClass())) {
+            if (resource != null && AtmosphereResourceImpl.class.isAssignableFrom(resource.getClass())) {
                 AtmosphereResourceImpl.class.cast(resource).onThrowable(e);
             }
-            logger.info("Failed invoking atmosphere handler onStateChange()", e);
-        }
+            logger.warn("Failed invoking atmosphere handler onStateChange()", e);
+        } finally {
+            if (resource.getRequest() != null && AtmosphereRequest.class.isAssignableFrom(resource.getRequest().getClass())) {
+                AtmosphereRequest.class.cast(resource.getRequest()).destroy();
+            }
 
-        if (resource != null) {
-            resource.getBroadcaster().removeAtmosphereResource(resource);
+            if (resource.getResponse() != null && AtmosphereResponse.class.isAssignableFrom(resource.getResponse().getClass())) {
+                AtmosphereResponse.class.cast(resource.getResponse()).destroy();
+            }
+
+            if (webSocket != null) {
+                WebSocketAdapter.class.cast(webSocket).setAtmosphereResource(null);
+            }
         }
     }
 
     @Override
     public String toString() {
-        return "WebSocketProcessor{ handler=" + handler + ", resource=" + resource + ", webSocket=" +
-                webSocket + " }";
+        return "WebSocketProcessor{ webSocket=" + webSocket + " }";
     }
 
     public void notifyListener(WebSocketEventListener.WebSocketEvent event) {
-
+        AtmosphereResource<HttpServletRequest, HttpServletResponse> resource =
+                (AtmosphereResource<HttpServletRequest, HttpServletResponse>) webSocket.resource();
         if (resource == null) return;
 
         AtmosphereResourceImpl r = AtmosphereResourceImpl.class.cast(resource);
 
         for (AtmosphereResourceEventListener l : r.atmosphereResourceEventListener()) {
             if (WebSocketEventListener.class.isAssignableFrom(l.getClass())) {
-                switch (event.type()) {
-                    case CONNECT:
-                        WebSocketEventListener.class.cast(l).onConnect(event);
-                        break;
-                    case DISCONNECT:
-                        WebSocketEventListener.class.cast(l).onDisconnect(event);
-                        break;
-                    case CONTROL:
-                        WebSocketEventListener.class.cast(l).onControl(event);
-                        break;
-                    case MESSAGE:
-                        WebSocketEventListener.class.cast(l).onMessage(event);
-                        break;
-                    case HANDSHAKE:
-                        WebSocketEventListener.class.cast(l).onHandshake(event);
-                        break;
-                    case CLOSE:
-                        WebSocketEventListener.class.cast(l).onClose(event);
-                        break;
+                try {
+                    switch (event.type()) {
+                        case CONNECT:
+                            WebSocketEventListener.class.cast(l).onConnect(event);
+                            break;
+                        case DISCONNECT:
+                            WebSocketEventListener.class.cast(l).onDisconnect(event);
+                            break;
+                        case CONTROL:
+                            WebSocketEventListener.class.cast(l).onControl(event);
+                            break;
+                        case MESSAGE:
+                            WebSocketEventListener.class.cast(l).onMessage(event);
+                            break;
+                        case HANDSHAKE:
+                            WebSocketEventListener.class.cast(l).onHandshake(event);
+                            break;
+                        case CLOSE:
+                            WebSocketEventListener.class.cast(l).onClose(event);
+                            break;
+                    }
+                } catch (Throwable t) {
+                    logger.debug("Listener error {}", t);
+                    try {
+                        WebSocketEventListener.class.cast(l).onThrowable(new AtmosphereResourceEventImpl(r, false, false, t));
+                    } catch (Throwable t2) {
+                        logger.warn("Listener error {}", t2);
+                    }
                 }
             }
         }
@@ -205,5 +285,24 @@ public class WebSocketProcessor implements Serializable {
 
         headers.put(HeaderConfig.X_ATMOSPHERE_TRANSPORT, HeaderConfig.WEBSOCKET_TRANSPORT);
         return headers;
+    }
+
+    public final static class WebSocketException extends Exception {
+
+        private final AtmosphereResponse r;
+
+        public WebSocketException(String s, AtmosphereResponse r) {
+            super(s);
+            this.r = r;
+        }
+
+        public WebSocketException(Throwable throwable, AtmosphereResponse r) {
+            super(throwable);
+            this.r = r;
+        }
+
+        public AtmosphereResponse response() {
+            return r;
+        }
     }
 }

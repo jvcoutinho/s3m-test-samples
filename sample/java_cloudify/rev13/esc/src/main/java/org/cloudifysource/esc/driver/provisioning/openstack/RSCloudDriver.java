@@ -26,7 +26,7 @@ import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
 
 import org.cloudifysource.dsl.cloud.Cloud;
-import org.cloudifysource.dsl.cloud.CloudTemplate;
+import org.cloudifysource.dsl.cloud.compute.ComputeTemplate;
 import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.esc.driver.provisioning.CloudDriverSupport;
 import org.cloudifysource.esc.driver.provisioning.CloudProvisioningException;
@@ -391,8 +391,16 @@ public class RSCloudDriver extends CloudDriverSupport implements ProvisioningDri
 
 		for (final String id : ids) {
 			try {
-			Node node = getNode(id, token);
-			nodes.add(node);
+				Node node = getNode(id, token);
+				nodes.add(node);
+			} catch (UniformInterfaceException e) {
+				if (e.getResponse().getStatus() == HTTP_NOT_FOUND) {
+					// list servers may return servers that are shutting down.
+					// ignore those who are deleted at this point
+				} else {
+					throw e;
+				}
+				
 			} catch (OpenstackException e) {
 				//Do nothing.
 			}
@@ -531,7 +539,7 @@ public class RSCloudDriver extends CloudDriverSupport implements ProvisioningDri
 	 * @param serverTemplate the cloud template to use for this server
 	 * @return the server id
 	 */
-	private MachineDetails newServer(final String token, final long endTime, final CloudTemplate serverTemplate)
+	private MachineDetails newServer(final String token, final long endTime, final ComputeTemplate serverTemplate)
 			throws Exception {
 
 		final MachineDetails md = createServer(
@@ -566,7 +574,7 @@ public class RSCloudDriver extends CloudDriverSupport implements ProvisioningDri
 
 	}
 
-	private MachineDetails createServer(final String token, final CloudTemplate serverTemplate)
+	private MachineDetails createServer(final String token, final ComputeTemplate serverTemplate)
 			throws OpenstackException {
 		final String serverName = this.serverNamePrefix + System.currentTimeMillis();
 		// Start the machine!
@@ -687,5 +695,10 @@ public class RSCloudDriver extends CloudDriverSupport implements ProvisioningDri
 		} catch (IOException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	@Override
+	public Object getComputeContext() {
+		return null;
 	}
 }

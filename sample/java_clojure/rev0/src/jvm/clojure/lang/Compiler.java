@@ -1719,7 +1719,6 @@ public static class TryExpr implements Expr{
 	public void emit(C context, ObjExpr objx, GeneratorAdapter gen){
 		Label startTry = gen.newLabel();
 		Label endTry = gen.newLabel();
-		Label endTryCatch = gen.newLabel();
 		Label end = gen.newLabel();
 		Label ret = gen.newLabel();
 		Label finallyLabel = gen.newLabel();
@@ -1755,7 +1754,6 @@ public static class TryExpr implements Expr{
 				finallyExpr.emit(C.STATEMENT, objx, gen);
 			gen.goTo(ret);
 			}
-		gen.mark(endTryCatch);
 		if(finallyExpr != null)
 			{
 			gen.mark(finallyLabel);
@@ -1775,7 +1773,14 @@ public static class TryExpr implements Expr{
 			gen.visitTryCatchBlock(startTry, endTry, clause.label, clause.c.getName().replace('.', '/'));
 			}
 		if(finallyExpr != null)
-			gen.visitTryCatchBlock(startTry, endTryCatch, finallyLabel, null);
+			{
+				gen.visitTryCatchBlock(startTry, endTry, finallyLabel, null);
+				for(int i = 0; i < catchExprs.count(); i++)
+					{
+					CatchClause clause = (CatchClause) catchExprs.nth(i);
+					gen.visitTryCatchBlock(clause.label, clause.endLabel, finallyLabel, null);
+					}
+			}
 		for(int i = 0; i < catchExprs.count(); i++)
 			{
 			CatchClause clause = (CatchClause) catchExprs.nth(i);
@@ -2878,17 +2883,15 @@ static class InvokeExpr implements Expr{
 					this.onMethod = (java.lang.reflect.Method) methods.get(0);
 					}
 				}
-			else if(pvar == null && VAR_CALLSITES.isBound()
-			        && fvar.ns.name.name.startsWith("clojure")
-					&& !RT.booleanCast(RT.get(RT.meta(fvar),dynamicKey))
-//			        && !fvar.sym.name.equals("report")
-//			        && fvar.isBound() && fvar.get() instanceof IFn
-					)
-				{
-				//todo - more specific criteria for binding these
-				this.isDirect = true;
-				this.siteIndex = registerVarCallsite(((VarExpr) fexpr).var);
-				}
+//			else if(pvar == null && VAR_CALLSITES.isBound()
+//			        && fvar.ns.name.name.startsWith("clojure")
+//					&& !RT.booleanCast(RT.get(RT.meta(fvar),dynamicKey))
+//					)
+//				{
+//				//todo - more specific criteria for binding these
+//				this.isDirect = true;
+//				this.siteIndex = registerVarCallsite(((VarExpr) fexpr).var);
+//				}
 			}
 		this.tag = tag != null ? tag : (fexpr instanceof VarExpr ? ((VarExpr) fexpr).tag : null);
 	}

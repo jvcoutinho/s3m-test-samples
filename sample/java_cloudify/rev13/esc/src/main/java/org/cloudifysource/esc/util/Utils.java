@@ -1,17 +1,14 @@
 /*******************************************************************************
  * Copyright (c) 2011 GigaSpaces Technologies Ltd. All rights reserved
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *       http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
  *******************************************************************************/
 package org.cloudifysource.esc.util;
 
@@ -24,20 +21,24 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import org.cloudifysource.dsl.cloud.AgentComponent;
+import net.schmizz.sshj.SSHClient;
+import net.schmizz.sshj.transport.verification.PromiscuousVerifier;
+import net.schmizz.sshj.userauth.method.AuthNone;
+
 import org.cloudifysource.dsl.cloud.Cloud;
-import org.cloudifysource.dsl.cloud.CloudTemplate;
-import org.cloudifysource.dsl.cloud.DeployerComponent;
-import org.cloudifysource.dsl.cloud.DiscoveryComponent;
-import org.cloudifysource.dsl.cloud.GridComponent;
+import org.cloudifysource.dsl.cloud.CloudTemplateInstallerConfiguration;
+import org.cloudifysource.dsl.cloud.FileTransferModes;
 import org.cloudifysource.dsl.cloud.GridComponents;
-import org.cloudifysource.dsl.cloud.UsmComponent;
+import org.cloudifysource.dsl.cloud.RemoteExecutionModes;
+import org.cloudifysource.dsl.cloud.compute.ComputeTemplate;
 import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.esc.driver.provisioning.MachineDetails;
 import org.cloudifysource.esc.installer.AgentlessInstaller;
 import org.cloudifysource.esc.installer.InstallationDetails;
+import org.cloudifysource.esc.installer.InstallerException;
 import org.openspaces.admin.Admin;
 import org.openspaces.admin.AdminFactory;
 import org.openspaces.admin.gsa.GSAReservationId;
@@ -64,28 +65,30 @@ public final class Utils {
 	}
 
 	/**
-	 * Gets a "full" admin object. The function waits until all
-	 * GridServiceManagers are found before returning the object.
+	 * Gets a "full" admin object. The function waits until all GridServiceManagers are found before returning the
+	 * object.
 	 *
 	 * @param managementIP
-	 *            The IP of the management machine to connect to (through the
-	 *            default LUS port)
+	 *            The IP of the management machine to connect to (through the default LUS port)
 	 * @param expectedGsmCount
-	 *            The number of GridServiceManager objects that are expected to
-	 *            be found. Only when this number is reached, the admin object
-	 *            is considered loaded and can be returned
+	 *            <<<<<<< HEAD The number of GridServiceManager objects that are expected to be found. Only when this
+	 *            number is reached, the admin object is considered loaded and can be returned
+	 * @param lusPort
+	 *            The lookup service port. ======= The number of GridServiceManager objects that are expected to be
+	 *            found. Only when this number is reached, the admin object is considered loaded and can be returned
+	 *            >>>>>>> CLOUDIFY-1476 Added configurable installation parameters as optional 'installer' block in each
+	 *            template.
 	 * @return An updated admin object
 	 * @throws TimeoutException
-	 *             Indicates the timeout (default is 90 seconds) was reached
-	 *             before the admin object was fully loaded
+	 *             Indicates the timeout (default is 90 seconds) was reached before the admin object was fully loaded
 	 * @throws InterruptedException
 	 *             Indicated the thread was interrupted while waiting
 	 */
-	public static Admin getAdminObject(final String managementIP, final int expectedGsmCount)
+	public static Admin getAdminObject(final String managementIP, final int expectedGsmCount, final Integer lusPort)
 			throws TimeoutException,
 			InterruptedException {
 		final AdminFactory adminFactory = new AdminFactory();
-		adminFactory.addLocator(managementIP + ":" + CloudifyConstants.DEFAULT_LUS_PORT);
+		adminFactory.addLocator(managementIP + ":" + lusPort);
 		final Admin admin = adminFactory.createAdmin();
 		GridServiceManagers gsms = admin.getGridServiceManagers();
 		final long end = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(ADMIN_API_TIMEOUT);
@@ -102,8 +105,7 @@ public final class Utils {
 	}
 
 	/**
-	 * Executes a SSH command. An Ant BuildException is thrown in case of an
-	 * error.
+	 * Executes a SSH command. An Ant BuildException is thrown in case of an error.
 	 *
 	 * @param host
 	 *            The host to run the command on
@@ -116,17 +118,15 @@ public final class Utils {
 	 * @param keyFile
 	 *            The key file, if used
 	 * @param timeout
-	 *            The number of time-units to wait before throwing a
-	 *            TimeoutException
+	 *            The number of time-units to wait before throwing a TimeoutException
 	 * @param unit
 	 *            The units (e.g. seconds)
 	 * @throws TimeoutException
-	 *             Indicates the timeout was reached before the command
-	 *             completed
+	 *             Indicates the timeout was reached before the command completed
 	 */
 	public static void executeSSHCommand(final String host, final String command, final String username,
 			final String password, final String keyFile, final long timeout, final TimeUnit unit)
-					throws TimeoutException {
+			throws TimeoutException {
 
 		final LoggerOutputStream loggerOutputStream = new LoggerOutputStream(
 				Logger.getLogger(AgentlessInstaller.SSH_OUTPUT_LOGGER_NAME));
@@ -154,8 +154,8 @@ public final class Utils {
 	}
 
 	/*************************
-	 * Creates an Agentless Installer's InstallationDetails input object from a
-	 * machine details object returned from a provisioning implementation.
+	 * Creates an Agentless Installer's InstallationDetails input object from a machine details object returned from a
+	 * provisioning implementation.
 	 *
 	 * @param md
 	 *            the machine details.
@@ -170,8 +170,7 @@ public final class Utils {
 	 * @param admin
 	 *            an admin object, may be null.
 	 * @param isManagement
-	 *            true if this machine will be installed as a cloudify
-	 *            controller, false otherwise.
+	 *            true if this machine will be installed as a cloudify controller, false otherwise.
 	 * @param cloudFile
 	 *            the cloud file, required only when isManagement == true.
 	 * @param reservationId
@@ -183,15 +182,14 @@ public final class Utils {
 	 * @param keystorePassword
 	 *            The password to the keystore set on the rest server
 	 * @param authGroups
-	 *            The authentication groups attached to the GSA as an
-	 *            environment variable
+	 *            The authentication groups attached to the GSA as an environment variable
 	 *            {@link CloudifyConstants#GIGASPACES_AUTH_GROUPS}
 	 * @return the installation details.
 	 * @throws FileNotFoundException
 	 *             if a key file is specified and is not found.
 	 */
 	public static InstallationDetails createInstallationDetails(final MachineDetails md,
-			final Cloud cloud, final CloudTemplate template, final ExactZonesConfig zones,
+			final Cloud cloud, final ComputeTemplate template, final ExactZonesConfig zones,
 			final String lookupLocatorsString, final Admin admin,
 			final boolean isManagement,
 			final File cloudFile,
@@ -200,7 +198,7 @@ public final class Utils {
 			final String securityProfile,
 			final String keystorePassword,
 			final String authGroups)
-					throws FileNotFoundException {
+			throws FileNotFoundException {
 
 		final InstallationDetails details = new InstallationDetails();
 
@@ -240,20 +238,24 @@ public final class Utils {
 
 		details.setCloudFile(cloudFile);
 		details.setManagement(isManagement);
+		final GridComponents componentsConfig = cloud.getConfiguration().getComponents();
 		if (isManagement) {
 			details.setConnectedToPrivateIp(!cloud.getConfiguration().isBootstrapManagementOnPublicIp());
 			details.setSecurityProfile(securityProfile);
 			details.setKeystorePassword(keystorePassword);
 
-			//setting management grid components command-line arguments
-			GridComponents componentsConfig = cloud.getConfiguration().getComponents();
-			details.setEsmCommandlineArgs(Utils.getGridComponentCommandlineArgs(componentsConfig.getOrchestrator()));
-			details.setGsmCommandlineArgs(Utils.getGridComponentCommandlineArgs(componentsConfig.getDeployer()));
-			details.setLusCommandlineArgs(Utils.getGridComponentCommandlineArgs(componentsConfig.getDiscovery()));
-			details.setGsaCommandlineArgs(Utils.getGridComponentCommandlineArgs(componentsConfig.getAgent()));
-			details.setGscCommandlineArgs(Utils.getGridComponentCommandlineArgs(componentsConfig.getUsm()));
+			// setting management grid components command-line arguments
+			final String esmCommandlineArgs = ConfigUtils.getEsmCommandlineArgs(componentsConfig.getOrchestrator());
+			final String lusCommandlineArgs = ConfigUtils.getLusCommandlineArgs(componentsConfig.getDiscovery());
+			final String gsmCommandlineArgs = ConfigUtils.getGsmCommandlineArgs(componentsConfig.getDeployer(),
+					componentsConfig.getDiscovery());
+			details.setEsmCommandlineArgs('"' + esmCommandlineArgs + '"');
+			details.setLusCommandlineArgs('"' + lusCommandlineArgs + '"');
+			details.setGsmCommandlineArgs('"' + gsmCommandlineArgs + '"');
 
-			//setting web service ports and memory allocation
+			// setting management services LRMI port range.
+			details.setGscLrmiPortRange(componentsConfig.getUsm().getPortRange());
+			// setting web service ports and memory allocation
 			details.setRestPort(componentsConfig.getRest().getPort());
 			details.setWebuiPort(componentsConfig.getWebui().getPort());
 			details.setRestMaxMemory(componentsConfig.getRest().getMaxMemory());
@@ -262,6 +264,7 @@ public final class Utils {
 		} else {
 			details.setConnectedToPrivateIp(cloud.getConfiguration().isConnectToPrivateIp());
 		}
+		details.setGsaCommandlineArgs('"' + ConfigUtils.getAgentCommandlineArgs(componentsConfig.getAgent()) + '"');
 
 		// Add all template custom data fields starting with 'installer.' to the
 		// installation details
@@ -272,18 +275,24 @@ public final class Utils {
 			}
 		}
 
-		final String keyFileName = template.getKeyFile();
-		if (keyFileName != null && !keyFileName.isEmpty()) {
-			File keyFile = new File(keyFileName);
-			if (!keyFile.isAbsolute()) {
-				keyFile = new File(details.getLocalDir(), keyFileName);
+
+		// Handle key file
+		if (md.getKeyFile() != null) {
+			details.setKeyFile(md.getKeyFile().getAbsolutePath());
+		} else {
+			final String keyFileName = template.getKeyFile();
+			if (!org.apache.commons.lang.StringUtils.isBlank(keyFileName)) {
+				File keyFile = new File(keyFileName);
+				if (!keyFile.isAbsolute()) {
+					keyFile = new File(details.getLocalDir(), keyFileName);
+				}
+				if (!keyFile.isFile()) {
+					throw new FileNotFoundException(
+							"Could not find key file matching specified cloud configuration key file: "
+									+ template.getKeyFile() + ". Tried: " + keyFile + " but file does not exist");
+				}
+				details.setKeyFile(keyFile.getAbsolutePath());
 			}
-			if (!keyFile.isFile()) {
-				throw new FileNotFoundException(
-						"Could not find key file matching specified cloud configuration key file: "
-								+ template.getKeyFile() + ". Tried: " + keyFile + " but file does not exist");
-			}
-			details.setKeyFile(keyFile.getAbsolutePath());
 		}
 
 		if (template.getHardwareId() != null) {
@@ -339,62 +348,15 @@ public final class Utils {
 		}
 
 		details.setDeleteRemoteDirectoryContents(md.isCleanRemoteDirectoryOnStart());
+		//add storage props that will be passed down to the bootstrap-management script.
+		details.setStorageVolumeAttached(md.isStorageVolumeAttached());
+		details.setStorageFormatType(md.getStorageFormatType());
+		details.setStorageDeviceName(md.getStorageDeviceName());
+		details.setStorageMountPath(md.getStorageMountPath());
+		
+		details.setInstallerConfiguration(md.getInstallerConfigutation());
 		logger.fine("Created InstallationDetails: " + details);
 		return details;
-	}
-
-	//These are the java options/system props used for actual cloud not for local cloud
-	private static String getGridComponentCommandlineArgs(final GridComponent component) {
-		Integer port = component.getPort();
-		String maxMemory = component.getMaxMemory();
-		String minMemory = component.getMinMemory();
-
-		StringBuilder sb = new StringBuilder();
-		sb.append('"');
-		if (maxMemory != null) {
-			sb.append(" -Xmx" + maxMemory);
-		}
-
-		if (minMemory != null) {
-			sb.append(" -Xms" + minMemory);
-		}
-
-		if (component instanceof DeployerComponent) {
-			Integer websterPort = ((DeployerComponent) component).getWebsterPort();
-			if (websterPort != null) {
-				sb.append(" -D" + CloudifyConstants.GSM_HTTP_PORT_CONTEXT_PROPERTY + "="
-						+ websterPort);
-			}
-		}
-
-		if (component instanceof UsmComponent) {
-			String portRange = ((UsmComponent) component).getPortRange();
-			if (org.apache.commons.lang.StringUtils.isNotBlank(portRange)) {
-				sb.append(" -D" + CloudifyConstants.GSC_PORT_RANGE_CONTEXT_PROPERTY + "="
-						+ portRange);
-			}
-		}
-
-		if (component instanceof DiscoveryComponent) {
-			if (port != null) {
-				sb.append(" -D" + CloudifyConstants.LUS_PORT_CONTEXT_PROPERTY + "="
-						+ port);
-			} else {
-				sb.append(" -D" + CloudifyConstants.LUS_PORT_CONTEXT_PROPERTY + "="
-						+ CloudifyConstants.DEFAULT_LUS_PORT);
-			}
-		}
-
-		if (component instanceof AgentComponent) {
-			if (port != null) {
-				sb.append(" -D" + CloudifyConstants.AGENT_PORT_CONTEXT_PROPERTY + "="
-						+ port);
-			}
-		}
-
-		sb.append('"');
-		return sb.toString();
-
 	}
 
 	/***********
@@ -418,4 +380,79 @@ public final class Utils {
 		return tempFile;
 	}
 
+	/**********
+	 * Returns the file transfer port that should be used, based on the configuration details and default port.
+	 *
+	 * @param installerConfiguration
+	 *            the installer configuration.
+	 * @param mode
+	 *            the file transfer mode.
+	 *
+	 * @return the port.
+	 */
+	public static int getFileTransferPort(final CloudTemplateInstallerConfiguration installerConfiguration,
+			final FileTransferModes mode) {
+		if (installerConfiguration.getFileTransferPort() == CloudTemplateInstallerConfiguration.DEFAULT_PORT) {
+			return mode.getDefaultPort();
+		} else {
+			return installerConfiguration.getFileTransferPort();
+		}
+	}
+
+	/**********
+	 * Returns the file transfer port that should be used, based on the configuration details and default port.
+	 *
+	 * @param installerConfiguration
+	 *            the installer configuration.
+	 * @param mode
+	 *            the file transfer mode.
+	 *
+	 * @return the port.
+	 */
+	public static int getRemoteExecutionPort(final CloudTemplateInstallerConfiguration installerConfiguration,
+			final RemoteExecutionModes mode) {
+		if (installerConfiguration.getRemoteExecutionPort() == CloudTemplateInstallerConfiguration.DEFAULT_PORT) {
+			return mode.getDefaultPort();
+		} else {
+			return installerConfiguration.getRemoteExecutionPort();
+		}
+	}
+
+	public static SSHClient createSSHClient(final InstallationDetails details, final String host, final int port)
+			throws InstallerException {
+		final SSHClient ssh = new SSHClient();
+		ssh.addHostKeyVerifier(new PromiscuousVerifier());
+		try {
+			ssh.connect(host, port);
+		} catch (final IOException e) {
+			throw new InstallerException("Failed to connect to host: " + host + ": " + e.getMessage(), e);
+		}
+
+		try {
+			if (!org.apache.commons.lang.StringUtils.isEmpty(details.getKeyFile())) {
+				final File keyFile = new File(details.getKeyFile());
+				if (!keyFile.exists() || !keyFile.isFile()) {
+					throw new InstallerException("Expected to find key file at: " + keyFile.getAbsolutePath());
+				}
+				ssh.authPublickey(details.getUsername(), keyFile.getAbsolutePath());
+			} else if (!org.apache.commons.lang.StringUtils.isEmpty(details.getPassword())) {
+				ssh.authPassword(details.getUsername(), details.getPassword());
+			} else {
+				ssh.auth(details.getUsername(), new AuthNone());
+			}
+		} catch (final IOException e) {
+			try {
+				if (ssh != null) {
+					ssh.close();
+				}
+			} catch (final IOException e1) {
+				logger.log(Level.WARNING,
+						"Failed to close ssh client after encountering an exception: " + e.getMessage(), e);
+			}
+			throw new InstallerException("Failed to authenticate to remote server: " + e.getMessage(), e);
+		}
+
+		return ssh;
+
+	}
 }

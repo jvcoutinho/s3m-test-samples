@@ -107,14 +107,19 @@ public class DefaultArtifactResolutionQuery implements ArtifactResolutionQuery {
                             artifactResolver.resolveModuleArtifacts(moduleMetaData, context, multiResolveResult);
                             for (ModuleVersionArtifactMetaData artifactMetaData : multiResolveResult.getArtifacts()) {
                                 BuildableArtifactResolveResult resolveResult = new DefaultBuildableArtifactResolveResult();
-                                artifactResolver.resolveArtifact(moduleMetaData, artifactMetaData, resolveResult);
-                                if (resolveResult.getFailure() != null) {
-                                    // TODO: handle failure
-                                    int x = 0; // make checkstyle happy
-                                } else if (artifactType == JvmLibraryJavadocArtifact.class) {
-                                    jvmLibraryArtifacts.add(new DefaultJvmLibraryJavadocArtifact(resolveResult.getFile()));
+                                artifactResolver.resolveArtifact(artifactMetaData, moduleMetaData.getSource(), resolveResult);
+                                if (artifactType == JvmLibraryJavadocArtifact.class) {
+                                    if (resolveResult.getFailure() != null) {
+                                        jvmLibraryArtifacts.add(new DefaultJvmLibraryJavadocArtifact(resolveResult.getFailure()));
+                                    } else {
+                                        jvmLibraryArtifacts.add(new DefaultJvmLibraryJavadocArtifact(resolveResult.getFile()));
+                                    }
                                 } else if (artifactType == JvmLibrarySourcesArtifact.class) {
-                                    jvmLibraryArtifacts.add(new DefaultJvmLibrarySourcesArtifact(resolveResult.getFile()));
+                                    if (resolveResult.getFailure() != null) {
+                                        jvmLibraryArtifacts.add(new DefaultJvmLibrarySourcesArtifact(resolveResult.getFailure()));
+                                    } else {
+                                        jvmLibraryArtifacts.add(new DefaultJvmLibrarySourcesArtifact(resolveResult.getFile()));
+                                    }
                                 } else {
                                     throw new AssertionError("unknown artifact type: " + artifactType.getName());
                                 }

@@ -28,8 +28,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
+import javax.management.*;
 
 import com.google.common.collect.Iterables;
 import org.apache.cassandra.db.compaction.LeveledManifest;
@@ -50,11 +49,11 @@ import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
 import org.apache.cassandra.db.filter.IFilter;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.filter.QueryPath;
-import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.dht.*;
 import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.thrift.IndexClause;
@@ -99,7 +98,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public final CFMetaData metadata;
     public final IPartitioner partitioner;
     private final String mbeanName;
-    private boolean invalid = false;
+    private volatile boolean valid = true;
 
     /* Memtables and SSTables on disk for this column family */
     private final DataTracker data;
@@ -258,24 +257,29 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         }
     }
 
-    // called when dropping or renaming a CF. Performs mbean housekeeping and invalidates CFS to other operations.
-    public void unregisterMBean()
+    /** call when dropping or renaming a CF. Performs mbean housekeeping and invalidates CFS to other operations */
+    public void invalidate()
     {
         try
         {
-            invalid = true;   
-            MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
-            ObjectName nameObj = new ObjectName(mbeanName);
-            if (mbs.isRegistered(nameObj))
-                mbs.unregisterMBean(nameObj);
-           
-            indexManager.unregisterMBeans();
+            valid = false;
+            unregisterMBean();
+            data.removeAllSSTables();
+            indexManager.invalidate();
         }
         catch (Exception e)
         {
             // this shouldn't block anything.
             logger.warn("Failed unregistering mbean: " + mbeanName, e);
         }
+    }
+
+    void unregisterMBean() throws MalformedObjectNameException, InstanceNotFoundException, MBeanRegistrationException
+    {
+        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+        ObjectName nameObj = new ObjectName(mbeanName);
+        if (mbs.isRegistered(nameObj))
+            mbs.unregisterMBean(nameObj);
     }
 
     public long getMinRowSize()
@@ -983,15 +987,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         CompactionManager.instance.submitBackground(this);
     }
 
-    public boolean isInvalid()
+    public boolean isValid()
     {
-        return invalid;
-    }
-
-    public void removeAllSSTables() throws IOException
-    {
-        data.removeAllSSTables();
-        indexManager.removeAllIndexes();
+        return valid;
     }
 
     public long getMemtableColumnsCount()
@@ -1635,30 +1633,6 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
         return CompactionManager.instance.submitTruncate(this, truncatedAt);
     }
 
-    // if this errors out, we are in a world of hurt.
-    public void renameSSTables(String newCfName) throws IOException
-    {
-        // complete as much of the job as possible.  Don't let errors long the way prevent as much renaming as possible
-        // from happening.
-        IOException mostRecentProblem = null;
-        for (File existing : DefsTable.getFiles(table.name, columnFamily))
-        {
-            try
-            {
-                String newFileName = existing.getName().replaceFirst("\\w+-", newCfName + "-");
-                FileUtils.renameWithConfirm(existing, new File(existing.getParent(), newFileName));
-            }
-            catch (IOException ex)
-            {
-                mostRecentProblem = ex;
-            }
-        }
-        if (mostRecentProblem != null)
-            throw new IOException("One or more IOExceptions encountered while renaming files. Most recent problem is included.", mostRecentProblem);
-
-        indexManager.renameIndexes(newCfName);
-    }
-
     public long getBloomFilterFalsePositives()
     {
         return data.getBloomFilterFalsePositives();
@@ -1914,5 +1888,17 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             this.sstables = sstables;
             this.memtables = memtables;
         }
+    }
+
+    /**
+     * Returns the creation time of the oldest memtable not fully flushed yet.
+     */
+    public long oldestUnflushedMemtable()
+    {
+        DataTracker.View view = data.getView();
+        long oldest = view.memtable.creationTime();
+        for (Memtable memtable : view.memtablesPendingFlush)
+            oldest = Math.min(oldest, memtable.creationTime());
+        return oldest;
     }
 }

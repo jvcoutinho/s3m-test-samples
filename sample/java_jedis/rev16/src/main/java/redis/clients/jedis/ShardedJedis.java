@@ -1,17 +1,15 @@
 package redis.clients.jedis;
 
-import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-import redis.clients.jedis.Client.LIST_POSITION;
+import redis.clients.jedis.BinaryClient.LIST_POSITION;
 import redis.clients.util.Hashing;
-import redis.clients.util.Sharded;
 
-public class ShardedJedis extends Sharded<Jedis, JedisShardInfo> implements
-        JedisCommands {
+public class ShardedJedis extends BinaryShardedJedis implements JedisCommands {
     public ShardedJedis(List<JedisShardInfo> shards) {
         super(shards);
     }
@@ -24,19 +22,8 @@ public class ShardedJedis extends Sharded<Jedis, JedisShardInfo> implements
         super(shards, keyTagPattern);
     }
 
-    public ShardedJedis(List<JedisShardInfo> shards, Hashing algo,
-            Pattern keyTagPattern) {
+    public ShardedJedis(List<JedisShardInfo> shards, Hashing algo, Pattern keyTagPattern) {
         super(shards, algo, keyTagPattern);
-    }
-
-    public void disconnect() throws IOException {
-        for (JedisShardInfo jedis : getAllShards()) {
-            jedis.getResource().disconnect();
-        }
-    }
-
-    protected Jedis create(JedisShardInfo shard) {
-        return new Jedis(shard);
     }
 
     public String set(String key, String value) {
@@ -164,12 +151,12 @@ public class ShardedJedis extends Sharded<Jedis, JedisShardInfo> implements
         return j.hlen(key);
     }
 
-    public List<String> hkeys(String key) {
+    public Set<String> hkeys(String key) {
         Jedis j = getShard(key);
         return j.hkeys(key);
     }
 
-    public List<String> hvals(String key) {
+    public Collection<String> hvals(String key) {
         Jedis j = getShard(key);
         return j.hvals(key);
     }
@@ -370,11 +357,5 @@ public class ShardedJedis extends Sharded<Jedis, JedisShardInfo> implements
             String value) {
         Jedis j = getShard(key);
         return j.linsert(key, where, pivot, value);
-    }
-
-    public List<Object> pipelined(ShardedJedisPipeline shardedJedisPipeline) {
-        shardedJedisPipeline.setShardedJedis(this);
-        shardedJedisPipeline.execute();
-        return shardedJedisPipeline.getResults();
     }
 }

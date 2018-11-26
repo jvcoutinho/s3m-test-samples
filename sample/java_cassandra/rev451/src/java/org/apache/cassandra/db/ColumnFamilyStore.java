@@ -35,6 +35,7 @@ import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cache.JMXInstrumentedCache;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.StageManager;
@@ -1654,7 +1655,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             IColumn column = data.getColumn(expression.column_name);
             if (column == null)
                 return false;
-            int v = data.getComparator().compare(column.value(), expression.value);
+            int v = data.metadata().getValueValidator(expression.column_name).compare(column.value(), expression.value);
             if (!satisfies(v, expression.op))
                 return false;
         }
@@ -1797,6 +1798,16 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
     public int getKeyCacheSize()
     {
         return ssTables.getKeyCache().getSize();
+    }
+
+    public JMXInstrumentedCache<DecoratedKey, ColumnFamily> getRowCache()
+    {
+        return ssTables.getRowCache();
+    }
+
+    public JMXInstrumentedCache<Pair<Descriptor, DecoratedKey>, Long> getKeyCache()
+    {
+        return ssTables.getKeyCache();
     }
 
     public static Iterable<ColumnFamilyStore> all()

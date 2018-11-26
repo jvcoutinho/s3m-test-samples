@@ -31,7 +31,7 @@ public abstract class WrappedRunnable implements Runnable
         }
         catch (Exception e)
         {
-            throw new RuntimeException(e);
+            throw FBUtilities.unchecked(e);
         }
     }
 

@@ -22,6 +22,9 @@ import java.util.regex.Pattern;
 
 import org.apache.commons.lang.StringUtils;
 import org.cloudifysource.dsl.DSLValidation;
+import org.cloudifysource.dsl.cloud.compute.CloudCompute;
+import org.cloudifysource.dsl.cloud.compute.ComputeTemplate;
+import org.cloudifysource.dsl.cloud.storage.CloudStorage;
 import org.cloudifysource.dsl.internal.CloudifyConstants;
 import org.cloudifysource.dsl.internal.CloudifyDSLEntity;
 import org.cloudifysource.dsl.internal.DSLValidationContext;
@@ -40,8 +43,25 @@ public class Cloud {
 	private CloudProvider provider;
 	private CloudUser user = new CloudUser();
 	private CloudConfiguration configuration = new CloudConfiguration();
-	private Map<String, CloudTemplate> templates = new HashMap<String, CloudTemplate>();
 	private Map<String, Object> custom = new HashMap<String, Object>();
+	private CloudCompute cloudCompute = new CloudCompute();
+	private CloudStorage cloudStorage = new CloudStorage();
+
+	public CloudStorage getCloudStorage() {
+		return cloudStorage;
+	}
+
+	public void setCloudStorage(final CloudStorage cloudStorage) {
+		this.cloudStorage = cloudStorage;
+	}
+
+	public CloudCompute getCloudCompute() {
+		return cloudCompute;
+	}
+
+	public void setCloudCompute(final CloudCompute cloudCompute) {
+		this.cloudCompute = cloudCompute;
+	}
 
 	// CIFS drive regex (for example: /C$ or /d$)
 	private static final String CIFS_ABSOLUTE_PATH_WITH_DRIVE_REGEX = "^/[a-zA-Z][$]/.*";
@@ -70,14 +90,6 @@ public class Cloud {
 		this.user = user;
 	}
 
-	public Map<String, CloudTemplate> getTemplates() {
-		return templates;
-	}
-
-	public void setTemplates(final Map<String, CloudTemplate> templates) {
-		this.templates = templates;
-	}
-
 	public CloudConfiguration getConfiguration() {
 		return configuration;
 	}
@@ -97,7 +109,7 @@ public class Cloud {
 	@Override
 	public String toString() {
 		return "Cloud [name=" + name + ", provider=" + provider + ", user=" + user + ", configuration="
-				+ configuration + ", templates=" + templates + ", custom=" + custom + "]";
+				+ configuration + ", cloudCompute=" + cloudCompute + ", custom=" + custom + "]";
 	}
 
 	@DSLValidation
@@ -105,7 +117,7 @@ public class Cloud {
 			throws DSLValidationException {
 
 		final CloudConfiguration configuration = getConfiguration();
-		final Map<String, CloudTemplate> templates = getTemplates();
+		final Map<String, ComputeTemplate> templates = getCloudCompute().getTemplates();
 
 		final String managementTemplateName = configuration.getManagementMachineTemplate();
 
@@ -150,13 +162,14 @@ public class Cloud {
 			throws DSLValidationException {
 		if (CloudifyConstants.DYNAMIC_BYON_NAME.equals(name)) {
 			String managementMachineTemplateName = configuration.getManagementMachineTemplate();
-			CloudTemplate managementMachineTemplate = templates.get(managementMachineTemplateName);
+			ComputeTemplate managementMachineTemplate = getCloudCompute().
+					getTemplates().get(managementMachineTemplateName);
 			Map<String, Object> mngTemplateCustom = managementMachineTemplate.getCustom();
 			validateClosureExists(mngTemplateCustom, CloudifyConstants.DYNAMIC_BYON_START_MNG_MACHINES_KEY, 
 					managementMachineTemplateName);			
 			validateClosureExists(mngTemplateCustom, CloudifyConstants.DYNAMIC_BYON_STOP_MNG_MACHINES_KEY, 
 					managementMachineTemplateName);
-			for (Entry<String, CloudTemplate> templateEntry : templates.entrySet()) {
+			for (Entry<String, ComputeTemplate> templateEntry : getCloudCompute().getTemplates().entrySet()) {
 				final String templateName = templateEntry.getKey();
 				Map<String, Object> templateCustom = templateEntry.getValue().getCustom();
 				validateClosureExists(templateCustom, CloudifyConstants.DYNAMIC_BYON_START_MACHINE_KEY, templateName);

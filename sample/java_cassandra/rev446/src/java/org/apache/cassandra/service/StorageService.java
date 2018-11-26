@@ -27,12 +27,11 @@ import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.*;
-import javax.lang.model.type.TypeKind;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 
 import com.google.common.collect.*;
-import org.apache.cassandra.config.*;
 import org.apache.log4j.Level;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
@@ -41,6 +40,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.DebuggableScheduledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.*;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.Table;
 import org.apache.cassandra.db.commitlog.CommitLog;
@@ -208,6 +208,8 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
 
     /* Used for tracking drain progress */
     private volatile int totalCFs, remainingCFs;
+
+    private static final AtomicInteger nextRepairCommand = new AtomicInteger();
 
     public void finishBootstrapping()
     {
@@ -506,11 +508,22 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
             }
             if (logger_.isDebugEnabled())
                 logger_.debug("... got ring + schema info");
-            if (null != DatabaseDescriptor.getReplaceToken())
+
+            if (DatabaseDescriptor.getReplaceToken() == null)
+            {
+                if (tokenMetadata_.isMember(FBUtilities.getBroadcastAddress()))
+                {
+                    String s = "This node is already a member of the token ring; bootstrap aborted. (If replacing a dead node, remove the old one from the ring first.)";
+                    throw new UnsupportedOperationException(s);
+                }
+                setMode("Joining: getting bootstrap token", true);
+                token = getNewToken();
+            }
+            else
             {
                 try
                 {
-                    // Sleeping additionally to make sure that the server actually is not alive 
+                    // Sleeping additionally to make sure that the server actually is not alive
                     // and giving it more time to gossip if alive.
                     Thread.sleep(LoadBroadcaster.BROADCAST_INTERVAL);
                 }
@@ -525,16 +538,7 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
                     throw new UnsupportedOperationException("Cannnot replace a token for a Live node... ");
                 setMode("Joining: Replacing a node with token: " + token, true);
             }
-            else
-            {
-                if (tokenMetadata_.isMember(FBUtilities.getBroadcastAddress()))
-                {
-                    String s = "This node is already a member of the token ring; bootstrap aborted. (If replacing a dead node, remove the old one from the ring first.)";
-                    throw new UnsupportedOperationException(s);
-                }
-                setMode("Joining: getting bootstrap token", true);
-                token = BootStrapper.getBootstrapToken(tokenMetadata_, LoadBroadcaster.instance.getLoadInfo());
-            }
+
             // don't bootstrap if there are no tables defined.
             if (Schema.instance.getNonSystemTables().size() > 0)
             {
@@ -547,23 +551,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         {
             token = SystemTable.getSavedToken();
             if (token == null)
-            {
-                String initialToken = DatabaseDescriptor.getInitialToken();
-                if (initialToken == null)
-                {
-                    token = partitioner.getRandomToken();
-                    logger_.warn("Generated random token " + token + ". Random tokens will result in an unbalanced ring; see http://wiki.apache.org/cassandra/Operations");
-                }
-                else
-                {
-                    token = partitioner.getTokenFactory().fromString(initialToken);
-                    logger_.info("Saved token not found. Using " + token + " from configuration");
-                }
-            }
+                token = getNewToken();
             else
-            {
                 logger_.info("Using saved token " + token);
-            }
         }
 
         // start participating in the ring.
@@ -571,6 +561,33 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         setToken(token);
         logger_.info("Bootstrap/Replace/Move completed! Now serving reads.");
         assert tokenMetadata_.sortedTokens().size() > 0;
+    }
+
+    /**
+     * Return a new token for this node.
+     */
+    private Token getNewToken() throws ConfigurationException
+    {
+        Token token;
+        if (DatabaseDescriptor.getInitialToken() != null)
+        {
+            logger_.debug("token manually specified as {}", DatabaseDescriptor.getInitialToken());
+            token = StorageService.getPartitioner().getTokenFactory().fromString(DatabaseDescriptor.getInitialToken());
+        }
+        else if (Schema.instance.getNonSystemTables().size() > 0)
+        {
+            // We are not bootstrapping, we are an initial node, getBalancedToken is not safe.
+            token = partitioner.getRandomToken();
+            logger_.warn("Generated random token " + token + ". Random tokens will result in an unbalanced ring; see http://wiki.apache.org/cassandra/Operation");
+        }
+        else
+        {
+            token = BootStrapper.getBalancedToken(tokenMetadata_, LoadBroadcaster.instance.getLoadInfo());
+        }
+
+        if (tokenMetadata_.getEndpoint(token) != null)
+            throw new ConfigurationException("Bootstraping to existing token " + token + " is not allowed (decommission/removetoken the old node first)");
+        return token;
     }
 
     public synchronized void joinRing() throws IOException, org.apache.cassandra.config.ConfigurationException
@@ -1648,8 +1665,13 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         if (Table.SYSTEM_TABLE.equals(tableName))
             return;
 
-        List<AntiEntropyService.RepairFuture> futures = new ArrayList<AntiEntropyService.RepairFuture>();
-        for (Range range : getLocalRanges(tableName))
+
+        Collection<Range> ranges = getLocalRanges(tableName);
+        int cmd = nextRepairCommand.incrementAndGet();
+        logger_.info("Starting repair command #{}, repairing {} ranges.", cmd, ranges.size());
+
+        List<AntiEntropyService.RepairFuture> futures = new ArrayList<AntiEntropyService.RepairFuture>(ranges.size());
+        for (Range range : ranges)
         {
             AntiEntropyService.RepairFuture future = forceTableRepair(range, tableName, columnFamilies);
             futures.add(future);
@@ -1681,7 +1703,9 @@ public class StorageService implements IEndpointStateChangeSubscriber, StorageSe
         }
 
         if (failedSession)
-            throw new IOException("Some repair session(s) failed (see log for details).");
+            throw new IOException("Repair command #" + cmd + ": some repair session(s) failed (see log for details).");
+        else
+            logger_.info("Repair command #{} completed successfully", cmd);
     }
 
     public void forceTableRepairPrimaryRange(final String tableName, final String... columnFamilies) throws IOException

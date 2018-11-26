@@ -211,6 +211,35 @@ public class ColumnFamilyStoreTest extends CleanupHelper
     }
 
     @Test
+    public void testLargeScan() throws IOException
+    {
+        RowMutation rm;
+        for (int i = 0; i < 100; i++)
+        {
+            rm = new RowMutation("Keyspace1", ByteBufferUtil.bytes("key" + i));
+            rm.add(new QueryPath("Indexed1", null, ByteBufferUtil.bytes("birthdate")), ByteBufferUtil.bytes(34L), 0);
+            rm.add(new QueryPath("Indexed1", null, ByteBufferUtil.bytes("notbirthdate")), ByteBufferUtil.bytes((long) (i % 2)), 0);
+            rm.applyUnsafe();
+        }
+
+        IndexExpression expr = new IndexExpression(ByteBufferUtil.bytes("birthdate"), IndexOperator.EQ, ByteBufferUtil.bytes(34L));
+        IndexExpression expr2 = new IndexExpression(ByteBufferUtil.bytes("notbirthdate"), IndexOperator.EQ, ByteBufferUtil.bytes(1L));
+        IndexClause clause = new IndexClause(Arrays.asList(expr, expr2), ByteBufferUtil.EMPTY_BYTE_BUFFER, 100);
+        IFilter filter = new IdentityQueryFilter();
+        IPartitioner p = StorageService.getPartitioner();
+        Range range = new Range(p.getMinimumToken(), p.getMinimumToken());
+        List<Row> rows = Table.open("Keyspace1").getColumnFamilyStore("Indexed1").scan(clause, range, filter);
+
+        assert rows != null;
+        assert rows.size() == 50 : rows.size();
+        Set<DecoratedKey> keys = new HashSet<DecoratedKey>();
+        // extra check that there are no duplicate results -- see https://issues.apache.org/jira/browse/CASSANDRA-2406
+        for (Row row : rows)
+            keys.add(row.key);
+        assert rows.size() == keys.size();
+    }
+
+    @Test
     public void testIndexDeletions() throws IOException
     {
         ColumnFamilyStore cfs = Table.open("Keyspace3").getColumnFamilyStore("Indexed1");
@@ -314,7 +343,7 @@ public class ColumnFamilyStoreTest extends CleanupHelper
 
         ColumnFamilyStore cfs = table.getColumnFamilyStore("Indexed2");
         ColumnDefinition old = cfs.metadata.getColumn_metadata().get(ByteBufferUtil.bytes("birthdate"));
-        ColumnDefinition cd = new ColumnDefinition(old.name, old.validator.getClass().getName(), IndexType.KEYS, "birthdate_index");
+        ColumnDefinition cd = new ColumnDefinition(old.name, old.getValidator().getClass().getName(), IndexType.KEYS, "birthdate_index");
         Future<?> future = cfs.addIndex(cd);
         future.get();
         // we had a bug (CASSANDRA-2244) where index would get created but not flushed -- check for that

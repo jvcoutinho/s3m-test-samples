@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.cloudifysource.dsl.cloud.CloudTemplateInstallerConfiguration;
 import org.cloudifysource.dsl.cloud.FileTransferModes;
 import org.cloudifysource.dsl.cloud.RemoteExecutionModes;
 import org.cloudifysource.dsl.cloud.ScriptLanguages;
@@ -115,6 +116,7 @@ public class InstallationDetails implements Cloneable {
 
 	private String authGroups;
 
+	private CloudTemplateInstallerConfiguration installerConfiguration = null;
 	// Relevant only for management machines
 	/* *********************************************** */
 
@@ -124,13 +126,18 @@ public class InstallationDetails implements Cloneable {
 	private String lusCommandlineArgs;
 	private String gsmCommandlineArgs;
 	private String gsaCommandlineArgs;
-	private String gscCommandlineArgs;
+	private String gscLrmiPortRange;
 
 	// management web service properties
 	private String restMaxMemory;
 	private String webuiMaxMemory;
 	private Integer restPort;
 	private Integer webuiPort;
+	
+	private boolean storageVolumeAttached = false;
+	private String storageFormatType;
+	private String storageDeviceName;
+	private String storageMountPath;
 
 	private boolean deleteRemoteDirectoryContents = false;
 
@@ -213,7 +220,9 @@ public class InstallationDetails implements Cloneable {
 				+ keyFile + ", localDir=" + localDir + ", remoteDir=" + remoteDir + ", isLus=" + isManagement
 				+ ", zones="
 				+ zones + ", extraRemoteEnvironmentVariables = " + extraRemoteEnvironmentVariables
-				+ ", authGroups=***]";
+				+ ", authGroups=***]" + ", storageVolumeAttached=" + storageVolumeAttached
+				+ ", storageFormatType=" + storageFormatType + ", storageDeviceName=" + storageDeviceName
+				+ ", storageMountPath=" + storageMountPath;
 	}
 
 	public String getKeyFile() {
@@ -441,12 +450,12 @@ public class InstallationDetails implements Cloneable {
 		this.gsaCommandlineArgs = gsaCommandlineArgs;
 	}
 
-	public String getGscCommandlineArgs() {
-		return gscCommandlineArgs;
+	public String getGscLrmiPortRange() {
+		return gscLrmiPortRange;
 	}
 
-	public void setGscCommandlineArgs(final String gscCommandlineArgs) {
-		this.gscCommandlineArgs = gscCommandlineArgs;
+	public void setGscLrmiPortRange(final String gscLrmiPortRange) {
+		this.gscLrmiPortRange = gscLrmiPortRange;
 	}
 
 	public Integer getRestPort() {
@@ -495,5 +504,46 @@ public class InstallationDetails implements Cloneable {
 
 	public void setDeleteRemoteDirectoryContents(final boolean deleteRemoteDirectoryContents) {
 		this.deleteRemoteDirectoryContents = deleteRemoteDirectoryContents;
+	}
+
+	public boolean isStorageVolumeAttached() {
+		return storageVolumeAttached;
+	}
+
+	public void setStorageVolumeAttached(final boolean storageVolumeAttached) {
+		this.storageVolumeAttached = storageVolumeAttached;
+	}
+
+	public String getStorageFormatType() {
+		return storageFormatType;
+	}
+
+	public void setStorageFormatType(final String storageFormatType) {
+		this.storageFormatType = storageFormatType;
+	}
+
+	public String getStorageDeviceName() {
+		return storageDeviceName;
+	}
+
+	public void setStorageDeviceName(final String storageDeviceName) {
+		this.storageDeviceName = storageDeviceName;
+	}
+
+	public String getStorageMountPath() {
+		return storageMountPath;
+	}
+
+	public void setStorageMountPath(final String storageMountPath) {
+		this.storageMountPath = storageMountPath;
+	}
+
+
+	public CloudTemplateInstallerConfiguration getInstallerConfiguration() {
+		return installerConfiguration;
+	}
+
+	public void setInstallerConfiguration(CloudTemplateInstallerConfiguration installerConfiguration) {
+		this.installerConfiguration = installerConfiguration;
 	}
 }

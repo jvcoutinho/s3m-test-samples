@@ -75,14 +75,44 @@ public class NodeCmd
         this.probe = probe;
     }
 
-    public enum NodeCommand
+    private enum NodeCommand
     {
-        RING, INFO, CFSTATS, SNAPSHOT, CLEARSNAPSHOT, VERSION, TPSTATS, FLUSH, DRAIN,
-        DECOMMISSION, MOVE, REMOVETOKEN, REPAIR, CLEANUP, COMPACT, SCRUB,
-        SETCACHECAPACITY, GETCOMPACTIONTHRESHOLD, SETCOMPACTIONTHRESHOLD, NETSTATS, CFHISTOGRAMS,
-        COMPACTIONSTATS, DISABLEGOSSIP, ENABLEGOSSIP, INVALIDATEKEYCACHE, INVALIDATEROWCACHE,
-        DISABLETHRIFT, ENABLETHRIFT, STATUSTHRIFT, JOIN, SETCOMPACTIONTHROUGHPUT, GETENDPOINTS,
-        REFRESH, GOSSIPINFO, UPGRADESSTABLES
+        CFHISTOGRAMS,
+        CFSTATS,
+        CLEANUP,
+        CLEARSNAPSHOT,
+        COMPACT,
+        COMPACTIONSTATS,
+        DECOMMISSION,
+        DISABLEGOSSIP,
+        DISABLETHRIFT,
+        DRAIN,
+        ENABLEGOSSIP,
+        ENABLETHRIFT,
+        FLUSH,
+        GETCOMPACTIONTHRESHOLD,
+        GETENDPOINTS,
+        GOSSIPINFO,
+        INFO,
+        INVALIDATEKEYCACHE,
+        INVALIDATEROWCACHE,
+        JOIN,
+        MOVE,
+        NETSTATS,
+        REFRESH,
+        REMOVETOKEN,
+        REPAIR,
+        RING,
+        SCRUB,
+        SETCACHECAPACITY,
+        SETCOMPACTIONTHRESHOLD,
+        SETCOMPACTIONTHROUGHPUT,
+        SNAPSHOT,
+        STATUSTHRIFT,
+        STOP,
+        TPSTATS,
+        UPGRADESSTABLES,
+        VERSION,
     }
 
     
@@ -138,6 +168,7 @@ public class NodeCmd
         // Four args
         addCmdHelp(header, "setcachecapacity <keyspace> <cfname> <keycachecapacity> <rowcachecapacity>", "Set the key and row cache capacities of a given column family");
         addCmdHelp(header, "setcompactionthreshold <keyspace> <cfname> <minthreshold> <maxthreshold>", "Set the min and max compaction thresholds for a given column family");
+        addCmdHelp(header, "stop <compaction_type>", "Supported types are COMPACTION, VALIDATION, KEY_CACHE_SAVE, ROW_CACHE_SAVE,CLEANUP, SCRUB, INDEX_BUILD");
 
         String usage = String.format("java %s --host <arg> <command>%n", NodeCmd.class.getName());
         hf.printHelp(usage, "", options, "");
@@ -716,6 +747,11 @@ public class NodeCmd
                     break;
 
                 case GOSSIPINFO : nodeCmd.printGossipInfo(System.out); break;
+
+                case STOP:
+                    if (arguments.length != 1) { badUse("stop requires a type."); }
+                    probe.stop(arguments[0].toUpperCase());
+                    break;
 
                 default :
                     throw new RuntimeException("Unreachable code.");

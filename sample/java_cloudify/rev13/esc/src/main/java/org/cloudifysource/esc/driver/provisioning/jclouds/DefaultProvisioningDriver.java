@@ -1,17 +1,14 @@
 /*******************************************************************************
  * Copyright (c) 2011 GigaSpaces Technologies Ltd. All rights reserved
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *       http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
  *******************************************************************************/
 package org.cloudifysource.esc.driver.provisioning.jclouds;
 
@@ -25,17 +22,21 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 
+import org.apache.commons.lang.StringUtils;
 import org.cloudifysource.dsl.cloud.Cloud;
-import org.cloudifysource.dsl.cloud.CloudTemplate;
 import org.cloudifysource.dsl.cloud.FileTransferModes;
+import org.cloudifysource.dsl.cloud.compute.ComputeTemplate;
+import org.cloudifysource.dsl.rest.response.ControllerDetails;
 import org.cloudifysource.esc.driver.provisioning.BaseProvisioningDriver;
 import org.cloudifysource.esc.driver.provisioning.CloudProvisioningException;
 import org.cloudifysource.esc.driver.provisioning.CustomServiceDataAware;
 import org.cloudifysource.esc.driver.provisioning.MachineDetails;
+import org.cloudifysource.esc.driver.provisioning.ManagementLocator;
 import org.cloudifysource.esc.driver.provisioning.ProvisioningDriver;
 import org.cloudifysource.esc.driver.provisioning.context.ProvisioningDriverClassContextAware;
 import org.cloudifysource.esc.installer.InstallerException;
 import org.cloudifysource.esc.jclouds.JCloudsDeployer;
+import org.jclouds.compute.ComputeServiceContext;
 import org.jclouds.compute.domain.ComputeMetadata;
 import org.jclouds.compute.domain.NodeMetadata;
 import org.jclouds.domain.LoginCredentials;
@@ -43,17 +44,16 @@ import org.jclouds.domain.LoginCredentials;
 import com.google.common.base.Predicate;
 
 /**************
- * A jclouds-based CloudifyProvisioning implementation. Uses the JClouds Compute
- * Context API to provision an image with linux installed and ssh available. If
- * GigaSpaces is not already installed on the new machine, this class will
- * install gigaspaces and run the agent.
- * 
+ * A jclouds-based CloudifyProvisioning implementation. Uses the JClouds Compute Context API to provision an image with
+ * linux installed and ssh available. If GigaSpaces is not already installed on the new machine, this class will install
+ * gigaspaces and run the agent.
+ *
  * @author barakme, noak
  * @since 2.0.0
  */
 public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 		ProvisioningDriver, ProvisioningDriverClassContextAware,
-		CustomServiceDataAware {
+		CustomServiceDataAware, ManagementLocator {
 
 	private static final String DEFAULT_EC2_WINDOWS_USERNAME = "Administrator";
 	private static final int CLOUD_NODE_STATE_POLLING_INTERVAL = 2000;
@@ -121,15 +121,15 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 
 	@Override
 	protected MachineDetails createServer(String serverName, long endTime,
-			CloudTemplate template) throws CloudProvisioningException,
+			ComputeTemplate template) throws CloudProvisioningException,
 			TimeoutException {
 		return createServer(endTime, serverName, null);
 	}
-	
+
 	private MachineDetails createServer(final long end, final String groupName,
 			final String locationIdOverride) throws CloudProvisioningException {
 
-		final CloudTemplate cloudTemplate = this.cloud.getTemplates().get(
+		final ComputeTemplate cloudTemplate = this.cloud.getCloudCompute().getTemplates().get(
 				this.cloudTemplateName);
 		String locationId;
 		if (locationIdOverride == null) {
@@ -196,7 +196,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 
 	private void handleEC2WindowsCredentials(final long end,
 			final NodeMetadata node, final MachineDetails machineDetails,
-			final CloudTemplate cloudTemplate) throws FileNotFoundException,
+			final ComputeTemplate cloudTemplate) throws FileNotFoundException,
 			InterruptedException, TimeoutException, CloudProvisioningException {
 		File pemFile = null;
 
@@ -276,17 +276,15 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 	}
 
 	/*********
-	 * Looks for a free server name by appending a counter to the pre-calculated
-	 * server name prefix. If the max counter value is reached, code will loop
-	 * back to 0, so that previously used server names will be reused.
-	 * 
+	 * Looks for a free server name by appending a counter to the pre-calculated server name prefix. If the max counter
+	 * value is reached, code will loop back to 0, so that previously used server names will be reused.
+	 *
 	 * @return the server name.
 	 * @throws CloudProvisioningException
 	 *             if no free server name could be found.
 	 */
 	private String createNewServerName() throws CloudProvisioningException {
 
-		// TODO - this code breaks cloudstack - not sure why yet
 		String serverName = null;
 		int attempts = 0;
 		boolean foundFreeName = false;
@@ -327,14 +325,18 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 		logger.fine("DefaultCloudProvisioning: startMachine - management == "
 				+ management);
 
-		final String managementMachinePrefix = this.serverNamePrefix;
+		final String managementMachinePrefix = this.cloud.getProvider().getManagementGroup();
+		if (StringUtils.isBlank(managementMachinePrefix)) {
+			throw new CloudProvisioningException(
+					"The management group name is missing - can't locate existing servers!");
+		}
 
 		// first check if management already exists
-		final MachineDetails[] existingManagementServers = getExistingManagementServers(managementMachinePrefix);
+		final MachineDetails[] existingManagementServers = getExistingManagementServers();
 		if (existingManagementServers.length > 0) {
 			logger.info("Found existing servers matching the name: "
 					+ managementMachinePrefix);
-			for (MachineDetails machineDetails : existingManagementServers) {
+			for (final MachineDetails machineDetails : existingManagementServers) {
 				final String existingManagementServerDescription = createManagementServerDescription(machineDetails);
 				logger.info(existingManagementServerDescription);
 			}
@@ -373,34 +375,24 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 		boolean stopResult = false;
 
 		logger.info("Stop Machine - machineIp: " + serverIp);
-		final Long previousRequest = stoppingMachines.get(serverIp);
-		if (previousRequest != null
-				&& System.currentTimeMillis() - previousRequest < MULTIPLE_SHUTDOWN_REQUEST_IGNORE_TIMEOUT) {
-			logger.fine("Machine " + serverIp
-					+ " is already stopping. Ignoring this shutdown request");
-			stopResult = false;
+
+		logger.info("Looking up cloud server with IP: " + serverIp);
+		final NodeMetadata server = deployer.getServerWithIP(serverIp);
+		if (server != null) {
+			logger.info("Found server: "
+					+ server.getId()
+					+ ". Shutting it down and waiting for shutdown to complete");
+			deployer.shutdownMachineAndWait(server.getId(), unit, duration);
+			logger.info("Server: " + server.getId()
+					+ " shutdown has finished.");
+			stopResult = true;
 		} else {
-			// TODO - add a task that cleans up this map
-			stoppingMachines.put(serverIp, System.currentTimeMillis());
-			logger.info("Scale IN -- " + serverIp + " --");
-			logger.info("Looking up cloud server with IP: " + serverIp);
-			final NodeMetadata server = deployer.getServerWithIP(serverIp);
-			if (server != null) {
-				logger.info("Found server: "
-						+ server.getId()
-						+ ". Shutting it down and waiting for shutdown to complete");
-				deployer.shutdownMachineAndWait(server.getId(), unit, duration);
-				logger.info("Server: " + server.getId()
-						+ " shutdown has finished.");
-				stopResult = true;
-			} else {
-				logger.log(
-						Level.SEVERE,
-						"Recieved scale in request for machine with ip "
-								+ serverIp
-								+ " but this IP could not be found in the Cloud server list");
-				stopResult = false;
-			}
+			logger.log(
+					Level.SEVERE,
+					"Recieved scale in request for machine with ip "
+							+ serverIp
+							+ " but this IP could not be found in the Cloud server list");
+			stopResult = false;
 		}
 
 		return stopResult;
@@ -411,7 +403,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 			CloudProvisioningException {
 
 		initDeployer(this.cloud);
-		final MachineDetails[] managementServers = getExistingManagementServers(this.serverNamePrefix);
+		final MachineDetails[] managementServers = getExistingManagementServers();
 
 		if (managementServers.length == 0) {
 			throw new CloudProvisioningException(
@@ -427,30 +419,42 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 		this.deployer.shutdownMachinesWithIPs(machineIps);
 	}
 
-	private MachineDetails[] getExistingManagementServers(
-			final String managementMachinePrefix) {
-		final Set<? extends NodeMetadata> existingManagementServers = this.deployer
-				.getServers(new Predicate<ComputeMetadata>() {
+	/*
+	 * (non-Javadoc)
+	 *
+	 * @see org.cloudifysource.esc.driver.provisioning.jclouds.ManagementLocator#getExistingManagementServers()
+	 */
+	@Override
+	public MachineDetails[] getExistingManagementServers() throws CloudProvisioningException {
+		final String managementMachinePrefix = this.serverNamePrefix;
+		Set<? extends NodeMetadata> existingManagementServers = null;
+		try {
+			existingManagementServers = this.deployer
+					.getServers(new Predicate<ComputeMetadata>() {
 
-					@Override
-					public boolean apply(final ComputeMetadata input) {
-						final NodeMetadata node = (NodeMetadata) input;
-						if (node.getGroup() == null) {
+						@Override
+						public boolean apply(final ComputeMetadata input) {
+							final NodeMetadata node = (NodeMetadata) input;
+							if (node.getGroup() == null) {
+								return false;
+							}
+							// only running or pending nodes are interesting
+							if (node.getStatus() == NodeMetadata.Status.RUNNING
+									|| node.getStatus() == NodeMetadata.Status.PENDING) {
+								return node
+										.getGroup()
+										.toLowerCase()
+										.startsWith(
+												managementMachinePrefix
+														.toLowerCase());
+							}
 							return false;
 						}
-						// only running or pending nodes are interesting
-						if (node.getStatus() == NodeMetadata.Status.RUNNING
-								|| node.getStatus() == NodeMetadata.Status.PENDING) {
-							return node
-									.getGroup()
-									.toLowerCase()
-									.startsWith(
-											managementMachinePrefix
-													.toLowerCase());
-						}
-						return false;
-					}
-				});
+					});
+
+		} catch (final Exception e) {
+			throw new CloudProvisioningException("Failed to read existing management servers: " + e.getMessage(), e);
+		}
 
 		final MachineDetails[] result = new MachineDetails[existingManagementServers
 				.size()];
@@ -465,6 +469,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 		return result;
 	}
 
+	@Override
 	protected void handleProvisioningFailure(
 			final int numberOfManagementMachines, final int numberOfErrors,
 			final Exception firstCreationException,
@@ -492,7 +497,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 	}
 
 	private MachineDetails createMachineDetailsFromNode(final NodeMetadata node) {
-		final CloudTemplate template = this.cloud.getTemplates().get(
+		final ComputeTemplate template = this.cloud.getCloudCompute().getTemplates().get(
 				this.cloudTemplateName);
 
 		final MachineDetails md = createMachineDetailsForTemplate(template);
@@ -522,7 +527,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 	}
 
 	private String createMachineUsername(final NodeMetadata node,
-			final CloudTemplate template) {
+			final ComputeTemplate template) {
 
 		// Template configuration takes precedence.
 		if (template.getUsername() != null) {
@@ -541,7 +546,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 	}
 
 	private String createMachinePassword(final NodeMetadata node,
-			final CloudTemplate template) {
+			final ComputeTemplate template) {
 
 		// Template configuration takes precedence.
 		if (template.getPassword() != null) {
@@ -569,7 +574,7 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 			throws IOException {
 		logger.fine("Creating JClouds context deployer with user: "
 				+ cloud.getUser().getUser());
-		final CloudTemplate cloudTemplate = cloud.getTemplates().get(
+		final ComputeTemplate cloudTemplate = cloud.getCloudCompute().getTemplates().get(
 				cloudTemplateName);
 
 		logger.fine("Cloud Template: " + cloudTemplateName + ". Details: "
@@ -590,5 +595,22 @@ public class DefaultProvisioningDriver extends BaseProvisioningDriver implements
 	@Override
 	public void setCustomDataFile(final File customDataFile) {
 		logger.info("Received custom data file: " + customDataFile);
+	}
+
+	@Override
+	public MachineDetails[] getExistingManagementServers(final ControllerDetails[] controllers)
+			throws CloudProvisioningException, UnsupportedOperationException {
+		throw new UnsupportedOperationException(
+				"Locating management servers from file information is not supported in this cloud driver");
+	}
+	
+	@Override
+	public Object getComputeContext() {
+		ComputeServiceContext computeContext = null;
+		if (deployer != null) {
+			computeContext = deployer.getContext();
+		}
+		
+		return computeContext;
 	}
 }

@@ -5,10 +5,12 @@ import org.junit.internal.matchers.CombinableMatcher;
 import org.junit.internal.matchers.Each;
 import org.junit.internal.matchers.IsCollectionContaining;
 import org.junit.internal.matchers.StringContains;
+import org.junit.internal.matchers.CauseMatcher;
 
 /**
  * Convenience import class: these are useful matchers for use with the assertThat method, but they are
  * not currently included in the basic CoreMatchers class from hamcrest.
+ * @since 4.4
  */
 public class JUnitMatchers {
 	/**
@@ -80,4 +82,12 @@ public class JUnitMatchers {
 	public static <T> CombinableMatcher<T> either(Matcher<T> matcher) {
 		return new CombinableMatcher<T>(matcher);
 	}	
+	
+	/**
+	 * @param causeMatcher
+	 * @return a matcher matching the cause of the exception with the given {@code causeMatcher}
+	 */
+	public static Matcher<Throwable> causedBy(final Matcher<? super Throwable> causeMatcher) {
+		return new CauseMatcher(causeMatcher);
+	}		
 }

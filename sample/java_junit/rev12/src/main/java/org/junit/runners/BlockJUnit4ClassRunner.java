@@ -2,6 +2,7 @@ package org.junit.runners;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.junit.After;
@@ -9,8 +10,8 @@ import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.Test.None;
-import org.junit.experimental.interceptor.Interceptor;
-import org.junit.experimental.interceptor.StatementInterceptor;
+import org.junit.experimental.interceptor.Rule;
+import org.junit.experimental.interceptor.MethodRule;
 import org.junit.internal.AssumptionViolatedException;
 import org.junit.internal.runners.model.EachTestNotifier;
 import org.junit.internal.runners.model.MultipleFailureException;
@@ -114,13 +115,22 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 		validateInstanceMethods(errors);
 		validateFields(errors);
 	}
-
+	
+	/**
+	 * Adds to {@code errors} if the test class has more than one constructor,
+	 * or if the constructor takes parameters.  Override if a subclass requires
+	 * different validation rules.
+	 */
 	protected void validateConstructor(List<Throwable> errors) {
 		validateOnlyOneConstructor(errors);
 		validateZeroArgConstructor(errors);
 	}
 
-	private void validateOnlyOneConstructor(List<Throwable> errors) {
+	/**
+	 * Adds to {@code errors} if the test class has more than one constructor
+	 * (do not override)
+	 */
+	protected void validateOnlyOneConstructor(List<Throwable> errors) {
 		if (!hasOneConstructor()) {
 			String gripe= "Test class should have exactly one public constructor";
 			errors.add(new Exception(gripe));
@@ -130,9 +140,9 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 	/**
 	 * Adds to {@code errors} if the test class's single constructor
 	 * takes parameters
+	 * (do not override)
 	 */
 	protected void validateZeroArgConstructor(List<Throwable> errors) {
-		// TODO (May 26, 2009 10:48:26 PM): don't override this
 		if (hasOneConstructor()
 				&& !(getTestClass().getOnlyConstructor().getParameterTypes().length == 0)) {
 			String gripe= "Test class should have exactly one public zero-argument constructor";
@@ -159,12 +169,12 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 	}
 	
 	protected void validateFields(List<Throwable> errors) {
-		for (FrameworkField each : interceptorFields())
+		for (FrameworkField each : ruleFields())
 			validateInterceptorField(each.getField(), errors);
 	}
 
 	private void validateInterceptorField(Field field, List<Throwable> errors) {
-		if (!StatementInterceptor.class.isAssignableFrom(field.getType()))
+		if (!MethodRule.class.isAssignableFrom(field.getType()))
 			errors.add(new Exception("Field " + field.getName()
 					+ " must implement StatementInterceptor"));
 		if (!Modifier.isPublic(field.getModifiers()))
@@ -241,7 +251,7 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 		Statement statement= methodInvoker(method, test);
 		statement= possiblyExpectingExceptions(method, test, statement);
 		statement= withPotentialTimeout(method, test, statement);
-		statement= withInterceptors(method, test, statement);
+		statement= withRules(method, test, statement);
 		statement= withBefores(method, test, statement);
 		statement= withAfters(method, test, statement);
 		return statement;
@@ -263,7 +273,10 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 	 * has the {@code expecting} attribute, return normally only if {@code next}
 	 * throws an exception of the correct type, and throw an exception
 	 * otherwise.
+	 * 
+	 * @deprecated Will be private soon: use Interceptors instead
 	 */
+	@Deprecated
 	protected Statement possiblyExpectingExceptions(FrameworkMethod method,
 			Object test, Statement next) {
 		Test annotation= method.getAnnotation(Test.class);
@@ -275,7 +288,10 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 	 * Returns a {@link Statement}: if {@code method}'s {@code @Test} annotation
 	 * has the {@code timeout} attribute, throw an exception if {@code next}
 	 * takes more than the specified number of milliseconds.
+	 * 
+	 * @deprecated Will be private soon: use Interceptors instead
 	 */
+	@Deprecated
 	protected Statement withPotentialTimeout(FrameworkMethod method,
 			Object test, Statement next) {
 		long timeout= getTimeout(method.getAnnotation(Test.class));
@@ -286,33 +302,15 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 	 * Returns a {@link Statement}: run all non-overridden {@code @Before}
 	 * methods on this class and superclasses before running {@code next}; if
 	 * any throws an Exception, stop execution and pass the exception on.
+	 * 
+	 * @deprecated Will be private soon: use Interceptors instead
 	 */
+	@Deprecated
 	protected Statement withBefores(FrameworkMethod method, Object target,
 			Statement statement) {
-		List<FrameworkMethod> befores= getTestClass().getAnnotatedMethods(
-				Before.class);
+		List<FrameworkMethod> befores= getTestClass().getAnnotatedMethods(Before.class);
 		return befores.isEmpty() ? statement : 
 			new RunBefores(statement, befores, target);
-	}
-	
-	protected Statement withInterceptors(FrameworkMethod method, Object test,
-			Statement statement) {
-		// TODO (May 26, 2009 11:16:13 PM): outsource to a class?
-		Statement result= statement;
-		for (FrameworkField each : interceptorFields())
-			try {
-				StatementInterceptor interceptor= (StatementInterceptor) each
-						.get(test);
-				result= interceptor.intercept(result, method);
-			} catch (IllegalAccessException e) {
-				throw new RuntimeException(
-						"How did getFields return a field we couldn't access?");
-			}
-		return result;
-	}
-
-	private List<FrameworkField> interceptorFields() {
-		return getTestClass().getAnnotatedFields(Interceptor.class);
 	}
 
 	/**
@@ -321,16 +319,48 @@ public class BlockJUnit4ClassRunner extends ParentRunner<FrameworkMethod> {
 	 * After methods are always executed: exceptions thrown by previous steps
 	 * are combined, if necessary, with exceptions from After methods into a
 	 * {@link MultipleFailureException}.
+	 * 
+	 * @deprecated Will be private soon: use Interceptors instead
 	 */
+	@Deprecated
 	protected Statement withAfters(FrameworkMethod method, Object target,
 			Statement statement) {
-		// TODO (May 11, 2009 11:28:21 PM):
-		// withBefores/withAfters/withBeforeClass/withAfterClass is a lot of
-		// duplication.
-		List<FrameworkMethod> afters= getTestClass().getAnnotatedMethods(
-				After.class);
+		List<FrameworkMethod> afters= getTestClass().getAnnotatedMethods(After.class);
 		return afters.isEmpty() ? statement :
 			new RunAfters(statement, afters, target);
+	}
+	
+	private Statement withRules(FrameworkMethod method, Object target,
+			Statement statement) {
+		Statement result= statement;
+		for (MethodRule each : rules(target))
+			result= each.apply(result, method, target);
+		return result;
+	}
+	
+	/**
+	 * @return the MethodRules that can transform the block
+	 * that runs each method in the tested class.
+	 */
+	protected List<MethodRule> rules(Object test) {
+		List<MethodRule> results= new ArrayList<MethodRule>();
+		for (FrameworkField each : ruleFields())
+			results.add(createRule(test, each));
+		return results;
+	}
+
+	private List<FrameworkField> ruleFields() {
+		return getTestClass().getAnnotatedFields(Rule.class);
+	}
+
+	private MethodRule createRule(Object test,
+			FrameworkField each) {
+		try {
+			return (MethodRule) each.get(test);
+		} catch (IllegalAccessException e) {
+			throw new RuntimeException(
+					"How did getFields return a field we couldn't access?");
+		}
 	}
 
 	protected EachTestNotifier makeNotifier(FrameworkMethod method,
